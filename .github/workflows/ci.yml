@@ -31,7 +31,17 @@ jobs:
       - run: python -m pip install --quiet --upgrade pip
       - run: python -m pip install --quiet -e ".[dev]"
       - run: python -m compileall -q src tests
-      - run: ruff check .
+      - name: Run Ruff
+        id: ruff
+        run: |
+          set -o pipefail
+          ruff check . 2>&1 | tee ruff-output.txt
+      - name: Upload Ruff diagnostics
+        if: failure() && steps.ruff.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue8-ruff-diagnostics
+          path: ruff-output.txt
       - run: mypy src
       - run: pytest
 

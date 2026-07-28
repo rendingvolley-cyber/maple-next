@@ -257,7 +257,10 @@ def test_probe_08_apply_selection_exception_rolls_back_all_canonical_writes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository, application, job = _setup_request(tmp_path)
-    assert application.apply_selection_advice_result(_valid_result(job)) is ResultDisposition.APPLIED
+    assert (
+        application.apply_selection_advice_result(_valid_result(job))
+        is ResultDisposition.APPLIED
+    )
     before = _session_signature(_active_session(repository))
     before_rows = _row_count(repository, "applied_selections")
 

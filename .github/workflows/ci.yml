@@ -31,7 +31,7 @@ jobs:
       - name: Run Ruff and capture diagnostics
         id: ruff
         continue-on-error: true
-        run: ruff check . > ruff-output.txt 2>&1
+        run: ruff check . --fix --diff > ruff-output.txt 2>&1
       - name: Upload Ruff diagnostics
         if: steps.ruff.outcome == 'failure'
         uses: actions/upload-artifact@v4

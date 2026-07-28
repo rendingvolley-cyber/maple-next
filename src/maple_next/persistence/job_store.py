@@ -69,6 +69,18 @@ class JobStoreMixin(StoreBase):
             (status.value, self._now(), job_id),
         )
 
+    def mark_job_in_flight(self, job_id: str) -> None:
+        """Transition to IN_FLIGHT and record exactly one dispatch attempt."""
+
+        self.connection.execute(
+            """
+            UPDATE async_jobs
+            SET status = ?, dispatch_count = dispatch_count + 1, updated_at = ?
+            WHERE job_id = ?
+            """,
+            (JobStatus.IN_FLIGHT.value, self._now(), job_id),
+        )
+
     def set_job_status_for_test(self, job_id: str, status: JobStatus) -> None:
         """Synthetic-only transition used to model a process crash boundary."""
 

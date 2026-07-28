@@ -18,13 +18,14 @@ class SelectionStoreMixin(StoreBase):
         selected_three: tuple[str, str, str],
         lead: str,
         backline: tuple[str, str],
+        source_type: str = "MOCK",
     ) -> None:
         self.connection.execute(
             """
             INSERT INTO selection_advices (
                 advice_id, session_id, job_id, selected_three_json,
-                lead, backline_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                lead, backline_json, source_type, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 advice_id,
@@ -33,6 +34,7 @@ class SelectionStoreMixin(StoreBase):
                 json.dumps(selected_three, ensure_ascii=False),
                 lead,
                 json.dumps(backline, ensure_ascii=False),
+                source_type,
                 self._now(),
             ),
         )
@@ -50,6 +52,7 @@ class SelectionStoreMixin(StoreBase):
             "selected_three": (selected_three[0], selected_three[1], selected_three[2]),
             "lead": str(row["lead"]),
             "backline": (backline[0], backline[1]),
+            "source_type": str(row["source_type"]),
         }
 
     def append_applied_selection(

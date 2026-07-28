@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from maple_next.domain.enums import ActionType, HpBucket
 from maple_next.ui.controller import OperatorView, SelectionFlowController, TurnFactsView
+from maple_next.ui.trusted_input import TrustedSendButton
 
 _CTA_LABELS = {
     "CREATE_NEW_MATCH": "NEW MATCH",
@@ -124,6 +125,7 @@ class MapleMainWindow(QMainWindow):
 
         self._build_selection_facts_group()
         self._build_mock_advice_group()
+        self._build_gemini_send_group()
         self._build_advice_display_group()
         self._build_actual_selection_group()
         self._build_battle_ready_group()
@@ -173,11 +175,28 @@ class MapleMainWindow(QMainWindow):
         layout.addRow(self.mock_submit_button)
         self._root_layout.addWidget(self.mock_group)
 
+    def _build_gemini_send_group(self) -> None:
+        self.gemini_group = QGroupBox("Gemini Selection Advice — 人間による明示送信")
+        layout = QVBoxLayout(self.gemini_group)
+        helper = QLabel(
+            "確認済みの自分6体・相手6体をそのままGeminiへ送信します。"
+            "自動送信・自動retryはありません。"
+        )
+        helper.setWordWrap(True)
+        layout.addWidget(helper)
+        self.gemini_send_button = TrustedSendButton(
+            "SEND SELECTION TO GEMINI", self._on_trusted_send_to_gemini
+        )
+        layout.addWidget(self.gemini_send_button)
+        self._root_layout.addWidget(self.gemini_group)
+
     def _build_advice_display_group(self) -> None:
-        self.advice_group = QGroupBox("受領したSelection Advice（MOCK）")
+        self.advice_group = QGroupBox("受領したSelection Advice")
         layout = QFormLayout(self.advice_group)
+        self.advice_source_label = QLabel()
         self.advice_three_label = QLabel()
         self.advice_lead_label = QLabel()
+        layout.addRow("提供元", self.advice_source_label)
         layout.addRow("提案3体", self.advice_three_label)
         layout.addRow("提案先発", self.advice_lead_label)
         self._root_layout.addWidget(self.advice_group)
@@ -382,8 +401,17 @@ class MapleMainWindow(QMainWindow):
                 field.setText(value)
 
         self.mock_group.setVisible(projection.primary_cta == "REQUEST_SELECTION_ADVICE")
+        self.gemini_group.setVisible(
+            self._controller.gemini_send_available
+            and projection.primary_cta == "REQUEST_SELECTION_ADVICE"
+        )
+        self.gemini_send_button.setEnabled(
+            projection.primary_cta == "REQUEST_SELECTION_ADVICE"
+            and projection.provider_send_enabled
+        )
         self.advice_group.setVisible(projection.current_selection_advice_id is not None)
         if current.advice is not None:
+            self.advice_source_label.setText(current.advice.source_type)
             self.advice_three_label.setText(" / ".join(current.advice.selected_three))
             self.advice_lead_label.setText(current.advice.lead)
         self.actual_group.setVisible(projection.primary_cta == "APPLY_SELECTION")
@@ -614,6 +642,10 @@ class MapleMainWindow(QMainWindow):
         view = self._controller.submit_mock_advice(
             selected, self.mock_lead_box.currentText()
         )
+        self.render_view(view)
+
+    def _on_trusted_send_to_gemini(self) -> None:
+        view = self._controller.send_selection_advice_to_gemini(on_result=self.render_view)
         self.render_view(view)
 
     def _on_apply(self, _checked: bool = False) -> None:

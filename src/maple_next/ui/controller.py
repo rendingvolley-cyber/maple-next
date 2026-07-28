@@ -12,6 +12,7 @@ from maple_next.domain.enums import ActionType, HpBucket, ResultDisposition
 from maple_next.domain.models import AppliedSelectionSnapshot
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
+from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter, describe_gemini_failure
 
 
 class OperatorInputError(ValueError):
@@ -22,6 +23,7 @@ class OperatorInputError(ValueError):
 class AdviceView:
     selected_three: tuple[str, str, str]
     lead: str
+    source_type: str = "MOCK"
     is_mock: bool = True
 
 
@@ -225,18 +227,22 @@ class SelectionFlowController:
         repository: SQLiteRepository,
         mock_adapter: MockSelectionAdviceAdapter,
         mock_turn_adapter: MockTurnAdviceAdapter | None = None,
+        gemini_adapter: GeminiSelectionAdviceAdapter | None = None,
     ) -> None:
         self._application = application
         self._repository = repository
         self._mock_adapter = mock_adapter
         self._mock_turn_adapter = mock_turn_adapter or MockTurnAdviceAdapter()
+        self._gemini_adapter = gemini_adapter
         self._error_message: str | None = None
 
     @property
     def network_call_count(self) -> int:
+        gemini_count = self._gemini_adapter.network_call_count if self._gemini_adapter else 0
         return (
             self._mock_adapter.network_call_count
             + self._mock_turn_adapter.network_call_count
+            + gemini_count
         )
 
     def refresh(self) -> OperatorView:
@@ -259,9 +265,12 @@ class SelectionFlowController:
             stored_advice = self._repository.get_selection_advice(
                 projection.current_selection_advice_id
             )
+            source_type = cast(str, stored_advice.get("source_type", "MOCK"))
             advice = AdviceView(
                 selected_three=cast(tuple[str, str, str], stored_advice["selected_three"]),
                 lead=cast(str, stored_advice["lead"]),
+                source_type=source_type,
+                is_mock=source_type != "GEMINI",
             )
         if projection.current_applied_selection_id is not None:
             stored_selection = self._repository.get_applied_selection(
@@ -373,6 +382,65 @@ class SelectionFlowController:
             self._error_message = "MOCK Selection Adviceの保存に失敗しました。"
         else:
             self._error_message = None
+        return self.refresh()
+
+    @property
+    def gemini_send_available(self) -> bool:
+        return self._gemini_adapter is not None
+
+    def send_selection_advice_to_gemini(
+        self,
+        *,
+        on_result: Callable[[OperatorView], None],
+    ) -> OperatorView:
+        """Human-only explicit send. Must only be invoked from a trusted gate.
+
+        Creates exactly one immutable job, dispatches exactly one transport
+        call off the UI thread, and never auto-applies or auto-retries. The
+        provider result — success or failure — arrives later via
+        ``on_result`` once the strict binding contract has been applied (or
+        rejected) on the UI thread.
+        """
+
+        current = self.refresh()
+        if self._gemini_adapter is None:
+            self._error_message = "Gemini adapterが設定されていません。"
+            return self.refresh()
+        if current.projection.session_state != "SELECTION_OPEN":
+            self._error_message = "Selection factsが確認済みのSELECTION_OPENでのみ送信できます。"
+            return self.refresh()
+        if not current.projection.provider_send_enabled:
+            self._error_message = "現在はGeminiへ送信できません。"
+            return self.refresh()
+
+        callback_already_ran = False
+
+        def handle_applied(disposition: ResultDisposition) -> None:
+            nonlocal callback_already_ran
+            callback_already_ran = True
+            if disposition is not ResultDisposition.APPLIED:
+                self._error_message = "Gemini Selection Adviceを適用できませんでした。"
+            else:
+                self._error_message = None
+            on_result(self.refresh())
+
+        def handle_failed(reason: str) -> None:
+            nonlocal callback_already_ran
+            callback_already_ran = True
+            self._error_message = describe_gemini_failure(reason)
+            on_result(self.refresh())
+
+        try:
+            self._gemini_adapter.send(
+                self._application,
+                on_applied=handle_applied,
+                on_failed=handle_failed,
+            )
+        except DomainError as error:
+            self._error_message = _domain_message(error)
+        else:
+            if not callback_already_ran:
+                self._error_message = None
         return self.refresh()
 
     def apply_selection(

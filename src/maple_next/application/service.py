@@ -164,19 +164,52 @@ class BattleApplication:
             self.repository.audit_result(result, ResultDisposition.APPLIED, "BINDING_ACCEPTED")
         return ResultDisposition.APPLIED
 
-    def apply_selection(self, *, human_confirmed: bool) -> AppliedSelectionSnapshot:
+    def apply_selection(
+        self,
+        *,
+        selected_three: tuple[str, str, str],
+        lead: str,
+        human_confirmed: bool,
+    ) -> AppliedSelectionSnapshot:
         if not human_confirmed:
             raise DomainError("HUMAN_APPLY_REQUIRED")
+
         with self.repository.transaction():
             session = self._require_session(BattleState.SELECTION_ADVICE_READY)
             if session.current_selection_advice_id is None:
                 raise DomainError("CURRENT_SELECTION_ADVICE_REQUIRED")
-            advice = self.repository.get_selection_advice(session.current_selection_advice_id)
+            if session.current_reviewed_selection_id is None:
+                raise DomainError("REVIEWED_SELECTION_UNAVAILABLE")
+
+            try:
+                selection_facts = self.repository.get_selection_facts(
+                    session.current_reviewed_selection_id
+                )
+            except KeyError as exc:
+                raise DomainError("REVIEWED_SELECTION_UNAVAILABLE") from exc
+
+            if len(selected_three) != 3:
+                raise DomainError("SELECTED_THREE_MUST_HAVE_EXACTLY_THREE")
+
+            typed_three = (
+                selected_three[0],
+                selected_three[1],
+                selected_three[2],
+            )
+            if len(set(typed_three)) != 3:
+                raise DomainError("DUPLICATE_SELECTION")
+            if any(name not in selection_facts.self_team for name in typed_three):
+                raise DomainError("SELECTION_OUTSIDE_REVIEWED_TEAM")
+            if lead not in typed_three:
+                raise DomainError("LEAD_NOT_IN_SELECTED_THREE")
+
+            backline_values = tuple(name for name in typed_three if name != lead)
+            backline = (backline_values[0], backline_values[1])
             snapshot = AppliedSelectionSnapshot(
                 applied_selection_id=str(uuid4()),
-                selected_three=advice["selected_three"],
-                lead=advice["lead"],
-                backline=advice["backline"],
+                selected_three=typed_three,
+                lead=lead,
+                backline=backline,
                 source_advice_id=session.current_selection_advice_id,
             )
             self.repository.append_applied_selection(session.session_id, snapshot)

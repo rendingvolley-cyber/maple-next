@@ -31,17 +31,7 @@ jobs:
       - run: python -m pip install --quiet --upgrade pip
       - run: python -m pip install --quiet -e ".[dev]"
       - run: python -m compileall -q src tests
-      - name: Run Ruff
-        id: ruff
-        run: |
-          set -o pipefail
-          ruff check . 2>&1 | tee ruff-output.txt
-      - name: Upload Ruff diagnostics
-        if: failure() && steps.ruff.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: issue8-ruff-diagnostics
-          path: ruff-output.txt
+      - run: ruff check .
       - run: mypy src
       - run: pytest
 
@@ -55,7 +45,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STATUS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           VERIFY_RESULT: ${{ needs.verify.result }}
-          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository}/actions/runs/${{ github.run_id }}
         run: |
           if [ "$VERIFY_RESULT" = "success" ]; then
             STATE="success"

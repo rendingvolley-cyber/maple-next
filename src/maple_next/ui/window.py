@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
 
 from maple_next.ui.controller import OperatorView, SelectionFlowController
 
-
 _CTA_LABELS = {
     "CREATE_NEW_MATCH": "NEW MATCH",
     "CONFIRM_SELECTION_FACTS": "自分と相手の6体を確認",

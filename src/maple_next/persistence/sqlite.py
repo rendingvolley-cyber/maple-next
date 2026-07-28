@@ -26,6 +26,7 @@ class SQLiteRepository(
 
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.database_path)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")

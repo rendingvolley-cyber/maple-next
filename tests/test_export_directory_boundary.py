@@ -9,6 +9,7 @@ from maple_next.application.service import DomainError
 from maple_next.domain.enums import BattleState, MatchOutcome, ResultDisposition
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
+from maple_next.ui.match_controller import MatchFlowController
 
 SELF_TEAM = (
     "Meowscarada",
@@ -86,6 +87,38 @@ def test_repository_local_export_directory_fails_closed_before_write(
         application.export_match()
 
     after = repository.load_active_session()
+    assert after is not None
+    assert after.state is BattleState.MATCH_ENDED
+    assert after.battle_revision == before.battle_revision
+    assert repository.get_match_export(after.session_id) is None
+    assert list(repository_root.rglob("*.json")) == []
+    repository.close()
+
+
+def test_controller_shows_japanese_repository_boundary_error(tmp_path: Path) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+    repository, application = build_ended_application(
+        tmp_path,
+        repository_root=repository_root,
+        export_directory=repository_root / "exports",
+    )
+    controller = MatchFlowController(
+        application,
+        repository,
+        MockSelectionAdviceAdapter(),
+    )
+    before = repository.load_active_session()
+    assert before is not None
+
+    view = controller.save_match_json()
+    after = repository.load_active_session()
+
+    assert view.error_message == (
+        "保存先がrepository内であるためMATCH JSONを保存できません。"
+        "repository外のruntime/user-dataフォルダーを指定してください。"
+    )
+    assert "EXPORT_DIRECTORY_INSIDE_REPOSITORY" not in view.error_message
     assert after is not None
     assert after.state is BattleState.MATCH_ENDED
     assert after.battle_revision == before.battle_revision

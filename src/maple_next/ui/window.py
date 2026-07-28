@@ -450,7 +450,9 @@ class MapleMainWindow(QMainWindow):
             f"Turn {item.turn_number}: {item.action_type} {item.action_name}"
             for item in current.action_history
         ]
-        self.action_history_label.setText("\n".join(history_lines) or "記録済みactionはありません。")
+        self.action_history_label.setText(
+            "\n".join(history_lines) or "記録済みactionはありません。"
+        )
         self.history_group.setVisible(bool(current.action_history) or turn_state)
         self.next_turn_button.setVisible(projection.primary_cta == "NEXT_TURN")
         self.next_turn_button.setEnabled(projection.primary_cta_enabled)

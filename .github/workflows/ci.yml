@@ -45,7 +45,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STATUS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           VERIFY_RESULT: ${{ needs.verify.result }}
-          TARGET_URL: ${{ github.server_url }}/${{ github.repository}/actions/runs/${{ github.run_id }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ "$VERIFY_RESULT" = "success" ]; then
             STATE="success"

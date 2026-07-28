@@ -29,21 +29,7 @@ jobs:
       - run: python -m pip install --quiet -e ".[dev]"
       - run: python -m compileall -q src tests
       - run: ruff check .
-      - name: Run mypy and capture diagnostics
-        id: mypy
-        continue-on-error: true
-        run: mypy src > mypy-output.txt 2>&1
-      - name: Upload mypy diagnostics
-        if: steps.mypy.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: mypy-output
-          path: mypy-output.txt
-      - name: Fail on mypy violation
-        if: steps.mypy.outcome == 'failure'
-        run: |
-          cat mypy-output.txt
-          exit 1
+      - run: mypy src
       - run: pytest
 
   publish-status:

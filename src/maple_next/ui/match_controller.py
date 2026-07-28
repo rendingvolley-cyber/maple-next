@@ -42,7 +42,9 @@ _MATCH_ERROR_MESSAGES = {
     ),
     "EXPORT_PATH_MISMATCH": "保存先が現在のruntime export directoryと一致しません。",
     "EXPORT_FILE_UNREADABLE": "保存済みJSONを読み込めません。権限とfile状態を確認してください。",
-    "EXPORT_WRITE_FAILED": "MATCH JSONの書き込みに失敗しました。保存先を確認して再試行してください。",
+    "EXPORT_WRITE_FAILED": (
+        "MATCH JSONの書き込みに失敗しました。保存先を確認して再試行してください。"
+    ),
     "MATCH_CHANGED_DURING_EXPORT": "保存中にactive matchが変わったため処理を中止しました。",
     "CANONICAL_TURN_FACTS_MISSING": "canonical Turn factsが不足しているため保存できません。",
     "CANONICAL_ACTUAL_ACTION_MISSING": "canonical actual actionが不足しているため保存できません。",

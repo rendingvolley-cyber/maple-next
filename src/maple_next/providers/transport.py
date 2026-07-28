@@ -142,7 +142,7 @@ class GeminiSelectionAdviceTransport:
             envelope = json.loads(raw_body.decode("utf-8"))
             candidate = envelope["candidates"][0]
             part = candidate["content"]["parts"][0]
-            return str(part["text"])
+            text = part["text"]
         except (
             json.JSONDecodeError,
             KeyError,
@@ -151,6 +151,9 @@ class GeminiSelectionAdviceTransport:
             UnicodeDecodeError,
         ) as exc:
             raise ProviderTransportError("GEMINI_RESPONSE_ENVELOPE_MALFORMED") from exc
+        if not isinstance(text, str):
+            raise ProviderTransportError("GEMINI_RESPONSE_ENVELOPE_MALFORMED")
+        return text
 
     @staticmethod
     def _parse_selection_payload(text: str) -> dict[str, Any]:

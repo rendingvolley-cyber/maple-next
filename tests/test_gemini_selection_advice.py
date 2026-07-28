@@ -216,6 +216,22 @@ def test_valid_gemini_result_is_applied_and_marked_gemini_source(tmp_path: Path)
         {"selected_three": ["Meowscarada", "Gholdengo", "Dragonite"], "lead": "Dondozo"},
         {},
         {"selected_three": ["Meowscarada", "Gholdengo"], "lead": "Meowscarada"},
+        # exact-type validation: selected_three must be a list of exact strings
+        {"selected_three": "Meowscarada,Gholdengo,Dragonite", "lead": "Meowscarada"},
+        {"selected_three": ("Meowscarada", "Gholdengo", "Dragonite"), "lead": "Meowscarada"},
+        {"selected_three": ["Meowscarada", "Gholdengo", 3], "lead": "Meowscarada"},
+        {"selected_three": ["Meowscarada", "Gholdengo", True], "lead": "Meowscarada"},
+        {"selected_three": ["Meowscarada", "Gholdengo", None], "lead": "Meowscarada"},
+        # exact-type validation: lead must be an exact string
+        {"selected_three": ["Meowscarada", "Gholdengo", "Dragonite"], "lead": 1},
+        {"selected_three": ["Meowscarada", "Gholdengo", "Dragonite"], "lead": True},
+        {"selected_three": ["Meowscarada", "Gholdengo", "Dragonite"], "lead": None},
+        # exact key set: unknown field must not be silently used
+        {
+            "selected_three": ["Meowscarada", "Gholdengo", "Dragonite"],
+            "lead": "Meowscarada",
+            "confidence": 0.9,
+        },
     ],
 )
 def test_invalid_gemini_payload_rejected_without_state_mutation(
@@ -286,19 +302,21 @@ def test_stale_identity_result_rejected_via_existing_binding_contract(tmp_path: 
     repository.close()
 
 
-# --- 14. timeout / HTTP error / parse error -> fail-closed, no retry, no fallback ---
+# --- 14. timeout -> TIMED_OUT only; HTTP/network/parse error -> FAILED -------
+# All fail-closed: no retry, no fallback, no canonical state mutation.
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "expected_status"),
     [
-        ProviderTransportError("GEMINI_TIMEOUT"),
-        ProviderTransportError("GEMINI_HTTP_ERROR:500"),
-        ProviderTransportError("GEMINI_RESPONSE_ENVELOPE_MALFORMED"),
+        (ProviderTransportError("GEMINI_TIMEOUT"), JobStatus.TIMED_OUT),
+        (ProviderTransportError("GEMINI_HTTP_ERROR:500"), JobStatus.FAILED),
+        (ProviderTransportError("GEMINI_NETWORK_ERROR:unreachable"), JobStatus.FAILED),
+        (ProviderTransportError("GEMINI_RESPONSE_ENVELOPE_MALFORMED"), JobStatus.FAILED),
     ],
 )
 def test_transport_failure_fails_closed_without_retry_or_fallback(
-    tmp_path: Path, error: ProviderTransportError
+    tmp_path: Path, error: ProviderTransportError, expected_status: JobStatus
 ) -> None:
     qapp = qt_application()
     transport = FakeSelectionAdviceTransport(responses=[error])
@@ -317,7 +335,7 @@ def test_transport_failure_fails_closed_without_retry_or_fallback(
     assert after.battle_revision == before.battle_revision
     job = repository.latest_job_by_type(after.session_id, JobType.SELECTION_ADVICE)
     assert job is not None
-    assert job.status is JobStatus.FAILED
+    assert job.status is expected_status
     view = controller.refresh()
     assert view.error_message is not None
     assert results

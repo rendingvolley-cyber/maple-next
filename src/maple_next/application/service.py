@@ -178,8 +178,11 @@ class BattleApplication:
 
         Selection facts, session state, battle_revision, and the current
         advice id are left untouched; only the job's own status changes.
+        ``GEMINI_TIMEOUT`` maps to ``TIMED_OUT``; every other transport or
+        config failure reason maps to ``FAILED``.
         """
 
+        target_status = JobStatus.TIMED_OUT if reason == "GEMINI_TIMEOUT" else JobStatus.FAILED
         with self.repository.transaction():
             try:
                 job = self.repository.get_job(job_id)
@@ -188,7 +191,7 @@ class BattleApplication:
             if job.job_type is not JobType.SELECTION_ADVICE:
                 return
             if job.status in {JobStatus.QUEUED, JobStatus.IN_FLIGHT}:
-                self.repository.update_job_status(job.job_id, JobStatus.FAILED)
+                self.repository.update_job_status(job.job_id, target_status)
 
     def apply_selection_advice_result(self, result: ResultEnvelope) -> ResultDisposition:
         with self.repository.transaction():
@@ -231,15 +234,28 @@ class BattleApplication:
 
             assert session is not None
             try:
-                selected_three = tuple(result.payload["selected_three"])
-                lead = str(result.payload["lead"])
+                payload = result.payload
+                if not isinstance(payload, dict):
+                    raise ValueError("payload must be a JSON object")
+                if set(payload.keys()) != {"selected_three", "lead"}:
+                    raise ValueError("payload must contain exactly selected_three and lead")
+
+                selected_three = payload["selected_three"]
+                if not isinstance(selected_three, list):
+                    raise ValueError("selected_three must be a list")
                 if len(selected_three) != 3:
-                    raise ValueError("selected_three")
-                typed_three = (
-                    str(selected_three[0]),
-                    str(selected_three[1]),
-                    str(selected_three[2]),
-                )
+                    raise ValueError("selected_three must contain exactly three entries")
+                if not all(
+                    isinstance(name, str) and not isinstance(name, bool)
+                    for name in selected_three
+                ):
+                    raise ValueError("selected_three entries must be strings")
+                typed_three = (selected_three[0], selected_three[1], selected_three[2])
+
+                lead = payload["lead"]
+                if not isinstance(lead, str) or isinstance(lead, bool):
+                    raise ValueError("lead must be a string")
+
                 if len(set(typed_three)) != 3 or lead not in typed_three:
                     raise ValueError("illegal selection")
                 selection_facts = self.repository.get_selection_facts(job.input_snapshot_id)

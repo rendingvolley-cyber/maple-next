@@ -35,6 +35,12 @@ jobs:
       - run: python -m compileall -q src tests
       - run: ruff check .
       - run: mypy src
+      - name: Capture pytest diagnostics
+        run: pytest > issue13-pytest-final.txt 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue13-pytest-final-diagnostics
+          path: issue13-pytest-final.txt
       - run: pytest
 
   publish-status:

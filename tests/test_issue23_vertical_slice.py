@@ -151,7 +151,11 @@ def test_in_flight_provider_restart_is_delivery_unknown_and_send_disabled(
 def test_apply_selection_reaches_battle_ready_and_preserves_exact_three(tmp_path: Path) -> None:
     repo, app, job = setup_request(tmp_path)
     app.apply_selection_advice_result(valid_result(job))
-    applied = app.apply_selection(human_confirmed=True)
+    applied = app.apply_selection(
+        selected_three=("Meowscarada", "Gholdengo", "Dragonite"),
+        lead="Meowscarada",
+        human_confirmed=True,
+    )
     session = repo.load_active_session()
     assert session is not None
     assert session.state is BattleState.BATTLE_READY
@@ -165,14 +169,22 @@ def test_apply_requires_explicit_human_confirmation(tmp_path: Path) -> None:
     _, app, job = setup_request(tmp_path)
     app.apply_selection_advice_result(valid_result(job))
     with pytest.raises(DomainError, match="HUMAN_APPLY_REQUIRED"):
-        app.apply_selection(human_confirmed=False)
+        app.apply_selection(
+            selected_three=("Meowscarada", "Gholdengo", "Dragonite"),
+            lead="Meowscarada",
+            human_confirmed=False,
+        )
 
 
 def test_restart_restores_same_session_ids_state_and_turn_cta(tmp_path: Path) -> None:
     database_path = tmp_path / "maple.db"
     repo, app, job = setup_request(tmp_path)
     app.apply_selection_advice_result(valid_result(job))
-    app.apply_selection(human_confirmed=True)
+    app.apply_selection(
+        selected_three=("Meowscarada", "Gholdengo", "Dragonite"),
+        lead="Meowscarada",
+        human_confirmed=True,
+    )
     before = app.projection()
     repo.close()
 

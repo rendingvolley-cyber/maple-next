@@ -101,14 +101,12 @@ class JobStoreMixin(StoreBase):
         for row in rows:
             job_type = JobType(str(row["job_type"]))
             current = JobStatus(str(row["status"]))
-            if job_type in {JobType.SELECTION_ADVICE, JobType.TURN_ADVICE}:
-                recovered = (
-                    JobStatus.INTERRUPTED
-                    if current is JobStatus.QUEUED
-                    else JobStatus.DELIVERY_UNKNOWN
-                )
-            else:
-                recovered = JobStatus.INTERRUPTED
+            recovered = JobStatus.INTERRUPTED
+            if (
+                job_type in {JobType.SELECTION_ADVICE, JobType.TURN_ADVICE}
+                and current is JobStatus.IN_FLIGHT
+            ):
+                recovered = JobStatus.DELIVERY_UNKNOWN
             self.connection.execute(
                 "UPDATE async_jobs SET status = ?, updated_at = ? WHERE job_id = ?",
                 (recovered.value, self._now(), str(row["job_id"])),

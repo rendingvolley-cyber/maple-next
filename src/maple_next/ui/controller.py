@@ -70,7 +70,9 @@ _ERROR_MESSAGES = {
     "SELECTION_OUTSIDE_REVIEWED_TEAM": "実際の選出には、自分の確認済み6体だけを指定してください。",
     "LEAD_NOT_IN_SELECTED_THREE": "先発は、実際に選んだ3体の中から指定してください。",
     "CURRENT_SELECTION_ADVICE_REQUIRED": "APPLY前にMOCK Selection Adviceを受領してください。",
-    "REVIEWED_SELECTION_UNAVAILABLE": "確認済みSelection factsを読み込めません。もう一度確認してください。",
+    "REVIEWED_SELECTION_UNAVAILABLE": (
+        "確認済みSelection factsを読み込めません。もう一度確認してください。"
+    ),
     "EXPECTED_SELECTION_OPEN": "現在の状態ではSelection factsを更新できません。",
     "EXPECTED_SELECTION_ADVICE_READY": "現在の状態ではAPPLYできません。",
     "PROVIDER_REQUEST_PENDING": "MOCK Selection Adviceの処理中です。",
@@ -192,7 +194,9 @@ class SelectionFlowController:
         except DomainError as error:
             self._error_message = _domain_message(error)
         except RuntimeError:
-            self._error_message = "Selection factsの保存に失敗しました。入力内容は反映されていません。"
+            self._error_message = (
+                "Selection factsの保存に失敗しました。入力内容は反映されていません。"
+            )
         else:
             self._error_message = None
         return self.refresh()

@@ -147,7 +147,7 @@ class MatchFlowWindow(ExplicitTurnNumberWindow):
         if not self._match_widgets_ready:
             return
         self.end_match_button.setEnabled(
-            self.match_end_group.isVisible()
+            self.outcome_box.isEnabled()
             and self.outcome_box.currentText() in {
                 MatchOutcome.WIN.value,
                 MatchOutcome.LOSE.value,

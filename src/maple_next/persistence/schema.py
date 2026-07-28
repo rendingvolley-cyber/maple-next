@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def migrate(connection: sqlite3.Connection) -> None:
@@ -124,6 +124,28 @@ def migrate(connection: sqlite3.Connection) -> None:
             FOREIGN KEY(turn_id) REFERENCES battle_turns(turn_id)
         );
 
+        CREATE TABLE IF NOT EXISTS match_outcomes (
+            session_id TEXT PRIMARY KEY,
+            match_id TEXT NOT NULL UNIQUE,
+            generation INTEGER NOT NULL UNIQUE,
+            outcome TEXT NOT NULL CHECK (outcome IN ('WIN', 'LOSE')),
+            ended_at_utc TEXT NOT NULL,
+            final_battle_revision INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS match_exports (
+            session_id TEXT PRIMARY KEY,
+            match_id TEXT NOT NULL UNIQUE,
+            schema_version TEXT NOT NULL,
+            export_path TEXT NOT NULL UNIQUE,
+            sha256 TEXT NOT NULL,
+            exported_at_utc TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id)
+        );
+
         CREATE TABLE IF NOT EXISTS async_jobs (
             job_id TEXT PRIMARY KEY,
             command_id TEXT NOT NULL,
@@ -154,7 +176,7 @@ def migrate(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
 
-        UPDATE schema_meta SET schema_version = 2 WHERE singleton_id = 1;
+        UPDATE schema_meta SET schema_version = 3 WHERE singleton_id = 1;
         """
     )
     connection.commit()

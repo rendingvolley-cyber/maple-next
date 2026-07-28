@@ -7,7 +7,12 @@ from typing import cast
 
 from maple_next.domain.enums import ActionType, HpBucket, MatchOutcome
 from maple_next.domain.match_models import MatchExportRecord, MatchOutcomeRecord
-from maple_next.domain.models import BattleTurn, RecordedAction, TurnAdviceSnapshot, TurnFactsSnapshot
+from maple_next.domain.models import (
+    BattleTurn,
+    RecordedAction,
+    TurnAdviceSnapshot,
+    TurnFactsSnapshot,
+)
 from maple_next.persistence.base import StoreBase
 
 

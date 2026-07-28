@@ -24,9 +24,20 @@ MATCH_EXPORT_SCHEMA_VERSION = "maple-match.v1"
 class MatchApplication(BattleApplication):
     """Adds human-confirmed terminal commands without changing Turn semantics."""
 
-    def __init__(self, repository: SQLiteRepository, export_directory: str | Path) -> None:
+    def __init__(
+        self,
+        repository: SQLiteRepository,
+        export_directory: str | Path,
+        *,
+        repository_root: str | Path | None = None,
+    ) -> None:
         super().__init__(repository)
-        self.export_directory = Path(export_directory)
+        self.export_directory = Path(export_directory).expanduser().resolve()
+        self.repository_root = (
+            Path(repository_root).expanduser().resolve()
+            if repository_root is not None
+            else Path(__file__).resolve().parents[3]
+        )
 
     def projection(self) -> DomainProjection:
         projection = super().projection()
@@ -96,11 +107,13 @@ class MatchApplication(BattleApplication):
             existing = self.repository.get_match_export(session.session_id)
             if existing is None:
                 raise DomainError("MATCH_EXPORT_RECORD_MISSING")
+            self._require_export_directory_outside_repository()
             self._verify_existing_export(existing)
             return existing
         if session.state is not BattleState.MATCH_ENDED:
             raise DomainError("EXPECTED_MATCH_ENDED")
 
+        self._require_export_directory_outside_repository()
         outcome = self.repository.get_match_outcome(session.session_id)
         if outcome is None:
             raise DomainError("MATCH_OUTCOME_REQUIRED")
@@ -257,6 +270,10 @@ class MatchApplication(BattleApplication):
             )
             + "\n"
         ).encode("utf-8")
+
+    def _require_export_directory_outside_repository(self) -> None:
+        if self.export_directory.is_relative_to(self.repository_root):
+            raise DomainError("EXPORT_DIRECTORY_INSIDE_REPOSITORY")
 
     @staticmethod
     def _atomic_write(path: Path, content: bytes) -> None:

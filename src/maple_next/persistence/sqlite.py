@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from maple_next.persistence.job_store import JobStoreMixin
+from maple_next.persistence.match_store import MatchStoreMixin
 from maple_next.persistence.schema import migrate
 from maple_next.persistence.selection_store import SelectionStoreMixin
 from maple_next.persistence.session_store import SessionStoreMixin
@@ -19,11 +20,13 @@ class SQLiteRepository(
     JobStoreMixin,
     SelectionStoreMixin,
     TurnStoreMixin,
+    MatchStoreMixin,
 ):
     """The only component allowed to hold a writable SQLite connection."""
 
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.database_path)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")

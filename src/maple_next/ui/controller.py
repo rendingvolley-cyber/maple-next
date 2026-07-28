@@ -449,7 +449,9 @@ class SelectionFlowController:
         except DomainError as error:
             self._error_message = _domain_message(error)
         except RuntimeError:
-            self._error_message = "Turn factsの保存に失敗しました。canonical stateは変更されていません。"
+            self._error_message = (
+                "Turn factsの保存に失敗しました。canonical stateは変更されていません。"
+            )
         else:
             self._error_message = None
         return self.refresh()

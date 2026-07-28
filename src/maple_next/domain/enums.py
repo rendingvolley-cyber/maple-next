@@ -16,6 +16,11 @@ class BattleState(StrEnum):
     ABORTED = "ABORTED"
 
 
+class MatchOutcome(StrEnum):
+    WIN = "WIN"
+    LOSE = "LOSE"
+
+
 class HpBucket(StrEnum):
     ZERO = "0"
     ONE_TO_TEN = "1-10"

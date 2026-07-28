@@ -52,7 +52,7 @@ class MapleMainWindow(QMainWindow):
         self._controller = controller
         self._loaded_team: tuple[str, ...] = ()
         self._build_ui()
-        self.render()
+        self.render_view()
 
     def _build_ui(self) -> None:
         self.setWindowTitle("Maple Next — Battle Record")
@@ -66,17 +66,12 @@ class MapleMainWindow(QMainWindow):
         self._root_layout.setSpacing(16)
 
         heading = QLabel("今なにをすべきか")
-        heading.setObjectName("nextActionHeading")
         heading.setStyleSheet("font-size: 22px; font-weight: 700;")
         self.primary_cta_label = QLabel()
-        self.primary_cta_label.setObjectName("primaryCta")
         self.primary_cta_label.setStyleSheet("font-size: 18px; font-weight: 600;")
         self.guidance_label = QLabel()
         self.guidance_label.setWordWrap(True)
-        self.guidance_label.setObjectName("guidance")
-
         self.error_label = QLabel()
-        self.error_label.setObjectName("validationError")
         self.error_label.setWordWrap(True)
         self.error_label.setStyleSheet(
             "QLabel { color: #9d1c1c; background: #fff0f0; border: 1px solid #e2a4a4; "
@@ -96,15 +91,17 @@ class MapleMainWindow(QMainWindow):
         status_layout.addRow("Battle revision", self.battle_revision_label)
 
         self.new_match_button = QPushButton("NEW MATCH")
-        self.new_match_button.setObjectName("newMatchButton")
         self.new_match_button.clicked.connect(self._on_new_match)
 
-        self._root_layout.addWidget(heading)
-        self._root_layout.addWidget(self.primary_cta_label)
-        self._root_layout.addWidget(self.guidance_label)
-        self._root_layout.addWidget(self.error_label)
-        self._root_layout.addWidget(status_frame)
-        self._root_layout.addWidget(self.new_match_button)
+        for widget in (
+            heading,
+            self.primary_cta_label,
+            self.guidance_label,
+            self.error_label,
+            status_frame,
+            self.new_match_button,
+        ):
+            self._root_layout.addWidget(widget)
 
         self._build_selection_facts_group()
         self._build_mock_advice_group()
@@ -112,7 +109,6 @@ class MapleMainWindow(QMainWindow):
         self._build_actual_selection_group()
         self._build_battle_ready_group()
         self._root_layout.addStretch(1)
-
         scroll.setWidget(root)
         self.setCentralWidget(scroll)
 
@@ -121,7 +117,6 @@ class MapleMainWindow(QMainWindow):
         layout = QGridLayout(self.selection_facts_group)
         layout.addWidget(QLabel("自分の6体"), 0, 0)
         layout.addWidget(QLabel("相手の6体"), 0, 1)
-
         self.self_team_inputs: list[QLineEdit] = []
         self.opponent_team_inputs: list[QLineEdit] = []
         for index in range(6):
@@ -133,9 +128,7 @@ class MapleMainWindow(QMainWindow):
             self.opponent_team_inputs.append(opponent_input)
             layout.addWidget(self_input, index + 1, 0)
             layout.addWidget(opponent_input, index + 1, 1)
-
         self.confirm_facts_button = QPushButton("6体を確認")
-        self.confirm_facts_button.setObjectName("confirmSelectionFactsButton")
         self.confirm_facts_button.clicked.connect(self._on_confirm_facts)
         layout.addWidget(self.confirm_facts_button, 7, 0, 1, 2)
         self._root_layout.addWidget(self.selection_facts_group)
@@ -152,7 +145,6 @@ class MapleMainWindow(QMainWindow):
         self.mock_lead_box = QComboBox()
         layout.addRow("提案先発", self.mock_lead_box)
         self.mock_submit_button = QPushButton("MOCK Adviceを投入")
-        self.mock_submit_button.setObjectName("submitMockAdviceButton")
         self.mock_submit_button.clicked.connect(self._on_submit_mock)
         layout.addRow(self.mock_submit_button)
         self._root_layout.addWidget(self.mock_group)
@@ -172,7 +164,6 @@ class MapleMainWindow(QMainWindow):
         helper = QLabel("MOCK提案と異なる合法な3体・先発を選べます。自動コピーはしません。")
         helper.setWordWrap(True)
         layout.addWidget(helper)
-
         grid = QGridLayout()
         self.actual_checkboxes: list[QCheckBox] = []
         for index in range(6):
@@ -181,19 +172,16 @@ class MapleMainWindow(QMainWindow):
             self.actual_checkboxes.append(checkbox)
             grid.addWidget(checkbox, index // 2, index % 2)
         layout.addLayout(grid)
-
         lead_row = QHBoxLayout()
         lead_row.addWidget(QLabel("実際の先発"))
         self.actual_lead_box = QComboBox()
         self.actual_lead_box.currentTextChanged.connect(self._update_actual_controls)
         lead_row.addWidget(self.actual_lead_box, 1)
         layout.addLayout(lead_row)
-
         self.apply_confirm_checkbox = QCheckBox("この3体と先発を実際の選出としてAPPLYします")
         self.apply_confirm_checkbox.toggled.connect(self._update_actual_controls)
         layout.addWidget(self.apply_confirm_checkbox)
         self.apply_button = QPushButton("APPLY")
-        self.apply_button.setObjectName("applySelectionButton")
         self.apply_button.clicked.connect(self._on_apply)
         layout.addWidget(self.apply_button)
         self._root_layout.addWidget(self.actual_group)
@@ -207,21 +195,19 @@ class MapleMainWindow(QMainWindow):
         layout.addRow("実際の3体", self.actual_three_label)
         layout.addRow("実際の先発", self.actual_lead_label)
         layout.addRow("控え", self.actual_backline_label)
-        scope_note = QLabel("START TURN CAPTUREは次のIssueで実装します。現在は自動進行しません。")
-        scope_note.setWordWrap(True)
-        layout.addRow(scope_note)
+        note = QLabel("START TURN CAPTUREは次のIssueで実装します。現在は自動進行しません。")
+        note.setWordWrap(True)
+        layout.addRow(note)
         self._root_layout.addWidget(self.ready_group)
 
-    def render(self, view: OperatorView | None = None) -> None:
+    def render_view(self, view: OperatorView | None = None) -> None:
         current = view if view is not None else self._controller.refresh()
         projection = current.projection
-
         self.application_mode_label.setText(projection.application_mode)
         self.session_state_label.setText(projection.session_state or "—")
         self.provider_status_label.setText(projection.provider_status)
-        self.battle_revision_label.setText(
-            str(projection.battle_revision) if projection.battle_revision is not None else "—"
-        )
+        revision = "—" if projection.battle_revision is None else str(projection.battle_revision)
+        self.battle_revision_label.setText(revision)
         self.primary_cta_label.setText(
             _CTA_LABELS.get(projection.primary_cta, projection.primary_cta)
         )
@@ -231,7 +217,6 @@ class MapleMainWindow(QMainWindow):
 
         self.new_match_button.setVisible(projection.primary_cta == "CREATE_NEW_MATCH")
         self.new_match_button.setEnabled(projection.primary_cta_enabled)
-
         selection_open = projection.session_state == "SELECTION_OPEN"
         self.selection_facts_group.setVisible(selection_open)
         facts_editable = projection.primary_cta == "CONFIRM_SELECTION_FACTS"
@@ -252,7 +237,6 @@ class MapleMainWindow(QMainWindow):
         if current.advice is not None:
             self.advice_three_label.setText(" / ".join(current.advice.selected_three))
             self.advice_lead_label.setText(current.advice.lead)
-
         self.actual_group.setVisible(projection.primary_cta == "APPLY_SELECTION")
         self.ready_group.setVisible(projection.primary_cta == "START_TURN_CAPTURE")
         if current.applied_selection is not None:
@@ -305,32 +289,30 @@ class MapleMainWindow(QMainWindow):
             self.actual_lead_box.setCurrentText(previous)
         self.actual_lead_box.blockSignals(False)
         lead = self.actual_lead_box.currentText()
-        self.apply_button.setEnabled(
-            len(selected) == 3
-            and lead in selected
-            and self.apply_confirm_checkbox.isChecked()
-        )
+        enabled = len(selected) == 3 and lead in selected and self.apply_confirm_checkbox.isChecked()
+        self.apply_button.setEnabled(enabled)
 
     def _on_new_match(self, _checked: bool = False) -> None:
-        self.render(self._controller.new_match())
+        self.render_view(self._controller.new_match())
 
     def _on_confirm_facts(self, _checked: bool = False) -> None:
         self_entries = [field.text() for field in self.self_team_inputs]
         opponent_entries = [field.text() for field in self.opponent_team_inputs]
-        self.render(self._controller.confirm_selection_facts(self_entries, opponent_entries))
+        view = self._controller.confirm_selection_facts(self_entries, opponent_entries)
+        self.render_view(view)
 
     def _on_submit_mock(self, _checked: bool = False) -> None:
         selected = self._selected_combo_values(self.mock_selection_boxes)
-        self.render(self._controller.submit_mock_advice(selected, self.mock_lead_box.currentText()))
+        view = self._controller.submit_mock_advice(selected, self.mock_lead_box.currentText())
+        self.render_view(view)
 
     def _on_apply(self, _checked: bool = False) -> None:
-        self.render(
-            self._controller.apply_selection(
-                self._checked_actual_names(),
-                self.actual_lead_box.currentText(),
-                human_confirmed=self.apply_confirm_checkbox.isChecked(),
-            )
+        view = self._controller.apply_selection(
+            self._checked_actual_names(),
+            self.actual_lead_box.currentText(),
+            human_confirmed=self.apply_confirm_checkbox.isChecked(),
         )
+        self.render_view(view)
 
     def _checked_actual_names(self) -> list[str]:
         return [checkbox.text() for checkbox in self.actual_checkboxes if checkbox.isChecked()]

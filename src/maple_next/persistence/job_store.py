@@ -71,6 +71,7 @@ class JobStoreMixin(StoreBase):
 
     def set_job_status_for_test(self, job_id: str, status: JobStatus) -> None:
         """Synthetic-only transition used to model a process crash boundary."""
+
         with self.connection:
             self.update_job_status(job_id, status)
 
@@ -81,6 +82,17 @@ class JobStoreMixin(StoreBase):
         if row is None:
             raise KeyError(job_id)
         return int(row["dispatch_count"])
+
+    def latest_job_by_type(self, session_id: str, job_type: JobType) -> JobEnvelope | None:
+        row = self.connection.execute(
+            """
+            SELECT job_id FROM async_jobs
+            WHERE session_id = ? AND job_type = ?
+            ORDER BY rowid DESC LIMIT 1
+            """,
+            (session_id, job_type.value),
+        ).fetchone()
+        return self.get_job(str(row["job_id"])) if row is not None else None
 
     def latest_provider_job(self, session_id: str) -> JobEnvelope | None:
         row = self.connection.execute(

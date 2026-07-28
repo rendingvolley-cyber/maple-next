@@ -1,10 +1,10 @@
-"""Minimal schema migration for the Issue #23 foundation."""
+"""SQLite schema migration for the Battle-1 canonical lifecycle."""
 
 from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def migrate(connection: sqlite3.Connection) -> None:
@@ -66,6 +66,64 @@ def migrate(connection: sqlite3.Connection) -> None:
             FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id)
         );
 
+        CREATE TABLE IF NOT EXISTS battle_turns (
+            turn_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            created_at TEXT NOT NULL,
+            UNIQUE(session_id, turn_number),
+            FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS reviewed_turn_facts (
+            turn_facts_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            self_active TEXT NOT NULL,
+            opponent_active TEXT NOT NULL,
+            self_hp TEXT NOT NULL,
+            opponent_hp TEXT NOT NULL,
+            legal_moves_json TEXT NOT NULL,
+            legal_switches_json TEXT NOT NULL,
+            human_note TEXT NOT NULL,
+            previous_snapshot_id TEXT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id),
+            FOREIGN KEY(turn_id) REFERENCES battle_turns(turn_id),
+            FOREIGN KEY(previous_snapshot_id) REFERENCES reviewed_turn_facts(turn_facts_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS turn_advices (
+            turn_advice_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            job_id TEXT NOT NULL UNIQUE,
+            input_snapshot_id TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            action_name TEXT NOT NULL,
+            opponent_prediction TEXT NOT NULL,
+            rationale TEXT NOT NULL,
+            is_mock INTEGER NOT NULL CHECK (is_mock IN (0, 1)),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id),
+            FOREIGN KEY(turn_id) REFERENCES battle_turns(turn_id),
+            FOREIGN KEY(input_snapshot_id) REFERENCES reviewed_turn_facts(turn_facts_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS recorded_actions (
+            action_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL UNIQUE,
+            turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            action_type TEXT NOT NULL,
+            action_name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id),
+            FOREIGN KEY(turn_id) REFERENCES battle_turns(turn_id)
+        );
+
         CREATE TABLE IF NOT EXISTS async_jobs (
             job_id TEXT PRIMARY KEY,
             command_id TEXT NOT NULL,
@@ -95,6 +153,8 @@ def migrate(connection: sqlite3.Connection) -> None:
             payload_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+
+        UPDATE schema_meta SET schema_version = 2 WHERE singleton_id = 1;
         """
     )
     connection.commit()

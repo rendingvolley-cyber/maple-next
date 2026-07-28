@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
-from maple_next.domain.enums import BattleState, HpBucket
+from maple_next.domain.enums import ActionType, BattleState, HpBucket
 
 T = TypeVar("T")
 
@@ -82,6 +82,103 @@ class AppliedSelectionSnapshot:
         expected_backline = tuple(name for name in self.selected_three if name != self.lead)
         if set(self.backline) != set(expected_backline):
             raise ValueError("backline must be the other selected Pokemon")
+
+
+@dataclass(frozen=True, slots=True)
+class BattleTurn:
+    turn_id: str
+    turn_number: int
+
+    def __post_init__(self) -> None:
+        if self.turn_number < 1:
+            raise ValueError("turn number must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class TurnFactsSnapshot:
+    turn_facts_id: str
+    turn_id: str
+    turn_number: int
+    self_active: str
+    opponent_active: str
+    self_hp: HpBucket
+    opponent_hp: HpBucket
+    legal_moves: tuple[str, ...]
+    legal_switches: tuple[str, ...]
+    human_note: str = ""
+    previous_snapshot_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.turn_number < 1:
+            raise ValueError("turn number must be positive")
+        if not self.self_active.strip() or not self.opponent_active.strip():
+            raise ValueError("active names must be explicit")
+        if not 1 <= len(self.legal_moves) <= 4:
+            raise ValueError("legal moves must contain one to four names")
+        if any(not name.strip() for name in self.legal_moves):
+            raise ValueError("legal moves cannot contain blanks")
+        if len(set(self.legal_moves)) != len(self.legal_moves):
+            raise ValueError("legal moves must be unique")
+        if any(not name.strip() for name in self.legal_switches):
+            raise ValueError("legal switches cannot contain blanks")
+        if len(set(self.legal_switches)) != len(self.legal_switches):
+            raise ValueError("legal switches must be unique")
+        if self.self_active in self.legal_switches:
+            raise ValueError("self active cannot be a switch candidate")
+
+    def to_canonical_dict(self) -> dict[str, object]:
+        return {
+            "turn_facts_id": self.turn_facts_id,
+            "turn_id": self.turn_id,
+            "turn_number": self.turn_number,
+            "self_active": self.self_active,
+            "opponent_active": self.opponent_active,
+            "self_hp": self.self_hp.value,
+            "opponent_hp": self.opponent_hp.value,
+            "legal_moves": list(self.legal_moves),
+            "legal_switches": list(self.legal_switches),
+            "human_note": self.human_note,
+            "previous_snapshot_id": self.previous_snapshot_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TurnAdviceSnapshot:
+    turn_advice_id: str
+    turn_id: str
+    turn_number: int
+    job_id: str
+    input_snapshot_id: str
+    action_type: ActionType
+    action_name: str
+    opponent_prediction: str
+    rationale: str
+    is_mock: bool = True
+
+    def __post_init__(self) -> None:
+        if self.turn_number < 1:
+            raise ValueError("turn number must be positive")
+        if not self.action_name.strip():
+            raise ValueError("advice action must be explicit")
+        if not self.opponent_prediction.strip():
+            raise ValueError("opponent prediction must be explicit")
+        if not self.rationale.strip():
+            raise ValueError("advice rationale must be explicit")
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedAction:
+    action_id: str
+    turn_id: str
+    turn_number: int
+    action_type: ActionType
+    action_name: str
+
+    def __post_init__(self) -> None:
+        if self.turn_number < 1:
+            raise ValueError("turn number must be positive")
+        if not self.action_name.strip():
+            raise ValueError("recorded action must be explicit")
 
 
 @dataclass(frozen=True, slots=True)

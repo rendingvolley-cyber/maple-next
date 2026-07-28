@@ -1,4 +1,4 @@
-"""PySide6 Widgets shell for the manual Selection APPLY operator flow."""
+"""PySide6 Widgets shell for the human-operated Battle-1 flow."""
 
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from maple_next.ui.controller import OperatorView, SelectionFlowController
+from maple_next.domain.enums import ActionType, HpBucket
+from maple_next.ui.controller import OperatorView, SelectionFlowController, TurnFactsView
 
 _CTA_LABELS = {
     "CREATE_NEW_MATCH": "NEW MATCH",
@@ -30,6 +31,11 @@ _CTA_LABELS = {
     "WAIT_SELECTION_ADVICE": "Selection Adviceを待機",
     "APPLY_SELECTION": "実際の選出を確認してAPPLY",
     "START_TURN_CAPTURE": "START TURN CAPTURE",
+    "CONFIRM_TURN_FACTS": "Turn factsを確認",
+    "REQUEST_TURN_ADVICE": "MOCK Turn Adviceを要求",
+    "WAIT_TURN_ADVICE": "Turn Adviceを待機",
+    "RECORD_ACTUAL_ACTION": "実際の行動を記録",
+    "NEXT_TURN": "NEXT TURN",
     "RESOLVE_DELIVERY_UNKNOWN": "provider結果不明を解決",
 }
 
@@ -39,9 +45,16 @@ _MESSAGE_LABELS = {
     "SELECTION_FACTS_CONFIRMED": "確認済み6体を使ってMOCK Adviceを投入してください。",
     "SELECTION_ADVICE_PENDING": "MOCK Adviceを処理しています。",
     "SELECTION_ADVICE_READY": "実際に選んだ3体と先発を指定してください。",
-    "BATTLE_READY": "Selection APPLYが完了しました。Turn captureは後続Issueです。",
+    "BATTLE_READY": "人間がSTART TURN CAPTUREを押してください。自動開始はしません。",
+    "TURN_FACTS_REQUIRED": "現在のTurn factsを手動入力し、確認してください。",
+    "TURN_FACTS_REVIEWED": "確認済みfactsを使ってMOCK Turn Adviceを明示要求してください。",
+    "TURN_ADVICE_PENDING": "MOCK Turn Adviceを処理しています。自動retryはしません。",
+    "TURN_ADVICE_READY": "助言とは別に、人間が実際に選んだ合法行動を記録してください。",
+    "TURN_RECORDED": "実際の行動を記録しました。人間がNEXT TURNを押してください。",
     "PROVIDER_DELIVERY_UNKNOWN": "前回のprovider結果が不明です。新しい送信は停止中です。",
 }
+
+_PLACEHOLDER = "選択してください"
 
 
 class MapleMainWindow(QMainWindow):
@@ -51,12 +64,16 @@ class MapleMainWindow(QMainWindow):
         super().__init__()
         self._controller = controller
         self._loaded_team: tuple[str, ...] = ()
+        self._loaded_applied_three: tuple[str, ...] = ()
+        self._loaded_turn_number: int | None = None
+        self._loaded_turn_facts_id: str | None = None
+        self._current_turn_facts: TurnFactsView | None = None
         self._build_ui()
         self.render_view()
 
     def _build_ui(self) -> None:
         self.setWindowTitle("Maple Next — Battle Record")
-        self.resize(920, 820)
+        self.resize(980, 960)
 
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -85,10 +102,12 @@ class MapleMainWindow(QMainWindow):
         self.session_state_label = QLabel()
         self.provider_status_label = QLabel()
         self.battle_revision_label = QLabel()
+        self.turn_number_label = QLabel()
         status_layout.addRow("Application mode", self.application_mode_label)
         status_layout.addRow("Session state", self.session_state_label)
         status_layout.addRow("Provider status", self.provider_status_label)
         status_layout.addRow("Battle revision", self.battle_revision_label)
+        status_layout.addRow("Turn number", self.turn_number_label)
 
         self.new_match_button = QPushButton("NEW MATCH")
         self.new_match_button.clicked.connect(self._on_new_match)
@@ -108,6 +127,11 @@ class MapleMainWindow(QMainWindow):
         self._build_advice_display_group()
         self._build_actual_selection_group()
         self._build_battle_ready_group()
+        self._build_turn_facts_group()
+        self._build_mock_turn_advice_group()
+        self._build_turn_advice_display_group()
+        self._build_actual_action_group()
+        self._build_action_history_group()
         self._root_layout.addStretch(1)
         scroll.setWidget(root)
         self.setCentralWidget(scroll)
@@ -150,7 +174,7 @@ class MapleMainWindow(QMainWindow):
         self._root_layout.addWidget(self.mock_group)
 
     def _build_advice_display_group(self) -> None:
-        self.advice_group = QGroupBox("受領したAdvice（MOCK）")
+        self.advice_group = QGroupBox("受領したSelection Advice（MOCK）")
         layout = QFormLayout(self.advice_group)
         self.advice_three_label = QLabel()
         self.advice_lead_label = QLabel()
@@ -187,7 +211,7 @@ class MapleMainWindow(QMainWindow):
         self._root_layout.addWidget(self.actual_group)
 
     def _build_battle_ready_group(self) -> None:
-        self.ready_group = QGroupBox("BATTLE_READY")
+        self.ready_group = QGroupBox("APPLY済みSelection")
         layout = QFormLayout(self.ready_group)
         self.actual_three_label = QLabel()
         self.actual_lead_label = QLabel()
@@ -195,10 +219,131 @@ class MapleMainWindow(QMainWindow):
         layout.addRow("実際の3体", self.actual_three_label)
         layout.addRow("実際の先発", self.actual_lead_label)
         layout.addRow("控え", self.actual_backline_label)
-        note = QLabel("START TURN CAPTUREは次のIssueで実装します。現在は自動進行しません。")
+        self.start_turn_button = QPushButton("START TURN CAPTURE")
+        self.start_turn_button.clicked.connect(self._on_start_turn)
+        layout.addRow(self.start_turn_button)
+        self._root_layout.addWidget(self.ready_group)
+
+    def _build_turn_facts_group(self) -> None:
+        self.turn_facts_group = QGroupBox("Turn facts — 人間が確認・修正")
+        layout = QFormLayout(self.turn_facts_group)
+        self.self_active_box = QComboBox()
+        self.opponent_active_input = QLineEdit()
+        self.opponent_active_input.setPlaceholderText("相手のactive")
+        self.self_hp_box = QComboBox()
+        self.opponent_hp_box = QComboBox()
+        for box in (self.self_hp_box, self.opponent_hp_box):
+            box.addItem(_PLACEHOLDER)
+            box.addItems([bucket.value for bucket in HpBucket])
+        layout.addRow("自分のactive", self.self_active_box)
+        layout.addRow("相手のactive", self.opponent_active_input)
+        layout.addRow("自分のHP bucket", self.self_hp_box)
+        layout.addRow("相手のHP bucket", self.opponent_hp_box)
+
+        self.move_inputs: list[QLineEdit] = []
+        for index in range(4):
+            field = QLineEdit()
+            field.setPlaceholderText(f"合法move {index + 1}")
+            self.move_inputs.append(field)
+            layout.addRow(f"合法move {index + 1}", field)
+
+        switch_widget = QWidget()
+        switch_layout = QHBoxLayout(switch_widget)
+        switch_layout.setContentsMargins(0, 0, 0, 0)
+        self.switch_checkboxes: list[QCheckBox] = []
+        for _index in range(3):
+            checkbox = QCheckBox()
+            self.switch_checkboxes.append(checkbox)
+            switch_layout.addWidget(checkbox)
+        layout.addRow("合法switch候補", switch_widget)
+
+        self.turn_note_input = QLineEdit()
+        self.turn_note_input.setPlaceholderText("任意の人間確認メモ")
+        layout.addRow("確認メモ", self.turn_note_input)
+        self.turn_facts_confirm_checkbox = QCheckBox("このTurn factsを確認して保存します")
+        self.turn_facts_confirm_checkbox.toggled.connect(self._update_turn_fact_button)
+        layout.addRow(self.turn_facts_confirm_checkbox)
+        self.confirm_turn_facts_button = QPushButton("Turn factsを確認／修正")
+        self.confirm_turn_facts_button.clicked.connect(self._on_confirm_turn_facts)
+        layout.addRow(self.confirm_turn_facts_button)
+        self._root_layout.addWidget(self.turn_facts_group)
+
+    def _build_mock_turn_advice_group(self) -> None:
+        self.mock_turn_group = QGroupBox("開発用 MOCK Turn Advice — ネットワーク送信なし")
+        layout = QFormLayout(self.mock_turn_group)
+        self.mock_turn_action_type_box = QComboBox()
+        self.mock_turn_action_type_box.addItems(
+            [_PLACEHOLDER, ActionType.MOVE.value, ActionType.SWITCH.value]
+        )
+        self.mock_turn_action_type_box.currentTextChanged.connect(
+            self._update_mock_turn_action_options
+        )
+        self.mock_turn_action_name_box = QComboBox()
+        self.mock_turn_prediction_input = QLineEdit()
+        self.mock_turn_prediction_input.setPlaceholderText("相手の次行動予測")
+        self.mock_turn_rationale_input = QLineEdit()
+        self.mock_turn_rationale_input.setPlaceholderText("簡潔な理由")
+        layout.addRow("推奨action種別", self.mock_turn_action_type_box)
+        layout.addRow("推奨action", self.mock_turn_action_name_box)
+        layout.addRow("相手の次行動予測", self.mock_turn_prediction_input)
+        layout.addRow("理由", self.mock_turn_rationale_input)
+        self.mock_turn_submit_button = QPushButton("MOCK Turn Adviceを投入")
+        self.mock_turn_submit_button.clicked.connect(self._on_submit_mock_turn)
+        layout.addRow(self.mock_turn_submit_button)
+        self._root_layout.addWidget(self.mock_turn_group)
+
+    def _build_turn_advice_display_group(self) -> None:
+        self.turn_advice_group = QGroupBox("受領したTurn Advice（MOCK）")
+        layout = QFormLayout(self.turn_advice_group)
+        self.turn_advice_action_label = QLabel()
+        self.turn_advice_prediction_label = QLabel()
+        self.turn_advice_prediction_label.setWordWrap(True)
+        self.turn_advice_rationale_label = QLabel()
+        self.turn_advice_rationale_label.setWordWrap(True)
+        layout.addRow("推奨action", self.turn_advice_action_label)
+        layout.addRow("相手予測", self.turn_advice_prediction_label)
+        layout.addRow("理由", self.turn_advice_rationale_label)
+        self._root_layout.addWidget(self.turn_advice_group)
+
+    def _build_actual_action_group(self) -> None:
+        self.actual_action_group = QGroupBox("実際の行動 — 人間が記録")
+        layout = QFormLayout(self.actual_action_group)
+        note = QLabel("MOCK助言と異なる合法行動を選べます。助言を自動コピーしません。")
         note.setWordWrap(True)
         layout.addRow(note)
-        self._root_layout.addWidget(self.ready_group)
+        self.actual_action_type_box = QComboBox()
+        self.actual_action_type_box.addItems(
+            [_PLACEHOLDER, ActionType.MOVE.value, ActionType.SWITCH.value]
+        )
+        self.actual_action_type_box.currentTextChanged.connect(
+            self._update_actual_action_options
+        )
+        self.actual_action_name_box = QComboBox()
+        self.actual_action_confirm_checkbox = QCheckBox("この行動を実際の操作として記録します")
+        self.actual_action_confirm_checkbox.toggled.connect(
+            self._update_actual_action_button
+        )
+        self.actual_action_name_box.currentTextChanged.connect(
+            self._update_actual_action_button
+        )
+        layout.addRow("行動種別", self.actual_action_type_box)
+        layout.addRow("実際の行動", self.actual_action_name_box)
+        layout.addRow(self.actual_action_confirm_checkbox)
+        self.record_action_button = QPushButton("実際の行動を記録")
+        self.record_action_button.clicked.connect(self._on_record_action)
+        layout.addRow(self.record_action_button)
+        self._root_layout.addWidget(self.actual_action_group)
+
+    def _build_action_history_group(self) -> None:
+        self.history_group = QGroupBox("Action-only history")
+        layout = QVBoxLayout(self.history_group)
+        self.action_history_label = QLabel()
+        self.action_history_label.setWordWrap(True)
+        layout.addWidget(self.action_history_label)
+        self.next_turn_button = QPushButton("NEXT TURN")
+        self.next_turn_button.clicked.connect(self._on_next_turn)
+        layout.addWidget(self.next_turn_button)
+        self._root_layout.addWidget(self.history_group)
 
     def render_view(self, view: OperatorView | None = None) -> None:
         current = view if view is not None else self._controller.refresh()
@@ -208,6 +353,8 @@ class MapleMainWindow(QMainWindow):
         self.provider_status_label.setText(projection.provider_status)
         revision = "—" if projection.battle_revision is None else str(projection.battle_revision)
         self.battle_revision_label.setText(revision)
+        turn_number = "—" if projection.turn_number is None else str(projection.turn_number)
+        self.turn_number_label.setText(turn_number)
         self.primary_cta_label.setText(
             _CTA_LABELS.get(projection.primary_cta, projection.primary_cta)
         )
@@ -229,7 +376,9 @@ class MapleMainWindow(QMainWindow):
             self._populate_team_controls(current.self_team)
             for field, value in zip(self.self_team_inputs, current.self_team, strict=True):
                 field.setText(value)
-            for field, value in zip(self.opponent_team_inputs, current.opponent_team, strict=True):
+            for field, value in zip(
+                self.opponent_team_inputs, current.opponent_team, strict=True
+            ):
                 field.setText(value)
 
         self.mock_group.setVisible(projection.primary_cta == "REQUEST_SELECTION_ADVICE")
@@ -238,39 +387,157 @@ class MapleMainWindow(QMainWindow):
             self.advice_three_label.setText(" / ".join(current.advice.selected_three))
             self.advice_lead_label.setText(current.advice.lead)
         self.actual_group.setVisible(projection.primary_cta == "APPLY_SELECTION")
-        self.ready_group.setVisible(projection.primary_cta == "START_TURN_CAPTURE")
+
+        self.ready_group.setVisible(current.applied_selection is not None)
+        self.start_turn_button.setVisible(projection.primary_cta == "START_TURN_CAPTURE")
+        self.start_turn_button.setEnabled(projection.primary_cta_enabled)
         if current.applied_selection is not None:
             self.actual_three_label.setText(" / ".join(current.applied_selection.selected_three))
             self.actual_lead_label.setText(current.applied_selection.lead)
             self.actual_backline_label.setText(" / ".join(current.applied_selection.backline))
+            if current.applied_selection.selected_three != self._loaded_applied_three:
+                self._loaded_applied_three = current.applied_selection.selected_three
+                self._populate_turn_selection_controls(
+                    current.applied_selection.selected_three
+                )
+
+        turn_state = projection.session_state in {
+            "TURN_CAPTURE_PENDING",
+            "TURN_REVIEWED",
+            "TURN_RECORDED",
+        }
+        self.turn_facts_group.setVisible(turn_state)
+        turn_editable = projection.session_state in {
+            "TURN_CAPTURE_PENDING",
+            "TURN_REVIEWED",
+        }
+        self._set_turn_facts_editable(turn_editable)
+
+        if projection.turn_number != self._loaded_turn_number:
+            self._loaded_turn_number = projection.turn_number
+            self._loaded_turn_facts_id = None
+            if current.turn_facts is None:
+                self._clear_turn_inputs()
+        if (
+            current.turn_facts is not None
+            and current.turn_facts.snapshot_id != self._loaded_turn_facts_id
+        ):
+            self._loaded_turn_facts_id = current.turn_facts.snapshot_id
+            self._load_turn_facts(current.turn_facts)
+        self._current_turn_facts = current.turn_facts
+
+        self.mock_turn_group.setVisible(projection.primary_cta == "REQUEST_TURN_ADVICE")
+        self.turn_advice_group.setVisible(current.turn_advice is not None)
+        if current.turn_advice is not None:
+            self.turn_advice_action_label.setText(
+                f"{current.turn_advice.action_type}: {current.turn_advice.action_name}"
+            )
+            self.turn_advice_prediction_label.setText(
+                current.turn_advice.opponent_prediction
+            )
+            self.turn_advice_rationale_label.setText(current.turn_advice.rationale)
+
+        self.actual_action_group.setVisible(
+            projection.primary_cta == "RECORD_ACTUAL_ACTION"
+        )
+        if projection.primary_cta == "RECORD_ACTUAL_ACTION":
+            self.actual_action_type_box.setCurrentIndex(0)
+            self.actual_action_name_box.clear()
+            self.actual_action_name_box.addItem(_PLACEHOLDER)
+            self.actual_action_confirm_checkbox.setChecked(False)
+
+        history_lines = [
+            f"Turn {item.turn_number}: {item.action_type} {item.action_name}"
+            for item in current.action_history
+        ]
+        self.action_history_label.setText(
+            "\n".join(history_lines) or "記録済みactionはありません。"
+        )
+        self.history_group.setVisible(bool(current.action_history) or turn_state)
+        self.next_turn_button.setVisible(projection.primary_cta == "NEXT_TURN")
+        self.next_turn_button.setEnabled(projection.primary_cta_enabled)
+
         self._update_actual_controls()
+        self._update_turn_fact_button()
+        self._update_mock_turn_action_options()
+        self._update_actual_action_button()
 
     def _populate_team_controls(self, team: Sequence[str]) -> None:
         for box in self.mock_selection_boxes:
             box.blockSignals(True)
             box.clear()
-            box.addItem("選択してください")
+            box.addItem(_PLACEHOLDER)
             box.addItems(list(team))
             box.blockSignals(False)
         self.mock_lead_box.clear()
-        self.mock_lead_box.addItem("選択してください")
+        self.mock_lead_box.addItem(_PLACEHOLDER)
         for checkbox, name in zip(self.actual_checkboxes, team, strict=True):
             checkbox.setText(name)
             checkbox.setChecked(False)
             checkbox.setVisible(True)
         self.actual_lead_box.clear()
-        self.actual_lead_box.addItem("選択してください")
+        self.actual_lead_box.addItem(_PLACEHOLDER)
         self.apply_confirm_checkbox.setChecked(False)
         self._update_mock_lead_options()
+
+    def _populate_turn_selection_controls(self, selected_three: Sequence[str]) -> None:
+        self.self_active_box.clear()
+        self.self_active_box.addItem(_PLACEHOLDER)
+        self.self_active_box.addItems(list(selected_three))
+        for checkbox, name in zip(self.switch_checkboxes, selected_three, strict=True):
+            checkbox.setText(name)
+            checkbox.setChecked(False)
+            checkbox.setVisible(True)
+
+    def _clear_turn_inputs(self) -> None:
+        self.self_active_box.setCurrentIndex(0)
+        self.opponent_active_input.clear()
+        self.self_hp_box.setCurrentIndex(0)
+        self.opponent_hp_box.setCurrentIndex(0)
+        for field in self.move_inputs:
+            field.clear()
+        for checkbox in self.switch_checkboxes:
+            checkbox.setChecked(False)
+        self.turn_note_input.clear()
+        self.turn_facts_confirm_checkbox.setChecked(False)
+        self.mock_turn_action_type_box.setCurrentIndex(0)
+        self.mock_turn_prediction_input.clear()
+        self.mock_turn_rationale_input.clear()
+
+    def _load_turn_facts(self, facts: TurnFactsView) -> None:
+        self.self_active_box.setCurrentText(facts.self_active)
+        self.opponent_active_input.setText(facts.opponent_active)
+        self.self_hp_box.setCurrentText(facts.self_hp)
+        self.opponent_hp_box.setCurrentText(facts.opponent_hp)
+        for index, field in enumerate(self.move_inputs):
+            field.setText(facts.legal_moves[index] if index < len(facts.legal_moves) else "")
+        for checkbox in self.switch_checkboxes:
+            checkbox.setChecked(checkbox.text() in facts.legal_switches)
+        self.turn_note_input.setText(facts.human_note)
+        self.turn_facts_confirm_checkbox.setChecked(False)
+
+    def _set_turn_facts_editable(self, enabled: bool) -> None:
+        for widget in (
+            self.self_active_box,
+            self.opponent_active_input,
+            self.self_hp_box,
+            self.opponent_hp_box,
+            *self.move_inputs,
+            *self.switch_checkboxes,
+            self.turn_note_input,
+            self.turn_facts_confirm_checkbox,
+        ):
+            widget.setEnabled(enabled)
+        self.confirm_turn_facts_button.setVisible(enabled)
 
     def _update_mock_lead_options(self, _text: str = "") -> None:
         selected = self._selected_combo_values(self.mock_selection_boxes)
         previous = self.mock_lead_box.currentText()
         self.mock_lead_box.blockSignals(True)
         self.mock_lead_box.clear()
-        self.mock_lead_box.addItem("選択してください")
+        self.mock_lead_box.addItem(_PLACEHOLDER)
         for name in selected:
-            if name not in {"", "選択してください"} and name not in self._combo_items(
+            if name not in {"", _PLACEHOLDER} and name not in self._combo_items(
                 self.mock_lead_box
             ):
                 self.mock_lead_box.addItem(name)
@@ -283,7 +550,7 @@ class MapleMainWindow(QMainWindow):
         previous = self.actual_lead_box.currentText()
         self.actual_lead_box.blockSignals(True)
         self.actual_lead_box.clear()
-        self.actual_lead_box.addItem("選択してください")
+        self.actual_lead_box.addItem(_PLACEHOLDER)
         self.actual_lead_box.addItems(selected)
         if previous in selected:
             self.actual_lead_box.setCurrentText(previous)
@@ -296,6 +563,43 @@ class MapleMainWindow(QMainWindow):
         )
         self.apply_button.setEnabled(enabled)
 
+    def _update_turn_fact_button(self, _checked: bool = False) -> None:
+        self.confirm_turn_facts_button.setEnabled(
+            self.turn_facts_confirm_checkbox.isEnabled()
+            and self.turn_facts_confirm_checkbox.isChecked()
+        )
+
+    def _turn_action_names(self, action_type: str) -> tuple[str, ...]:
+        if self._current_turn_facts is None:
+            return ()
+        if action_type == ActionType.MOVE.value:
+            return self._current_turn_facts.legal_moves
+        if action_type == ActionType.SWITCH.value:
+            return self._current_turn_facts.legal_switches
+        return ()
+
+    def _update_mock_turn_action_options(self, _text: str = "") -> None:
+        previous = self.mock_turn_action_name_box.currentText()
+        names = self._turn_action_names(self.mock_turn_action_type_box.currentText())
+        self.mock_turn_action_name_box.clear()
+        self.mock_turn_action_name_box.addItem(_PLACEHOLDER)
+        self.mock_turn_action_name_box.addItems(list(names))
+        if previous in names:
+            self.mock_turn_action_name_box.setCurrentText(previous)
+
+    def _update_actual_action_options(self, _text: str = "") -> None:
+        names = self._turn_action_names(self.actual_action_type_box.currentText())
+        self.actual_action_name_box.clear()
+        self.actual_action_name_box.addItem(_PLACEHOLDER)
+        self.actual_action_name_box.addItems(list(names))
+        self._update_actual_action_button()
+
+    def _update_actual_action_button(self, _value: object = None) -> None:
+        self.record_action_button.setEnabled(
+            self.actual_action_confirm_checkbox.isChecked()
+            and self.actual_action_name_box.currentText() != _PLACEHOLDER
+        )
+
     def _on_new_match(self, _checked: bool = False) -> None:
         self.render_view(self._controller.new_match())
 
@@ -307,7 +611,9 @@ class MapleMainWindow(QMainWindow):
 
     def _on_submit_mock(self, _checked: bool = False) -> None:
         selected = self._selected_combo_values(self.mock_selection_boxes)
-        view = self._controller.submit_mock_advice(selected, self.mock_lead_box.currentText())
+        view = self._controller.submit_mock_advice(
+            selected, self.mock_lead_box.currentText()
+        )
         self.render_view(view)
 
     def _on_apply(self, _checked: bool = False) -> None:
@@ -317,6 +623,46 @@ class MapleMainWindow(QMainWindow):
             human_confirmed=self.apply_confirm_checkbox.isChecked(),
         )
         self.render_view(view)
+
+    def _on_start_turn(self, _checked: bool = False) -> None:
+        self.render_view(self._controller.start_turn_capture())
+
+    def _on_confirm_turn_facts(self, _checked: bool = False) -> None:
+        moves = [field.text().strip() for field in self.move_inputs if field.text().strip()]
+        switches = [
+            checkbox.text() for checkbox in self.switch_checkboxes if checkbox.isChecked()
+        ]
+        view = self._controller.confirm_turn_facts(
+            self_active=self.self_active_box.currentText(),
+            opponent_active=self.opponent_active_input.text(),
+            self_hp=self.self_hp_box.currentText(),
+            opponent_hp=self.opponent_hp_box.currentText(),
+            legal_moves=moves,
+            legal_switches=switches,
+            human_note=self.turn_note_input.text(),
+            human_confirmed=self.turn_facts_confirm_checkbox.isChecked(),
+        )
+        self.render_view(view)
+
+    def _on_submit_mock_turn(self, _checked: bool = False) -> None:
+        view = self._controller.submit_mock_turn_advice(
+            action_type=self.mock_turn_action_type_box.currentText(),
+            action_name=self.mock_turn_action_name_box.currentText(),
+            opponent_prediction=self.mock_turn_prediction_input.text(),
+            rationale=self.mock_turn_rationale_input.text(),
+        )
+        self.render_view(view)
+
+    def _on_record_action(self, _checked: bool = False) -> None:
+        view = self._controller.record_actual_action(
+            action_type=self.actual_action_type_box.currentText(),
+            action_name=self.actual_action_name_box.currentText(),
+            human_confirmed=self.actual_action_confirm_checkbox.isChecked(),
+        )
+        self.render_view(view)
+
+    def _on_next_turn(self, _checked: bool = False) -> None:
+        self.render_view(self._controller.next_turn())
 
     def _checked_actual_names(self) -> list[str]:
         return [checkbox.text() for checkbox in self.actual_checkboxes if checkbox.isChecked()]

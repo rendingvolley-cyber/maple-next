@@ -11,9 +11,15 @@ from maple_next.persistence.job_store import JobStoreMixin
 from maple_next.persistence.schema import migrate
 from maple_next.persistence.selection_store import SelectionStoreMixin
 from maple_next.persistence.session_store import SessionStoreMixin
+from maple_next.persistence.turn_store import TurnStoreMixin
 
 
-class SQLiteRepository(SessionStoreMixin, JobStoreMixin, SelectionStoreMixin):
+class SQLiteRepository(
+    SessionStoreMixin,
+    JobStoreMixin,
+    SelectionStoreMixin,
+    TurnStoreMixin,
+):
     """The only component allowed to hold a writable SQLite connection."""
 
     def __init__(self, database_path: str | Path) -> None:
@@ -27,6 +33,7 @@ class SQLiteRepository(SessionStoreMixin, JobStoreMixin, SelectionStoreMixin):
     @contextmanager
     def transaction(self) -> Iterator[None]:
         """Commit all writes in one main-process transaction or roll them all back."""
+
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             yield

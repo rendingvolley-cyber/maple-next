@@ -289,7 +289,11 @@ class MapleMainWindow(QMainWindow):
             self.actual_lead_box.setCurrentText(previous)
         self.actual_lead_box.blockSignals(False)
         lead = self.actual_lead_box.currentText()
-        enabled = len(selected) == 3 and lead in selected and self.apply_confirm_checkbox.isChecked()
+        enabled = (
+            len(selected) == 3
+            and lead in selected
+            and self.apply_confirm_checkbox.isChecked()
+        )
         self.apply_button.setEnabled(enabled)
 
     def _on_new_match(self, _checked: bool = False) -> None:

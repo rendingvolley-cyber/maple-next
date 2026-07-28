@@ -5,7 +5,7 @@ on:
     branches:
       - "maple/issue-23-battle1-foundation"
       - "maple/issue-6-pyside-selection-apply"
-      # Issue #8 manual Turn lifecycle verification branch.
+      # Issue #8 manual Turn lifecycle branch.
       - "maple/issue-8-manual-turn-lifecycle"
   pull_request:
     branches:

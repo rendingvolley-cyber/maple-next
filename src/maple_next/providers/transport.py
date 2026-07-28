@@ -126,6 +126,13 @@ class GeminiSelectionAdviceTransport:
         except urllib.error.HTTPError as exc:
             raise ProviderTransportError(f"GEMINI_HTTP_ERROR:{exc.code}") from None
         except urllib.error.URLError as exc:
+            # urlopen(..., timeout=...) reports a connect/read timeout by
+            # wrapping it as URLError(reason=<TimeoutError instance>), not by
+            # raising TimeoutError directly. In Python 3.11, socket.timeout
+            # is TimeoutError itself (unified in 3.10), so this isinstance
+            # check also covers the socket.timeout case.
+            if isinstance(exc.reason, TimeoutError):
+                raise ProviderTransportError("GEMINI_TIMEOUT") from None
             raise ProviderTransportError(f"GEMINI_NETWORK_ERROR:{exc.reason}") from None
         except TimeoutError as exc:
             raise ProviderTransportError("GEMINI_TIMEOUT") from exc

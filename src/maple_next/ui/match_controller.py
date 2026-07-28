@@ -41,6 +41,10 @@ _MATCH_ERROR_MESSAGES = {
         "保存済みJSONのSHA-256が一致しません。対象fileを確認して再試行してください。"
     ),
     "EXPORT_PATH_MISMATCH": "保存先が現在のruntime export directoryと一致しません。",
+    "EXPORT_DIRECTORY_INSIDE_REPOSITORY": (
+        "保存先がrepository内であるためMATCH JSONを保存できません。"
+        "repository外のruntime/user-dataフォルダーを指定してください。"
+    ),
     "EXPORT_FILE_UNREADABLE": "保存済みJSONを読み込めません。権限とfile状態を確認してください。",
     "EXPORT_WRITE_FAILED": (
         "MATCH JSONの書き込みに失敗しました。保存先を確認して再試行してください。"

@@ -13,9 +13,11 @@ from PySide6.QtWidgets import QApplication
 
 from maple_next.application.service import BattleApplication
 from maple_next.persistence.sqlite import SQLiteRepository
-from maple_next.ui.controller import SelectionFlowController
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
-from maple_next.ui.window import MapleMainWindow
+from maple_next.ui.explicit_turn_number import (
+    ExplicitTurnNumberController,
+    ExplicitTurnNumberWindow,
+)
 
 
 def default_database_path() -> Path:
@@ -37,12 +39,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         battle_application = BattleApplication(repository)
         battle_application.recover_after_restart()
-        controller = SelectionFlowController(
+        controller = ExplicitTurnNumberController(
             battle_application,
             repository,
             MockSelectionAdviceAdapter(),
         )
-        window = MapleMainWindow(controller)
+        window = ExplicitTurnNumberWindow(controller)
         window.show()
         return qt_application.exec()
     finally:

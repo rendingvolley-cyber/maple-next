@@ -32,6 +32,11 @@ class HpBucket(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class ActionType(StrEnum):
+    MOVE = "MOVE"
+    SWITCH = "SWITCH"
+
+
 class JobType(StrEnum):
     CAPTURE = "CAPTURE"
     OCR = "OCR"

@@ -76,6 +76,15 @@ def valid_turn_facts(turn_number: str) -> dict[str, object]:
     }
 
 
+def count_turn_facts(repository: SQLiteRepository, session_id: str) -> int:
+    row = repository.connection.execute(
+        "SELECT COUNT(*) AS count FROM reviewed_turn_facts WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    assert row is not None
+    return int(row["count"])
+
+
 @pytest.mark.parametrize(
     ("value", "message"),
     [
@@ -122,7 +131,9 @@ def test_controller_accepts_explicit_current_turn_number(tmp_path: Path) -> None
     assert view.session_state == "TURN_REVIEWED"
     assert view.turn_facts is not None
     assert view.turn_facts.turn_number == 1
-    assert repository.count_turn_facts(view.projection.session_id or "") == 1
+    session_id = view.projection.session_id
+    assert session_id is not None
+    assert count_turn_facts(repository, session_id) == 1
 
 
 def test_correction_with_wrong_turn_number_keeps_previous_snapshot(
@@ -142,7 +153,7 @@ def test_correction_with_wrong_turn_number_keeps_previous_snapshot(
     assert after is not None
     assert after.current_reviewed_board_id == before.current_reviewed_board_id
     assert after.battle_revision == before.battle_revision
-    assert repository.count_turn_facts(after.session_id) == 1
+    assert count_turn_facts(repository, after.session_id) == 1
 
 
 def test_supported_window_requires_human_turn_number_input(tmp_path: Path) -> None:

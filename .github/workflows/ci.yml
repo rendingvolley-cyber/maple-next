@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "maple/issue-23-battle1-foundation"
+      - "maple/issue-6-pyside-selection-apply"
   pull_request:
     branches:
       - main
@@ -16,6 +17,8 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

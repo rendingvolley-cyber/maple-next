@@ -11,6 +11,8 @@ on:
       - "maple/issue-13-match-end-export"
       # Issue #16 human-only Gemini Selection transport boundary branch.
       - "maple/issue-16-gemini-selection-transport"
+      # Issue #19 Windows PySide6 full-suite native crash repair branch.
+      - "maple/issue-19-windows-qt-lifecycle"
   pull_request:
     branches:
       - main
@@ -38,6 +40,20 @@ jobs:
       - run: ruff check .
       - run: mypy src
       - run: pytest
+
+  windows-verify:
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest
 
   publish-status:
     runs-on: ubuntu-latest

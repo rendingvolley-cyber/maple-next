@@ -57,7 +57,7 @@ jobs:
 
   publish-status:
     runs-on: ubuntu-latest
-    needs: verify
+    needs: [verify, windows-verify]
     if: always()
     steps:
       - name: Publish explicit commit status
@@ -65,14 +65,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STATUS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           VERIFY_RESULT: ${{ needs.verify.result }}
+          WINDOWS_VERIFY_RESULT: ${{ needs.windows-verify.result }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ "$VERIFY_RESULT" = "success" ]; then
+          if [ "$VERIFY_RESULT" = "success" ] &&
+             [ "$WINDOWS_VERIFY_RESULT" = "success" ]; then
             STATE="success"
-            DESCRIPTION="Python 3.11 verification passed"
+            DESCRIPTION="Linux and Windows Python 3.11 verification passed"
           else
             STATE="failure"
-            DESCRIPTION="Python 3.11 verification failed"
+            DESCRIPTION="Linux or Windows Python 3.11 verification failed"
           fi
 
           export STATE DESCRIPTION

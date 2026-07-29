@@ -144,6 +144,14 @@ def test_gemini_send_button_disabled_while_pending(tmp_path: Path) -> None:
     # The dispatch is asynchronous; before the fake transport resolves, the
     # button must already be disabled by the pending-state re-render.
     assert window.gemini_send_button.isEnabled() is False
-    qapp.processEvents()
+
+    # Drain the event loop until the worker thread's result has been
+    # delivered and handled on the UI thread. SelectionAdviceDispatch only
+    # calls QThread.quit()/wait() from inside that handler, so returning
+    # before this predicate is true risks tearing down (via GC or process
+    # exit) a QThread that is still running -- a fatal, untraceable native
+    # crash in PySide6/Qt rather than a Python exception.
+    pump_until(qapp, lambda: window.gemini_send_button.isEnabled() is True)
+
     window.close()
     repository.close()

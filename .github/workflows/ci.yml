@@ -9,6 +9,8 @@ on:
       - "maple/issue-8-manual-turn-lifecycle"
       # Issue #13 explicit match completion, export, and reset verification branch.
       - "maple/issue-13-match-end-export"
+      # Issue #16 human-only Gemini Selection transport boundary branch.
+      - "maple/issue-16-gemini-selection-transport"
   pull_request:
     branches:
       - main

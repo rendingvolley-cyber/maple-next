@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    existing = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def migrate(connection: sqlite3.Connection) -> None:
@@ -51,6 +57,7 @@ def migrate(connection: sqlite3.Connection) -> None:
             selected_three_json TEXT NOT NULL,
             lead TEXT NOT NULL,
             backline_json TEXT NOT NULL,
+            source_type TEXT NOT NULL DEFAULT 'MOCK',
             created_at TEXT NOT NULL,
             FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id)
         );
@@ -176,7 +183,13 @@ def migrate(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
 
-        UPDATE schema_meta SET schema_version = 3 WHERE singleton_id = 1;
+        UPDATE schema_meta SET schema_version = 4 WHERE singleton_id = 1;
         """
+    )
+    _ensure_column(
+        connection,
+        "selection_advices",
+        "source_type",
+        "TEXT NOT NULL DEFAULT 'MOCK'",
     )
     connection.commit()

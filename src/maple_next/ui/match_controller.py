@@ -11,6 +11,7 @@ from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.controller import OperatorInputError, OperatorView
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
 from maple_next.ui.explicit_turn_number import ExplicitTurnNumberController
+from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,8 +71,11 @@ class MatchFlowController(ExplicitTurnNumberController):
         repository: SQLiteRepository,
         mock_adapter: MockSelectionAdviceAdapter,
         mock_turn_adapter: MockTurnAdviceAdapter | None = None,
+        gemini_adapter: GeminiSelectionAdviceAdapter | None = None,
     ) -> None:
-        super().__init__(application, repository, mock_adapter, mock_turn_adapter)
+        super().__init__(
+            application, repository, mock_adapter, mock_turn_adapter, gemini_adapter
+        )
         self._match_application = application
 
     def refresh(self) -> MatchOperatorView:

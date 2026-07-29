@@ -27,6 +27,13 @@ from maple_next.domain.models import (
     TurnFactsSnapshot,
 )
 from maple_next.persistence.sqlite import SQLiteRepository
+from maple_next.providers.selection_request import (
+    SelectionAdviceRequest,
+    build_selection_advice_request,
+)
+from maple_next.providers.selection_request import (
+    request_payload_hash as compute_selection_request_payload_hash,
+)
 from maple_next.workers.contracts.models import JobEnvelope, ResultEnvelope
 
 
@@ -89,10 +96,18 @@ class BattleApplication:
                 session.session_id, JobType.SELECTION_ADVICE
             )
             self._guard_provider_request(latest_job)
-            payload = {
-                "reviewed_selection_id": session.current_reviewed_selection_id,
-                "battle_revision": session.battle_revision,
-            }
+            selection_facts = self.repository.get_selection_facts(
+                session.current_reviewed_selection_id
+            )
+            request = build_selection_advice_request(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                battle_revision=session.battle_revision,
+                reviewed_selection_id=session.current_reviewed_selection_id,
+                self_team=selection_facts.self_team,
+                opponent_team=selection_facts.opponent_team,
+            )
             job = JobEnvelope(
                 contract_version="maple-worker.v1",
                 job_id=str(uuid4()),
@@ -105,12 +120,78 @@ class BattleApplication:
                 base_battle_revision=session.battle_revision,
                 expected_state=BattleState.SELECTION_OPEN,
                 input_snapshot_id=session.current_reviewed_selection_id,
-                request_payload_hash=self.payload_hash(payload),
+                request_payload_hash=compute_selection_request_payload_hash(request),
                 human_authorized_at=datetime.now(UTC),
                 status=JobStatus.QUEUED,
             )
             self.repository.insert_job(job)
         return job
+
+    def build_selection_advice_transport_request(
+        self, job: JobEnvelope
+    ) -> SelectionAdviceRequest:
+        """Reconstruct the exact canonical request for an already-created job.
+
+        Used by the UI thread, once, right before handing immutable values to
+        the off-thread worker. Never called from the worker itself.
+        """
+
+        if job.job_type is not JobType.SELECTION_ADVICE:
+            raise DomainError("JOB_TYPE_NOT_SELECTION_ADVICE")
+        selection_facts = self.repository.get_selection_facts(job.input_snapshot_id)
+        request = build_selection_advice_request(
+            session_id=job.session_id,
+            match_id=job.match_id,
+            generation=job.generation,
+            battle_revision=job.base_battle_revision,
+            reviewed_selection_id=job.input_snapshot_id,
+            self_team=selection_facts.self_team,
+            opponent_team=selection_facts.opponent_team,
+        )
+        if compute_selection_request_payload_hash(request) != job.request_payload_hash:
+            raise DomainError("REQUEST_PAYLOAD_HASH_MISMATCH")
+        return request
+
+    def mark_selection_advice_dispatched(self, job_id: str) -> None:
+        """Transition exactly one QUEUED Selection Advice job to IN_FLIGHT.
+
+        Guards against dispatching the same job twice: a second call raises
+        ``DomainError`` instead of allowing a second transport.send().
+        """
+
+        with self.repository.transaction():
+            job = self.repository.get_job(job_id)
+            if job.job_type is not JobType.SELECTION_ADVICE:
+                raise DomainError("JOB_TYPE_NOT_SELECTION_ADVICE")
+            session = self._require_active_session()
+            latest_job = self.repository.latest_job_by_type(
+                session.session_id, JobType.SELECTION_ADVICE
+            )
+            if latest_job is None or latest_job.job_id != job.job_id:
+                raise DomainError("JOB_ID_NOT_CURRENT")
+            if job.status is not JobStatus.QUEUED:
+                raise DomainError("JOB_NOT_DISPATCHABLE")
+            self.repository.mark_job_in_flight(job.job_id)
+
+    def fail_selection_advice_job(self, job_id: str, reason: str) -> None:
+        """Fail-closed transport/network failure. Never mutates canonical state.
+
+        Selection facts, session state, battle_revision, and the current
+        advice id are left untouched; only the job's own status changes.
+        ``GEMINI_TIMEOUT`` maps to ``TIMED_OUT``; every other transport or
+        config failure reason maps to ``FAILED``.
+        """
+
+        target_status = JobStatus.TIMED_OUT if reason == "GEMINI_TIMEOUT" else JobStatus.FAILED
+        with self.repository.transaction():
+            try:
+                job = self.repository.get_job(job_id)
+            except KeyError:
+                return
+            if job.job_type is not JobType.SELECTION_ADVICE:
+                return
+            if job.status in {JobStatus.QUEUED, JobStatus.IN_FLIGHT}:
+                self.repository.update_job_status(job.job_id, target_status)
 
     def apply_selection_advice_result(self, result: ResultEnvelope) -> ResultDisposition:
         with self.repository.transaction():
@@ -153,15 +234,28 @@ class BattleApplication:
 
             assert session is not None
             try:
-                selected_three = tuple(result.payload["selected_three"])
-                lead = str(result.payload["lead"])
+                payload = result.payload
+                if not isinstance(payload, dict):
+                    raise ValueError("payload must be a JSON object")
+                if set(payload.keys()) != {"selected_three", "lead"}:
+                    raise ValueError("payload must contain exactly selected_three and lead")
+
+                selected_three = payload["selected_three"]
+                if not isinstance(selected_three, list):
+                    raise ValueError("selected_three must be a list")
                 if len(selected_three) != 3:
-                    raise ValueError("selected_three")
-                typed_three = (
-                    str(selected_three[0]),
-                    str(selected_three[1]),
-                    str(selected_three[2]),
-                )
+                    raise ValueError("selected_three must contain exactly three entries")
+                if not all(
+                    isinstance(name, str) and not isinstance(name, bool)
+                    for name in selected_three
+                ):
+                    raise ValueError("selected_three entries must be strings")
+                typed_three = (selected_three[0], selected_three[1], selected_three[2])
+
+                lead = payload["lead"]
+                if not isinstance(lead, str) or isinstance(lead, bool):
+                    raise ValueError("lead must be a string")
+
                 if len(set(typed_three)) != 3 or lead not in typed_three:
                     raise ValueError("illegal selection")
                 selection_facts = self.repository.get_selection_facts(job.input_snapshot_id)
@@ -184,6 +278,7 @@ class BattleApplication:
                 typed_three,
                 lead,
                 backline,
+                source_type=result.source_type,
             )
             session.current_selection_advice_id = advice_id
             session.state = BattleState.SELECTION_ADVICE_READY

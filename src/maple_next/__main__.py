@@ -13,7 +13,12 @@ from PySide6.QtWidgets import QApplication
 
 from maple_next.application.match_service import MatchApplication
 from maple_next.persistence.sqlite import SQLiteRepository
+from maple_next.providers.transport import (
+    GeminiSelectionAdviceTransport,
+    load_provider_config_from_env,
+)
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
+from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
 from maple_next.ui.match_controller import MatchFlowController
 from maple_next.ui.match_window import MatchFlowWindow
 
@@ -54,6 +59,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             battle_application,
             repository,
             MockSelectionAdviceAdapter(),
+            gemini_adapter=GeminiSelectionAdviceAdapter(
+                GeminiSelectionAdviceTransport(),
+                load_provider_config_from_env,
+            ),
         )
         window = MatchFlowWindow(controller)
         window.show()

@@ -147,6 +147,6 @@ def build_provider_request_body(request: SelectionAdviceRequest) -> dict[str, An
         ],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": request.requested_output_schema,
+            "responseJsonSchema": request.requested_output_schema,
         },
     }

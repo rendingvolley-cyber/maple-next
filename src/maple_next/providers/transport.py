@@ -29,6 +29,12 @@ _DEFAULT_TIMEOUT_SECONDS = 30.0
 _API_KEY_ENV = "MAPLE_NEXT_GEMINI_API_KEY"
 _MODEL_ENV = "MAPLE_NEXT_GEMINI_MODEL"
 _TIMEOUT_ENV = "MAPLE_NEXT_GEMINI_TIMEOUT_SECONDS"
+_HTTP_ERROR_BODY_MAX_BYTES = 16_384
+_ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo"
+_STATUS_TOKEN_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+_DOMAIN_TOKEN_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+)
 
 
 class ProviderConfigError(RuntimeError):
@@ -95,6 +101,105 @@ class SelectionProviderTransport(Protocol):
     ) -> SanitizedProviderResult: ...
 
 
+def _safe_token(
+    value: object,
+    *,
+    allowed_chars: frozenset[str],
+    max_length: int,
+) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > max_length:
+        return None
+    if any(char not in allowed_chars for char in value):
+        return None
+    return value
+
+
+def _sanitized_http_error_reason(exc: urllib.error.HTTPError) -> str:
+    """Return a small allowlisted HTTP classification without raw provider data."""
+
+    generic = f"GEMINI_HTTP_ERROR:{exc.code}"
+    try:
+        raw_body = exc.read(_HTTP_ERROR_BODY_MAX_BYTES + 1)
+    except (OSError, ValueError):
+        return generic
+    if not isinstance(raw_body, bytes) or not raw_body:
+        return generic
+    if len(raw_body) > _HTTP_ERROR_BODY_MAX_BYTES:
+        return generic
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return generic
+    if not isinstance(payload, dict):
+        return generic
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return generic
+
+    status = _safe_token(
+        error.get("status"),
+        allowed_chars=_STATUS_TOKEN_CHARS,
+        max_length=64,
+    )
+    if error.get("status") is not None and status is None:
+        return generic
+
+    details = error.get("details")
+    if details is not None and not isinstance(details, list):
+        return generic
+
+    reason: str | None = None
+    domain: str | None = None
+    service: str | None = None
+    if isinstance(details, list):
+        for detail in details:
+            if not isinstance(detail, dict):
+                return generic
+            if detail.get("@type") != _ERROR_INFO_TYPE:
+                continue
+
+            reason = _safe_token(
+                detail.get("reason"),
+                allowed_chars=_STATUS_TOKEN_CHARS,
+                max_length=64,
+            )
+            domain = _safe_token(
+                detail.get("domain"),
+                allowed_chars=_DOMAIN_TOKEN_CHARS,
+                max_length=128,
+            )
+            metadata = detail.get("metadata")
+            if metadata is not None and not isinstance(metadata, dict):
+                return generic
+            if isinstance(metadata, dict):
+                service = _safe_token(
+                    metadata.get("service"),
+                    allowed_chars=_DOMAIN_TOKEN_CHARS,
+                    max_length=128,
+                )
+                if metadata.get("service") is not None and service is None:
+                    return generic
+            if detail.get("reason") is not None and reason is None:
+                return generic
+            if detail.get("domain") is not None and domain is None:
+                return generic
+            break
+
+    fields: list[str] = []
+    if status is not None:
+        fields.append(f"STATUS={status}")
+    if reason is not None:
+        fields.append(f"REASON={reason}")
+    if domain is not None:
+        fields.append(f"DOMAIN={domain}")
+    if service is not None:
+        fields.append(f"SERVICE={service}")
+    if not fields:
+        return generic
+    return f"{generic}|{'|'.join(fields)}"
+
+
 class GeminiSelectionAdviceTransport:
     """Production transport. The only module allowed to call the Gemini API."""
 
@@ -124,7 +229,8 @@ class GeminiSelectionAdviceTransport:
             ) as response:
                 raw_body = response.read()
         except urllib.error.HTTPError as exc:
-            raise ProviderTransportError(f"GEMINI_HTTP_ERROR:{exc.code}") from None
+            reason = _sanitized_http_error_reason(exc)
+            raise ProviderTransportError(reason) from None
         except urllib.error.URLError as exc:
             # urlopen(..., timeout=...) reports a connect/read timeout by
             # wrapping it as URLError(reason=<TimeoutError instance>), not by

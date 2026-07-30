@@ -154,7 +154,8 @@ class SelectionAdviceIntegrationController(ExplicitTurnNumberController):
             )
         except (DomainError, KeyError, RuntimeError):
             self._error_message = (
-                "表示中のGemini AdviceをAPPLYできませんでした。canonical stateは変更されていません。"
+                "表示中のGemini AdviceをAPPLYできませんでした。"
+                "canonical stateは変更されていません。"
             )
         else:
             self._error_message = None

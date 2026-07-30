@@ -71,6 +71,7 @@ _HTTP_FAILURE = re.compile(
     r"(?:\|(?:STATUS|REASON|DOMAIN|SERVICE)=[A-Za-z0-9._-]{1,128})*$"
 )
 _NETWORK_FAILURE = re.compile(r"^GEMINI_NETWORK_ERROR(?::[A-Za-z0-9._-]{1,64})?$")
+_DISPLAY_TOKEN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 _FAILURE_MESSAGES = {
     "GEMINI_API_KEY_MISSING": "Gemini APIキーが設定されていないため送信できません。",
@@ -114,6 +115,34 @@ def describe_gemini_failure(reason: str) -> str:
     if sanitized.startswith("GEMINI_NETWORK_ERROR"):
         return "Gemini APIに接続できませんでした（GEMINI_NETWORK_ERROR）。"
     return _FAILURE_MESSAGES["GEMINI_FAILURE_UNCLASSIFIED"]
+
+
+def _safe_display_token(value: object) -> str:
+    if isinstance(value, str) and _DISPLAY_TOKEN.fullmatch(value):
+        return value
+    return "UNKNOWN"
+
+
+def _allowlisted_selection_payload(
+    payload: object,
+    self_team: tuple[str, ...],
+) -> dict[str, object]:
+    """Discard arbitrary provider metadata before DB audit or UI handling."""
+
+    if not isinstance(payload, dict):
+        return {}
+    safe: dict[str, object] = {}
+    selected_three = payload.get("selected_three")
+    if (
+        isinstance(selected_three, list)
+        and len(selected_three) <= len(self_team)
+        and all(type(name) is str and name in self_team for name in selected_three)
+    ):
+        safe["selected_three"] = list(selected_three)
+    lead = payload.get("lead")
+    if type(lead) is str and lead in self_team:
+        safe["lead"] = lead
+    return safe
 
 
 def _default_envelope_factory(
@@ -206,16 +235,21 @@ class GeminiSelectionAdviceAdapter:
 
         def handle_succeeded(result: SanitizedProviderResult) -> None:
             self._in_flight = False
-            self.last_model = result.model
-            self.last_source_type = result.source_type
-            envelope = self._envelope_factory(job, result)
+            sanitized_result = SanitizedProviderResult(
+                payload=_allowlisted_selection_payload(result.payload, request.self_team),
+                source_type=_safe_display_token(result.source_type),
+                model=_safe_display_token(result.model),
+            )
+            self.last_model = sanitized_result.model
+            self.last_source_type = sanitized_result.source_type
+            envelope = self._envelope_factory(job, sanitized_result)
             disposition = application.apply_selection_advice_result(envelope)
             self.last_disposition = disposition
             if disposition is ResultDisposition.APPLIED:
                 with application.repository.transaction():
                     application.repository.set_selection_advice_model(
                         envelope.result_id,
-                        result.model,
+                        sanitized_result.model,
                     )
             elif disposition is ResultDisposition.STALE_REJECTED:
                 application.fail_selection_advice_job(job.job_id, "GEMINI_RESULT_STALE")

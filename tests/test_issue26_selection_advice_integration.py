@@ -10,7 +10,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from maple_next.application.match_service import MatchApplication
-from maple_next.domain.enums import JobStatus, ResultDisposition
+from maple_next.domain.enums import JobStatus
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers.transport import (
     GEMINI_SOURCE_TYPE,
@@ -181,8 +181,6 @@ def test_happy_path_pending_success_and_human_apply_only(tmp_path: Path) -> None
         dispatch_factory=factory,
     )
     ready_selection(controller)
-    before = repository.load_active_session()
-    assert before is not None
 
     callbacks: list[object] = []
     pending = controller.send_selection_advice_to_gemini(on_result=callbacks.append)
@@ -191,7 +189,6 @@ def test_happy_path_pending_success_and_human_apply_only(tmp_path: Path) -> None
     assert controller.selection_advice_status().status == "PENDING"
     assert adapter.dispatch_count == 1
     assert transport.call_count == 0
-    assert repository.get_applied_selection if True else False
 
     factory.dispatches[0].resolve()
     success = controller.refresh()
@@ -402,6 +399,31 @@ def test_invalid_selection_never_becomes_current_or_applicable(
     repository.close()
 
 
+def test_arbitrary_provider_metadata_is_dropped_before_db_audit(tmp_path: Path) -> None:
+    marker = "raw-provider-message-secret"
+    result = SanitizedProviderResult(
+        payload={
+            "selected_three": ["Meowscarada", "Gholdengo"],
+            "lead": "Meowscarada",
+            "provider_message": marker,
+        },
+        source_type=GEMINI_SOURCE_TYPE,
+        model="gemini-test-model",
+    )
+    transport = FakeSelectionAdviceTransport(responses=[result])
+    repository, _application, adapter, controller = build_controller(tmp_path, transport)
+    ready_selection(controller)
+
+    controller.send_selection_advice_to_gemini(on_result=lambda _view: None)
+    database_dump = "\n".join(repository.connection.iterdump())
+
+    assert marker not in database_dump
+    assert controller.selection_advice_status().status == "FAILED"
+    assert adapter.dispatch_count == 1
+    assert transport.call_count == 1
+    repository.close()
+
+
 @pytest.mark.parametrize(
     ("reason", "expected"),
     [
@@ -437,7 +459,9 @@ def test_failure_display_is_sanitized_and_secret_never_persisted(
     assert transport.call_count == 1
     if reason != expected:
         assert reason not in database_dump
-        assert reason not in controller.refresh().error_message
+        error_message = controller.refresh().error_message
+        assert error_message is not None
+        assert reason not in error_message
     repository.close()
 
 

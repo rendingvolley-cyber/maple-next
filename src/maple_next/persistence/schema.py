@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -58,6 +58,7 @@ def migrate(connection: sqlite3.Connection) -> None:
             lead TEXT NOT NULL,
             backline_json TEXT NOT NULL,
             source_type TEXT NOT NULL DEFAULT 'MOCK',
+            model TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id)
         );
@@ -183,7 +184,7 @@ def migrate(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
 
-        UPDATE schema_meta SET schema_version = 4 WHERE singleton_id = 1;
+        UPDATE schema_meta SET schema_version = 5 WHERE singleton_id = 1;
         """
     )
     _ensure_column(
@@ -191,5 +192,11 @@ def migrate(connection: sqlite3.Connection) -> None:
         "selection_advices",
         "source_type",
         "TEXT NOT NULL DEFAULT 'MOCK'",
+    )
+    _ensure_column(
+        connection,
+        "selection_advices",
+        "model",
+        "TEXT NOT NULL DEFAULT ''",
     )
     connection.commit()

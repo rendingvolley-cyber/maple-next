@@ -15,13 +15,13 @@ from PySide6.QtWidgets import (
 
 from maple_next.domain.enums import MatchOutcome
 from maple_next.ui.controller import OperatorView
-from maple_next.ui.explicit_turn_number import ExplicitTurnNumberWindow
 from maple_next.ui.match_controller import MatchFlowController, MatchOperatorView
+from maple_next.ui.selection_advice_integration import SelectionAdviceIntegrationWindow
 
 _PLACEHOLDER = "選択してください"
 
 
-class MatchFlowWindow(ExplicitTurnNumberWindow):
+class MatchFlowWindow(SelectionAdviceIntegrationWindow):
     """Supported operator window with explicit terminal match commands."""
 
     def __init__(self, controller: MatchFlowController) -> None:

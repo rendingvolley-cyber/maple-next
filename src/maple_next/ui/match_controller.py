@@ -10,8 +10,8 @@ from maple_next.domain.enums import MatchOutcome
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.controller import OperatorInputError, OperatorView
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
-from maple_next.ui.explicit_turn_number import ExplicitTurnNumberController
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
+from maple_next.ui.selection_advice_integration import SelectionAdviceIntegrationController
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +62,7 @@ def _match_message(error: DomainError) -> str:
     return _MATCH_ERROR_MESSAGES.get(code, f"操作を完了できませんでした: {code}")
 
 
-class MatchFlowController(ExplicitTurnNumberController):
+class MatchFlowController(SelectionAdviceIntegrationController):
     """Coordinates explicit outcome, export, and next-match UI commands."""
 
     def __init__(

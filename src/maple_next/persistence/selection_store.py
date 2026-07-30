@@ -19,13 +19,14 @@ class SelectionStoreMixin(StoreBase):
         lead: str,
         backline: tuple[str, str],
         source_type: str = "MOCK",
+        model: str = "",
     ) -> None:
         self.connection.execute(
             """
             INSERT INTO selection_advices (
                 advice_id, session_id, job_id, selected_three_json,
-                lead, backline_json, source_type, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                lead, backline_json, source_type, model, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 advice_id,
@@ -35,9 +36,20 @@ class SelectionStoreMixin(StoreBase):
                 lead,
                 json.dumps(backline, ensure_ascii=False),
                 source_type,
+                model,
                 self._now(),
             ),
         )
+
+    def set_selection_advice_model(self, advice_id: str, model: str) -> None:
+        """Attach the sanitized provider model after strict advice acceptance."""
+
+        cursor = self.connection.execute(
+            "UPDATE selection_advices SET model = ? WHERE advice_id = ?",
+            (model, advice_id),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(advice_id)
 
     def get_selection_advice(self, advice_id: str) -> dict[str, Any]:
         row = self.connection.execute(
@@ -49,10 +61,13 @@ class SelectionStoreMixin(StoreBase):
         backline = cast(list[str], json.loads(str(row["backline_json"])))
         return {
             "advice_id": advice_id,
+            "session_id": str(row["session_id"]),
+            "job_id": str(row["job_id"]),
             "selected_three": (selected_three[0], selected_three[1], selected_three[2]),
             "lead": str(row["lead"]),
             "backline": (backline[0], backline[1]),
             "source_type": str(row["source_type"]),
+            "model": str(row["model"]),
         }
 
     def append_applied_selection(

@@ -134,7 +134,12 @@ def test_async_gemini_worker_thread_is_stopped_before_test_returns(
     QTest.mouseClick(window.gemini_send_button, Qt.MouseButton.LeftButton)
     assert window.gemini_send_button.isEnabled() is False
 
-    pump_until(qapp, lambda: window.gemini_send_button.isEnabled() is True)
+    # The one production Gemini attempt is durably consumed once dispatched
+    # (Issue #29 B-01), so a terminal failure never re-enables the send
+    # button; the sanitized failure message is the completion signal instead.
+    pump_until(qapp, lambda: window._controller.refresh().error_message is not None)  # noqa: SLF001
+    window.render_view()
+    assert window.gemini_send_button.isEnabled() is False
 
     dispatch = gemini_adapter._active_dispatch  # noqa: SLF001 - white-box lifecycle check
     assert isinstance(dispatch, SelectionAdviceDispatch)
@@ -186,7 +191,7 @@ def test_gemini_window_test_order_that_previously_crashed_the_process(
     window.render_view()
 
     QTest.mouseClick(window.gemini_send_button, Qt.MouseButton.LeftButton)
-    pump_until(qapp, lambda: window.gemini_send_button.isEnabled() is True)
+    pump_until(qapp, lambda: window._controller.refresh().error_message is not None)  # noqa: SLF001
     window.close()
     repository.close()
 

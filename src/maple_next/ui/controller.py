@@ -134,6 +134,9 @@ _ERROR_MESSAGES = {
     "ACTION_OUTSIDE_REVIEWED_LEGAL_ACTIONS": "確認済みの合法行動から選んでください。",
     "PROVIDER_REQUEST_PENDING": "MOCK Adviceの処理中です。",
     "PROVIDER_DELIVERY_UNKNOWN": "前回のprovider結果が不明なため、新しい送信はできません。",
+    "GEMINI_SELECTION_ATTEMPT_CONSUMED": (
+        "このSelectionではGemini送信を実行済みです。再送できません。"
+    ),
 }
 
 
@@ -388,6 +391,17 @@ class SelectionFlowController:
     def gemini_send_available(self) -> bool:
         return self._gemini_adapter is not None
 
+    def gemini_selection_attempt_consumed(self) -> bool:
+        """Durable, restart-safe check: has this Selection identity already
+        consumed its one production Gemini attempt?
+
+        Recomputed from the database on every call. Used as a fail-closed
+        guard even for direct/synthetic calls that bypass the UI's own
+        disabled-button gate.
+        """
+
+        return self._application.gemini_selection_attempt_consumed()
+
     def send_selection_advice_to_gemini(
         self,
         *,
@@ -411,6 +425,11 @@ class SelectionFlowController:
             return self.refresh()
         if not current.projection.provider_send_enabled:
             self._error_message = "現在はGeminiへ送信できません。"
+            return self.refresh()
+        if self.gemini_selection_attempt_consumed():
+            self._error_message = _domain_message(
+                DomainError("GEMINI_SELECTION_ATTEMPT_CONSUMED")
+            )
             return self.refresh()
 
         callback_already_ran = False

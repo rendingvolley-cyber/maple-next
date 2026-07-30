@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from maple_next.persistence.attempt_ledger_store import AttemptLedgerStoreMixin
 from maple_next.persistence.job_store import JobStoreMixin
 from maple_next.persistence.match_store import MatchStoreMixin
 from maple_next.persistence.schema import migrate
@@ -21,6 +22,7 @@ class SQLiteRepository(
     SelectionStoreMixin,
     TurnStoreMixin,
     MatchStoreMixin,
+    AttemptLedgerStoreMixin,
 ):
     """The only component allowed to hold a writable SQLite connection."""
 

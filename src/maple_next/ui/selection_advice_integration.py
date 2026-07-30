@@ -237,6 +237,7 @@ class SelectionAdviceIntegrationWindow(ExplicitTurnNumberWindow):
             current.primary_cta == "REQUEST_SELECTION_ADVICE"
             and current.projection.provider_send_enabled
             and status.status not in {"PENDING", "SUCCESS"}
+            and not self._selection_gemini_controller.gemini_selection_attempt_consumed()
         )
         self.gemini_status_label.setText(f"Status: {status.status}")
         self.gemini_failure_label.setText(

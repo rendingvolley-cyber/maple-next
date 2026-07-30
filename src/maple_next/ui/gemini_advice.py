@@ -127,9 +127,11 @@ def _allowlisted_selection_payload(
     payload: object,
     self_team: tuple[str, ...],
 ) -> dict[str, object]:
-    """Discard arbitrary provider metadata before DB audit or UI handling."""
+    """Reject extra keys and discard arbitrary values before DB/UI handling."""
 
     if not isinstance(payload, dict):
+        return {}
+    if set(payload) != {"selected_three", "lead"}:
         return {}
     safe: dict[str, object] = {}
     selected_three = payload.get("selected_three")

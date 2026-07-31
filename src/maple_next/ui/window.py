@@ -224,8 +224,7 @@ class MapleMainWindow(QMainWindow):
         self.apply_confirm_checkbox = QCheckBox("この3体と先発を実際の選出としてAPPLYします")
         self.apply_confirm_checkbox.toggled.connect(self._update_actual_controls)
         layout.addWidget(self.apply_confirm_checkbox)
-        self.apply_button = QPushButton("APPLY")
-        self.apply_button.clicked.connect(self._on_apply)
+        self.apply_button = TrustedSendButton("APPLY", self._on_apply)
         layout.addWidget(self.apply_button)
         self._root_layout.addWidget(self.actual_group)
 
@@ -408,6 +407,7 @@ class MapleMainWindow(QMainWindow):
         self.gemini_send_button.setEnabled(
             projection.primary_cta == "REQUEST_SELECTION_ADVICE"
             and projection.provider_send_enabled
+            and not self._controller.gemini_selection_attempt_consumed()
         )
         self.advice_group.setVisible(projection.current_selection_advice_id is not None)
         if current.advice is not None:

@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import cast
 
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from maple_next.application.service import BattleApplication
@@ -69,7 +71,7 @@ def test_window_supports_one_manual_turn_and_action_history(tmp_path: Path) -> N
         checkbox.setChecked(checkbox.text() in {"Dondozo", "Flutter Mane", "Urshifu"})
     window.actual_lead_box.setCurrentText("Dondozo")
     window.apply_confirm_checkbox.setChecked(True)
-    window.apply_button.click()
+    QTest.mouseClick(window.apply_button, Qt.MouseButton.LeftButton)
     qapp.processEvents()
 
     window.start_turn_button.click()

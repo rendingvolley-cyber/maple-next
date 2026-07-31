@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import cast
 
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from maple_next.application.service import BattleApplication
@@ -79,7 +81,7 @@ def test_pyside6_window_supports_manual_selection_apply_flow(tmp_path: Path) -> 
     window.apply_confirm_checkbox.setChecked(True)
     qapp.processEvents()
     assert window.apply_button.isEnabled()
-    window.apply_button.click()
+    QTest.mouseClick(window.apply_button, Qt.MouseButton.LeftButton)
     qapp.processEvents()
 
     assert window.session_state_label.text() == "BATTLE_READY"

@@ -127,6 +127,90 @@ class BattleApplication:
             self.repository.insert_job(job)
         return job
 
+    def reserve_gemini_selection_attempt(self, command_id: str) -> JobEnvelope:
+        """Atomically reserve and create the one durable production Gemini job.
+
+        Distinct from :meth:`request_selection_advice` (still used by the
+        mock/dev Selection Advice lane): for the production Gemini lane,
+        once this reservation succeeds for a Selection identity (session,
+        match, generation, battle_revision, reviewed_selection_id), no
+        further production Gemini job may ever be created for that same
+        identity, regardless of how the reserved job resolves (success,
+        failure, timeout, crash) or whether the process restarts. Local
+        validation failures before the reservation point (no active
+        session, wrong state, missing reviewed selection) never write a
+        ledger row and never create a job.
+        """
+
+        job_id = str(uuid4())
+        with self.repository.transaction():
+            session = self._require_session(BattleState.SELECTION_OPEN)
+            if session.current_reviewed_selection_id is None:
+                raise DomainError("REVIEWED_SELECTION_REQUIRED")
+            reserved = self.repository.reserve_gemini_selection_attempt(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                battle_revision=session.battle_revision,
+                reviewed_selection_id=session.current_reviewed_selection_id,
+                job_id=job_id,
+            )
+            if not reserved:
+                raise DomainError("GEMINI_SELECTION_ATTEMPT_CONSUMED")
+
+            latest_job = self.repository.latest_job_by_type(
+                session.session_id, JobType.SELECTION_ADVICE
+            )
+            self._guard_provider_request(latest_job)
+            selection_facts = self.repository.get_selection_facts(
+                session.current_reviewed_selection_id
+            )
+            request = build_selection_advice_request(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                battle_revision=session.battle_revision,
+                reviewed_selection_id=session.current_reviewed_selection_id,
+                self_team=selection_facts.self_team,
+                opponent_team=selection_facts.opponent_team,
+            )
+            job = JobEnvelope(
+                contract_version="maple-worker.v1",
+                job_id=job_id,
+                command_id=command_id,
+                job_type=JobType.SELECTION_ADVICE,
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                turn_number=None,
+                base_battle_revision=session.battle_revision,
+                expected_state=BattleState.SELECTION_OPEN,
+                input_snapshot_id=session.current_reviewed_selection_id,
+                request_payload_hash=compute_selection_request_payload_hash(request),
+                human_authorized_at=datetime.now(UTC),
+                status=JobStatus.QUEUED,
+            )
+            self.repository.insert_job(job)
+        return job
+
+    def gemini_selection_attempt_consumed(self) -> bool:
+        """Durable, restart-safe check for the session's current Selection identity.
+
+        Always recomputed from the database; never derived from in-memory
+        adapter state, so it is correct immediately after a fresh restart
+        with a brand-new adapter instance.
+        """
+
+        session = self.repository.load_active_session()
+        if session is None or session.current_reviewed_selection_id is None:
+            return False
+        return self.repository.gemini_selection_attempt_reserved(
+            session_id=session.session_id,
+            match_id=session.match_id,
+            generation=session.generation,
+            reviewed_selection_id=session.current_reviewed_selection_id,
+        )
+
     def build_selection_advice_transport_request(
         self, job: JobEnvelope
     ) -> SelectionAdviceRequest:

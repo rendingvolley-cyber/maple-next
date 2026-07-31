@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -184,7 +184,22 @@ def migrate(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL
         );
 
-        UPDATE schema_meta SET schema_version = 5 WHERE singleton_id = 1;
+        CREATE TABLE IF NOT EXISTS gemini_selection_attempt_ledger (
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            battle_revision INTEGER NOT NULL,
+            reviewed_selection_id TEXT NOT NULL,
+            lane TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            consumed_at_utc TEXT NOT NULL,
+            PRIMARY KEY (
+                session_id, match_id, generation, battle_revision,
+                reviewed_selection_id, lane
+            )
+        );
+
+        UPDATE schema_meta SET schema_version = 6 WHERE singleton_id = 1;
         """
     )
     _ensure_column(

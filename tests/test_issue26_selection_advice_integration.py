@@ -7,6 +7,8 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from maple_next.application.match_service import MatchApplication
@@ -269,7 +271,7 @@ def test_window_open_render_refresh_and_repeat_activation_do_not_auto_send(
 
     window.apply_confirm_checkbox.setChecked(True)
     assert window.apply_button.isEnabled() is True
-    window.apply_button.click()
+    QTest.mouseClick(window.apply_button, Qt.MouseButton.LeftButton)
     current = controller.refresh()
     assert current.applied_selection is not None
     assert current.applied_selection.selected_three == GEMINI_THREE
@@ -483,4 +485,77 @@ def test_non_gemini_source_is_not_gemini_success(tmp_path: Path) -> None:
     assert status.can_apply is False
     assert adapter.dispatch_count == 1
     assert transport.call_count == 1
+    repository.close()
+
+
+def test_successful_advice_never_auto_populates_applied_selections(tmp_path: Path) -> None:
+    """SUCCESS on a Gemini advice must not write applied_selections by itself.
+
+    ``applied_selections`` only ever gets a row from the explicit human APPLY
+    command, never as a side effect of a provider result being accepted.
+    """
+
+    transport = FakeSelectionAdviceTransport(responses=[valid_result()])
+    repository, _application, adapter, controller = build_controller(tmp_path, transport)
+    ready_selection(controller)
+
+    controller.send_selection_advice_to_gemini(on_result=lambda _view: None)
+    status = controller.selection_advice_status()
+
+    assert status.status == "SUCCESS"
+    assert status.can_apply is True
+    assert adapter.dispatch_count == 1
+    assert transport.call_count == 1
+
+    row_count = repository.connection.execute(
+        "SELECT COUNT(*) FROM applied_selections"
+    ).fetchone()[0]
+    assert row_count == 0
+
+    session = repository.load_active_session()
+    assert session is not None
+    assert session.current_applied_selection_id is None
+    assert session.state.value == "SELECTION_ADVICE_READY"
+    repository.close()
+
+
+def test_apply_button_synthetic_click_and_signal_emit_yield_zero_applies(
+    tmp_path: Path,
+) -> None:
+    """APPLY is an irreversible human action; only a genuine OS click may fire it.
+
+    Mirrors the Gemini send button's OS-trust gate (test_trusted_send_gate.py):
+    ``QPushButton.click()`` and a direct ``clicked.emit()`` are never
+    spontaneous, so neither may reach ``_on_apply`` and write an applied
+    selection — only a real, trusted click (as exercised elsewhere via
+    ``QTest.mouseClick``) may.
+    """
+
+    qt_application()
+    transport = FakeSelectionAdviceTransport(responses=[valid_result()])
+    repository, _application, adapter, controller = build_controller(tmp_path, transport)
+    window = MatchFlowWindow(controller)
+    window.show()
+    ready_selection(controller)
+    window.render_view()
+    controller.send_selection_advice_to_gemini(on_result=window.render_view)
+    window.render_view()
+
+    assert transport.call_count == 1
+    window.apply_confirm_checkbox.setChecked(True)
+    assert window.apply_button.isEnabled() is True
+
+    window.apply_button.click()
+    window.apply_button.clicked.emit()
+
+    row_count = repository.connection.execute(
+        "SELECT COUNT(*) FROM applied_selections"
+    ).fetchone()[0]
+    assert row_count == 0
+    current = controller.refresh()
+    assert current.applied_selection is None
+    assert current.session_state == "SELECTION_ADVICE_READY"
+    assert adapter.dispatch_count == 1
+    assert transport.call_count == 1
+    window.close()
     repository.close()

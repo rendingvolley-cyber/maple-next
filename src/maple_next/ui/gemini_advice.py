@@ -64,6 +64,7 @@ _EXACT_FAILURE_CODES = frozenset(
         "GEMINI_DISPATCH_BLOCKED",
         "GEMINI_RESULT_INVALID",
         "GEMINI_RESULT_STALE",
+        "GEMINI_SELECTION_ATTEMPT_CONSUMED",
     }
 )
 _HTTP_FAILURE = re.compile(
@@ -84,6 +85,9 @@ _FAILURE_MESSAGES = {
     "GEMINI_DISPATCH_BLOCKED": "現在のSelection identityでは送信を開始できません。",
     "GEMINI_RESULT_INVALID": "Gemini Selection Adviceが合法性検証を通過しませんでした。",
     "GEMINI_RESULT_STALE": "Gemini Selection Adviceは現在のSelection identityと一致しません。",
+    "GEMINI_SELECTION_ATTEMPT_CONSUMED": (
+        "このSelectionではGemini送信を実行済みです。再送できません。"
+    ),
     "GEMINI_FAILURE_UNCLASSIFIED": "Gemini送信は安全な分類を取得できず失敗しました。",
 }
 
@@ -224,7 +228,17 @@ class GeminiSelectionAdviceAdapter:
             on_failed(reason)
             return
 
-        job = application.request_selection_advice(f"gemini-ui-{uuid4()}")
+        try:
+            job = application.reserve_gemini_selection_attempt(f"gemini-ui-{uuid4()}")
+        except DomainError as exc:
+            reason = (
+                "GEMINI_SELECTION_ATTEMPT_CONSUMED"
+                if str(exc) == "GEMINI_SELECTION_ATTEMPT_CONSUMED"
+                else "GEMINI_DISPATCH_BLOCKED"
+            )
+            self.last_failure_reason = reason
+            on_failed(reason)
+            return
         self.last_job_id = job.job_id
         try:
             request = application.build_selection_advice_transport_request(job)

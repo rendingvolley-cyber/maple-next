@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
-from maple_next.domain.enums import ActionType, BattleState, HpBucket
+from maple_next.domain.enums import ActionOrder, ActionType, BattleState, HpBucket
 
 T = TypeVar("T")
 
@@ -154,6 +154,9 @@ class TurnAdviceSnapshot:
     opponent_prediction: str
     rationale: str
     is_mock: bool = True
+    source_type: str = "MOCK"
+    model: str = "mock-dev"
+    warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.turn_number < 1:
@@ -164,6 +167,8 @@ class TurnAdviceSnapshot:
             raise ValueError("opponent prediction must be explicit")
         if not self.rationale.strip():
             raise ValueError("advice rationale must be explicit")
+        if not self.source_type.strip():
+            raise ValueError("advice source_type must be explicit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,12 +178,17 @@ class RecordedAction:
     turn_number: int
     action_type: ActionType
     action_name: str
+    opponent_action_type: ActionType | None = None
+    opponent_action_name: str = ""
+    action_order: ActionOrder = ActionOrder.UNKNOWN
 
     def __post_init__(self) -> None:
         if self.turn_number < 1:
             raise ValueError("turn number must be positive")
         if not self.action_name.strip():
             raise ValueError("recorded action must be explicit")
+        if self.opponent_action_type is not None and not self.opponent_action_name.strip():
+            raise ValueError("opponent action name must be explicit when type is provided")
 
 
 @dataclass(frozen=True, slots=True)

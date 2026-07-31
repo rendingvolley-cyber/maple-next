@@ -70,6 +70,7 @@ class MockTurnAdviceAdapter:
         action_name: str,
         opponent_prediction: str,
         rationale: str,
+        warnings: tuple[str, ...] = (),
     ) -> MockTurnAdviceResult:
         job = application.request_turn_advice(f"mock-turn-ui-{uuid4()}")
         result = ResultEnvelope(
@@ -91,6 +92,9 @@ class MockTurnAdviceAdapter:
                 "action_name": action_name,
                 "opponent_prediction": opponent_prediction,
                 "rationale": rationale,
+                "source_type": "MOCK",
+                "model": "mock-dev",
+                "warnings": list(warnings),
             },
         )
         disposition = application.apply_turn_advice_result(result)

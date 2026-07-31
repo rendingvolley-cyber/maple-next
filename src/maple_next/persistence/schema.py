@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -114,6 +114,9 @@ def migrate(connection: sqlite3.Connection) -> None:
             opponent_prediction TEXT NOT NULL,
             rationale TEXT NOT NULL,
             is_mock INTEGER NOT NULL CHECK (is_mock IN (0, 1)),
+            source_type TEXT NOT NULL DEFAULT 'MOCK',
+            model TEXT NOT NULL DEFAULT 'mock-dev',
+            warnings_json TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL,
             FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id),
             FOREIGN KEY(turn_id) REFERENCES battle_turns(turn_id),
@@ -199,7 +202,7 @@ def migrate(connection: sqlite3.Connection) -> None:
             )
         );
 
-        UPDATE schema_meta SET schema_version = 6 WHERE singleton_id = 1;
+        UPDATE schema_meta SET schema_version = 8 WHERE singleton_id = 1;
         """
     )
     _ensure_column(
@@ -213,5 +216,41 @@ def migrate(connection: sqlite3.Connection) -> None:
         "selection_advices",
         "model",
         "TEXT NOT NULL DEFAULT ''",
+    )
+    _ensure_column(
+        connection,
+        "turn_advices",
+        "source_type",
+        "TEXT NOT NULL DEFAULT 'MOCK'",
+    )
+    _ensure_column(
+        connection,
+        "turn_advices",
+        "model",
+        "TEXT NOT NULL DEFAULT 'mock-dev'",
+    )
+    _ensure_column(
+        connection,
+        "turn_advices",
+        "warnings_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )
+    _ensure_column(
+        connection,
+        "recorded_actions",
+        "opponent_action_type",
+        "TEXT NULL",
+    )
+    _ensure_column(
+        connection,
+        "recorded_actions",
+        "opponent_action_name",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    _ensure_column(
+        connection,
+        "recorded_actions",
+        "action_order",
+        "TEXT NOT NULL DEFAULT 'UNKNOWN'",
     )
     connection.commit()

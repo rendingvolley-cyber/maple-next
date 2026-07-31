@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import cast
 
-from maple_next.domain.enums import ActionType, HpBucket, MatchOutcome
+from maple_next.domain.enums import ActionOrder, ActionType, HpBucket, MatchOutcome
 from maple_next.domain.match_models import MatchExportRecord, MatchOutcomeRecord
 from maple_next.domain.models import (
     BattleTurn,
@@ -152,6 +152,7 @@ class MatchStoreMixin(StoreBase):
         ).fetchone()
         if row is None:
             return None
+        warnings = cast(list[str], json.loads(str(row["warnings_json"])))
         return TurnAdviceSnapshot(
             turn_advice_id=str(row["turn_advice_id"]),
             turn_id=str(row["turn_id"]),
@@ -163,7 +164,31 @@ class MatchStoreMixin(StoreBase):
             opponent_prediction=str(row["opponent_prediction"]),
             rationale=str(row["rationale"]),
             is_mock=bool(row["is_mock"]),
+            source_type=str(row["source_type"]),
+            model=str(row["model"]),
+            warnings=tuple(warnings),
         )
+
+    def get_turn_facts_created_at(self, turn_facts_id: str) -> str | None:
+        row = self.connection.execute(
+            "SELECT created_at FROM reviewed_turn_facts WHERE turn_facts_id = ?",
+            (turn_facts_id,),
+        ).fetchone()
+        return str(row["created_at"]) if row is not None else None
+
+    def get_turn_advice_created_at(self, turn_advice_id: str) -> str | None:
+        row = self.connection.execute(
+            "SELECT created_at FROM turn_advices WHERE turn_advice_id = ?",
+            (turn_advice_id,),
+        ).fetchone()
+        return str(row["created_at"]) if row is not None else None
+
+    def get_recorded_action_created_at(self, action_id: str) -> str | None:
+        row = self.connection.execute(
+            "SELECT created_at FROM recorded_actions WHERE action_id = ?",
+            (action_id,),
+        ).fetchone()
+        return str(row["created_at"]) if row is not None else None
 
     def get_recorded_action_for_turn(self, turn_id: str) -> RecordedAction | None:
         row = self.connection.execute(
@@ -172,10 +197,18 @@ class MatchStoreMixin(StoreBase):
         ).fetchone()
         if row is None:
             return None
+        opponent_action_type_raw = row["opponent_action_type"]
         return RecordedAction(
             action_id=str(row["action_id"]),
             turn_id=str(row["turn_id"]),
             turn_number=int(row["turn_number"]),
             action_type=ActionType(str(row["action_type"])),
             action_name=str(row["action_name"]),
+            opponent_action_type=(
+                ActionType(str(opponent_action_type_raw))
+                if opponent_action_type_raw is not None
+                else None
+            ),
+            opponent_action_name=str(row["opponent_action_name"]),
+            action_order=ActionOrder(str(row["action_order"])),
         )

@@ -11,7 +11,8 @@ from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.controller import OperatorInputError, OperatorView
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
-from maple_next.ui.selection_advice_integration import SelectionAdviceIntegrationController
+from maple_next.ui.gemini_turn_advice import GeminiTurnAdviceAdapter
+from maple_next.ui.turn_advice_integration import TurnAdviceIntegrationController
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +63,7 @@ def _match_message(error: DomainError) -> str:
     return _MATCH_ERROR_MESSAGES.get(code, f"操作を完了できませんでした: {code}")
 
 
-class MatchFlowController(SelectionAdviceIntegrationController):
+class MatchFlowController(TurnAdviceIntegrationController):
     """Coordinates explicit outcome, export, and next-match UI commands."""
 
     def __init__(
@@ -72,9 +73,15 @@ class MatchFlowController(SelectionAdviceIntegrationController):
         mock_adapter: MockSelectionAdviceAdapter,
         mock_turn_adapter: MockTurnAdviceAdapter | None = None,
         gemini_adapter: GeminiSelectionAdviceAdapter | None = None,
+        turn_gemini_adapter: GeminiTurnAdviceAdapter | None = None,
     ) -> None:
         super().__init__(
-            application, repository, mock_adapter, mock_turn_adapter, gemini_adapter
+            application,
+            repository,
+            mock_adapter,
+            mock_turn_adapter,
+            gemini_adapter,
+            turn_gemini_adapter,
         )
         self._match_application = application
 

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from maple_next.application.projection import DomainProjection, project
 from maple_next.domain.enums import (
+    ActionOrder,
     ActionType,
     BattleState,
     HpBucket,
@@ -34,6 +35,7 @@ from maple_next.providers.selection_request import (
 from maple_next.providers.selection_request import (
     request_payload_hash as compute_selection_request_payload_hash,
 )
+from maple_next.providers.turn_request import TurnAdviceRequest, build_turn_advice_request
 from maple_next.workers.contracts.models import JobEnvelope, ResultEnvelope
 
 
@@ -551,6 +553,79 @@ class BattleApplication:
             self.repository.insert_job(job)
         return job
 
+    def build_turn_advice_transport_request(self, job: JobEnvelope) -> TurnAdviceRequest:
+        """Reconstruct the exact canonical Turn Advice request for a job.
+
+        Used by the UI thread, once, right before handing immutable values to
+        the off-thread fake/injected worker. Never called from the worker
+        itself. Raises :class:`DomainError` if the reconstructed payload hash
+        no longer matches the job's recorded hash (defense in depth against
+        a stale/tampered job id).
+        """
+
+        if job.job_type is not JobType.TURN_ADVICE:
+            raise DomainError("JOB_TYPE_NOT_TURN_ADVICE")
+        facts = self.repository.get_turn_facts(job.input_snapshot_id)
+        payload = facts.to_canonical_dict()
+        payload["battle_revision"] = job.base_battle_revision
+        if self.payload_hash(payload) != job.request_payload_hash:
+            raise DomainError("REQUEST_PAYLOAD_HASH_MISMATCH")
+        return build_turn_advice_request(
+            session_id=job.session_id,
+            match_id=job.match_id,
+            generation=job.generation,
+            turn_number=facts.turn_number,
+            battle_revision=job.base_battle_revision,
+            reviewed_turn_facts_id=facts.turn_facts_id,
+            self_active=facts.self_active,
+            opponent_active=facts.opponent_active,
+            self_hp=facts.self_hp.value,
+            opponent_hp=facts.opponent_hp.value,
+            legal_moves=facts.legal_moves,
+            legal_switches=facts.legal_switches,
+        )
+
+    def mark_turn_advice_dispatched(self, job_id: str) -> None:
+        """Transition exactly one QUEUED Turn Advice job to IN_FLIGHT.
+
+        Guards against dispatching the same job twice: a second call raises
+        ``DomainError`` instead of allowing a second transport.send().
+        """
+
+        with self.repository.transaction():
+            job = self.repository.get_job(job_id)
+            if job.job_type is not JobType.TURN_ADVICE:
+                raise DomainError("JOB_TYPE_NOT_TURN_ADVICE")
+            session = self._require_active_session()
+            latest_job = self.repository.latest_job_by_type(
+                session.session_id, JobType.TURN_ADVICE
+            )
+            if latest_job is None or latest_job.job_id != job.job_id:
+                raise DomainError("JOB_ID_NOT_CURRENT")
+            if job.status is not JobStatus.QUEUED:
+                raise DomainError("JOB_NOT_DISPATCHABLE")
+            self.repository.mark_job_in_flight(job.job_id)
+
+    def fail_turn_advice_job(self, job_id: str, reason: str) -> None:
+        """Fail-closed transport/config failure. Never mutates canonical state.
+
+        Turn facts, session state, battle_revision, and the current advice id
+        are left untouched; only the job's own status changes.
+        ``GEMINI_TIMEOUT`` maps to ``TIMED_OUT``; every other transport or
+        config failure reason maps to ``FAILED``.
+        """
+
+        target_status = JobStatus.TIMED_OUT if reason == "GEMINI_TIMEOUT" else JobStatus.FAILED
+        with self.repository.transaction():
+            try:
+                job = self.repository.get_job(job_id)
+            except KeyError:
+                return
+            if job.job_type is not JobType.TURN_ADVICE:
+                return
+            if job.status in {JobStatus.QUEUED, JobStatus.IN_FLIGHT}:
+                self.repository.update_job_status(job.job_id, target_status)
+
     def apply_turn_advice_result(self, result: ResultEnvelope) -> ResultDisposition:
         with self.repository.transaction():
             job = self._load_result_job_or_audit(result)
@@ -600,6 +675,12 @@ class BattleApplication:
                 action_name = str(result.payload["action_name"]).strip()
                 opponent_prediction = str(result.payload["opponent_prediction"]).strip()
                 rationale = str(result.payload["rationale"]).strip()
+                source_type = str(result.payload.get("source_type", "MOCK")).strip() or "MOCK"
+                model = str(result.payload.get("model", "mock-dev")).strip() or "mock-dev"
+                raw_warnings = result.payload.get("warnings", ())
+                if not isinstance(raw_warnings, (list, tuple)):
+                    raise ValueError("warnings must be a list")
+                warnings = tuple(str(item).strip() for item in raw_warnings if str(item).strip())
                 facts = self.repository.get_turn_facts(job.input_snapshot_id)
                 legal_actions = (
                     facts.legal_moves
@@ -618,7 +699,10 @@ class BattleApplication:
                     action_name=action_name,
                     opponent_prediction=opponent_prediction,
                     rationale=rationale,
-                    is_mock=True,
+                    is_mock=source_type != "GEMINI",
+                    source_type=source_type,
+                    model=model,
+                    warnings=warnings,
                 )
             except (KeyError, TypeError, ValueError) as exc:
                 self.repository.audit_result(
@@ -641,6 +725,9 @@ class BattleApplication:
         action_type: ActionType,
         action_name: str,
         human_confirmed: bool,
+        opponent_action_type: ActionType | None = None,
+        opponent_action_name: str = "",
+        action_order: ActionOrder = ActionOrder.UNKNOWN,
     ) -> RecordedAction:
         if not human_confirmed:
             raise DomainError("HUMAN_ACTION_CONFIRMATION_REQUIRED")
@@ -663,14 +750,21 @@ class BattleApplication:
             normalized_name = action_name.strip()
             if normalized_name not in legal_actions:
                 raise DomainError("ACTION_OUTSIDE_REVIEWED_LEGAL_ACTIONS")
+            normalized_opponent_name = opponent_action_name.strip()
 
-            action = RecordedAction(
-                action_id=str(uuid4()),
-                turn_id=session.current_turn_id,
-                turn_number=facts.turn_number,
-                action_type=action_type,
-                action_name=normalized_name,
-            )
+            try:
+                action = RecordedAction(
+                    action_id=str(uuid4()),
+                    turn_id=session.current_turn_id,
+                    turn_number=facts.turn_number,
+                    action_type=action_type,
+                    action_name=normalized_name,
+                    opponent_action_type=opponent_action_type,
+                    opponent_action_name=normalized_opponent_name,
+                    action_order=action_order,
+                )
+            except ValueError as exc:
+                raise DomainError(f"INVALID_RECORDED_ACTION:{exc}") from exc
             self.repository.append_recorded_action(session.session_id, action)
             session.state = BattleState.TURN_RECORDED
             session.bump_battle()

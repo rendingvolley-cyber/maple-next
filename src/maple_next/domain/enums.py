@@ -42,6 +42,12 @@ class ActionType(StrEnum):
     SWITCH = "SWITCH"
 
 
+class ActionOrder(StrEnum):
+    SELF_FIRST = "SELF_FIRST"
+    OPPONENT_FIRST = "OPPONENT_FIRST"
+    UNKNOWN = "UNKNOWN"
+
+
 class JobType(StrEnum):
     CAPTURE = "CAPTURE"
     OCR = "OCR"

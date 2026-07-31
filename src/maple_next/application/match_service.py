@@ -18,7 +18,7 @@ from maple_next.domain.match_models import MatchExportRecord, MatchOutcomeRecord
 from maple_next.domain.models import BattleSession
 from maple_next.persistence.sqlite import SQLiteRepository
 
-MATCH_EXPORT_SCHEMA_VERSION = "maple-match.v1"
+MATCH_EXPORT_SCHEMA_VERSION = "maple-match.v2"
 
 
 class MatchApplication(BattleApplication):
@@ -214,18 +214,46 @@ class MatchApplication(BattleApplication):
                         "legal_moves": list(facts.legal_moves),
                         "legal_switches": list(facts.legal_switches),
                         "human_note": facts.human_note,
+                        "provenance": "HUMAN_CONFIRMED",
+                        "created_at_utc": self.repository.get_turn_facts_created_at(
+                            facts.turn_facts_id
+                        ),
                     },
                     "advice": (
                         {
-                            "source_type": "MOCK" if advice.is_mock else "UNKNOWN",
+                            "source_type": advice.source_type,
+                            "model": advice.model,
                             "recommended_action_type": advice.action_type.value,
                             "recommended_action_name": advice.action_name,
                             "opponent_prediction": advice.opponent_prediction,
                             "rationale": advice.rationale,
+                            "warnings": list(advice.warnings),
+                            "binding": "APPLIED",
+                            "legality": "VALID",
+                            "created_at_utc": self.repository.get_turn_advice_created_at(
+                                advice.turn_advice_id
+                            ),
                         }
                         if advice is not None
                         else None
                     ),
+                    "self_executed_action": {
+                        "action_type": actual.action_type.value,
+                        "action_name": actual.action_name,
+                    },
+                    "opponent_executed_action": (
+                        {
+                            "action_type": actual.opponent_action_type.value,
+                            "action_name": actual.opponent_action_name,
+                        }
+                        if actual.opponent_action_type is not None
+                        else None
+                    ),
+                    "action_order": actual.action_order.value,
+                    "recorded_at_utc": self.repository.get_recorded_action_created_at(
+                        actual.action_id
+                    ),
+                    # Retained for backward compatibility with earlier exports.
                     "actual_action": {
                         "action_type": actual.action_type.value,
                         "action_name": actual.action_name,
@@ -238,6 +266,13 @@ class MatchApplication(BattleApplication):
                 "turn_number": action.turn_number,
                 "action_type": action.action_type.value,
                 "action_name": action.action_name,
+                "opponent_action_type": (
+                    action.opponent_action_type.value
+                    if action.opponent_action_type is not None
+                    else None
+                ),
+                "opponent_action_name": action.opponent_action_name,
+                "action_order": action.action_order.value,
             }
             for action in self.repository.list_recorded_actions(session.session_id)
         ]

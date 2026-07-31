@@ -8,7 +8,7 @@ from typing import cast
 
 from maple_next.application.projection import DomainProjection
 from maple_next.application.service import BattleApplication, DomainError
-from maple_next.domain.enums import ActionType, HpBucket, ResultDisposition
+from maple_next.domain.enums import ActionOrder, ActionType, HpBucket, ResultDisposition
 from maple_next.domain.models import AppliedSelectionSnapshot
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
@@ -54,6 +54,9 @@ class TurnAdviceView:
     opponent_prediction: str
     rationale: str
     is_mock: bool = True
+    source_type: str = "MOCK"
+    model: str = "mock-dev"
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +64,9 @@ class RecordedActionView:
     turn_number: int
     action_type: str
     action_name: str
+    opponent_action_type: str | None = None
+    opponent_action_name: str = ""
+    action_order: str = "UNKNOWN"
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +311,9 @@ class SelectionFlowController:
                 opponent_prediction=stored_turn_advice.opponent_prediction,
                 rationale=stored_turn_advice.rationale,
                 is_mock=stored_turn_advice.is_mock,
+                source_type=stored_turn_advice.source_type,
+                model=stored_turn_advice.model,
+                warnings=stored_turn_advice.warnings,
             )
         if projection.session_id is not None:
             action_history = tuple(
@@ -312,6 +321,13 @@ class SelectionFlowController:
                     turn_number=action.turn_number,
                     action_type=action.action_type.value,
                     action_name=action.action_name,
+                    opponent_action_type=(
+                        action.opponent_action_type.value
+                        if action.opponent_action_type is not None
+                        else None
+                    ),
+                    opponent_action_name=action.opponent_action_name,
+                    action_order=action.action_order.value,
                 )
                 for action in self._repository.list_recorded_actions(
                     projection.session_id
@@ -550,6 +566,7 @@ class SelectionFlowController:
         action_name: str,
         opponent_prediction: str,
         rationale: str,
+        warnings: tuple[str, ...] = (),
     ) -> OperatorView:
         current = self.refresh()
         try:
@@ -576,6 +593,7 @@ class SelectionFlowController:
                 action_name=normalized_name,
                 opponent_prediction=normalized_prediction,
                 rationale=normalized_rationale,
+                warnings=tuple(item.strip() for item in warnings if item.strip()),
             )
             if result.disposition is not ResultDisposition.APPLIED:
                 raise OperatorInputError("MOCK Turn Adviceを適用できませんでした。")
@@ -595,16 +613,33 @@ class SelectionFlowController:
         action_type: str,
         action_name: str,
         human_confirmed: bool,
+        opponent_action_type: str = "",
+        opponent_action_name: str = "",
+        action_order: str = ActionOrder.UNKNOWN.value,
     ) -> OperatorView:
         try:
             typed_action = validate_action_type(action_type)
             normalized_name = action_name.strip()
             if not normalized_name:
                 raise OperatorInputError("実際に選んだ行動を選択してください。")
+            normalized_opponent_type = opponent_action_type.strip()
+            typed_opponent_type: ActionType | None = None
+            if normalized_opponent_type:
+                typed_opponent_type = validate_action_type(normalized_opponent_type)
+            normalized_opponent_name = opponent_action_name.strip()
+            if typed_opponent_type is not None and not normalized_opponent_name:
+                raise OperatorInputError("相手の実際の行動名を入力してください。")
+            try:
+                typed_order = ActionOrder(action_order.strip() or ActionOrder.UNKNOWN.value)
+            except ValueError as exc:
+                raise OperatorInputError("行動順序は一覧から選択してください。") from exc
             self._application.record_actual_action(
                 action_type=typed_action,
                 action_name=normalized_name,
                 human_confirmed=human_confirmed,
+                opponent_action_type=typed_opponent_type,
+                opponent_action_name=normalized_opponent_name,
+                action_order=typed_order,
             )
         except OperatorInputError as error:
             self._error_message = str(error)

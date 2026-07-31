@@ -17,11 +17,12 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from maple_next.domain.enums import ActionType, HpBucket
+from maple_next.domain.enums import ActionOrder, ActionType, HpBucket
 from maple_next.ui.controller import OperatorView, SelectionFlowController, TurnFactsView
 from maple_next.ui.trusted_input import TrustedSendButton
 
@@ -74,14 +75,12 @@ class MapleMainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         self.setWindowTitle("Maple Next — Battle Record")
-        self.resize(980, 960)
+        self.resize(1180, 960)
 
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        root = QWidget(scroll)
-        self._root_layout = QVBoxLayout(root)
-        self._root_layout.setContentsMargins(24, 24, 24, 24)
-        self._root_layout.setSpacing(16)
+        outer = QWidget(self)
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(24, 24, 24, 24)
+        outer_layout.setSpacing(16)
 
         heading = QLabel("今なにをすべきか")
         heading.setStyleSheet("font-size: 22px; font-weight: 700;")
@@ -121,22 +120,95 @@ class MapleMainWindow(QMainWindow):
             status_frame,
             self.new_match_button,
         ):
-            self._root_layout.addWidget(widget)
+            outer_layout.addWidget(widget)
+
+        self.header_tabs = QTabWidget()
+        outer_layout.addWidget(self.header_tabs, 1)
+
+        selection_scroll = QScrollArea()
+        selection_scroll.setWidgetResizable(True)
+        selection_page = QWidget()
+        self._selection_layout = QVBoxLayout(selection_page)
+        self._selection_layout.setContentsMargins(4, 4, 4, 4)
+        self._selection_layout.setSpacing(16)
+        selection_scroll.setWidget(selection_page)
+        self.header_tabs.addTab(selection_scroll, "選出")
+
+        battle_scroll = QScrollArea()
+        battle_scroll.setWidgetResizable(True)
+        battle_page = QWidget()
+        self._root_layout = QVBoxLayout(battle_page)
+        self._root_layout.setContentsMargins(4, 4, 4, 4)
+        self._root_layout.setSpacing(16)
+        battle_scroll.setWidget(battle_page)
+        self.header_tabs.addTab(battle_scroll, "バトルレコード")
 
         self._build_selection_facts_group()
         self._build_mock_advice_group()
         self._build_gemini_send_group()
         self._build_advice_display_group()
         self._build_actual_selection_group()
+        self._selection_layout.addStretch(1)
+
         self._build_battle_ready_group()
+        self._build_battle_record_columns()
+        self._root_layout.addStretch(1)
+
+        self.setCentralWidget(outer)
+
+    def _build_battle_record_columns(self) -> None:
+        """左: 確定turn log / 中央: 映像・事実・行動入力 / 右: Gemini Turn Advice."""
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+
+        left_widget = QWidget()
+        self._left_column_layout = QVBoxLayout(left_widget)
+        self._left_column_layout.setContentsMargins(0, 0, 0, 0)
+        columns.addWidget(left_widget, 1)
+
+        center_widget = QWidget()
+        self._center_column_layout = QVBoxLayout(center_widget)
+        self._center_column_layout.setContentsMargins(0, 0, 0, 0)
+        columns.addWidget(center_widget, 2)
+
+        right_widget = QWidget()
+        self._right_column_layout = QVBoxLayout(right_widget)
+        self._right_column_layout.setContentsMargins(0, 0, 0, 0)
+        columns.addWidget(right_widget, 1)
+
+        self._root_layout.addLayout(columns)
+
+        self._build_action_history_group()
+
+        self._build_capture_status_group()
         self._build_turn_facts_group()
+        self._build_actual_action_group()
+
         self._build_mock_turn_advice_group()
         self._build_turn_advice_display_group()
-        self._build_actual_action_group()
-        self._build_action_history_group()
-        self._root_layout.addStretch(1)
-        scroll.setWidget(root)
-        self.setCentralWidget(scroll)
+
+        self._left_column_layout.addStretch(1)
+        self._center_column_layout.addStretch(1)
+        self._right_column_layout.addStretch(1)
+
+    def _build_capture_status_group(self) -> None:
+        self.capture_status_group = QGroupBox("UGREEN映像")
+        layout = QVBoxLayout(self.capture_status_group)
+        self.capture_status_label = QLabel(
+            "capture未接続 — manual-safe fallback。手動入力でturnを継続できます。"
+        )
+        self.capture_status_label.setWordWrap(True)
+        layout.addWidget(self.capture_status_label)
+        self._center_column_layout.addWidget(self.capture_status_group)
+
+    def set_capture_status(self, *, available: bool, detail: str = "") -> None:
+        """Sanitized capture-adapter status hook (no device I/O in this module)."""
+
+        if available:
+            text = detail or "capture映像を表示しています。"
+        else:
+            text = detail or "capture未接続 — manual-safe fallback。手動入力でturnを継続できます。"
+        self.capture_status_label.setText(text)
 
     def _build_selection_facts_group(self) -> None:
         self.selection_facts_group = QGroupBox("Selection facts — 手動入力")
@@ -157,7 +229,7 @@ class MapleMainWindow(QMainWindow):
         self.confirm_facts_button = QPushButton("6体を確認")
         self.confirm_facts_button.clicked.connect(self._on_confirm_facts)
         layout.addWidget(self.confirm_facts_button, 7, 0, 1, 2)
-        self._root_layout.addWidget(self.selection_facts_group)
+        self._selection_layout.addWidget(self.selection_facts_group)
 
     def _build_mock_advice_group(self) -> None:
         self.mock_group = QGroupBox("開発用 MOCK Selection Advice — ネットワーク送信なし")
@@ -173,7 +245,7 @@ class MapleMainWindow(QMainWindow):
         self.mock_submit_button = QPushButton("MOCK Adviceを投入")
         self.mock_submit_button.clicked.connect(self._on_submit_mock)
         layout.addRow(self.mock_submit_button)
-        self._root_layout.addWidget(self.mock_group)
+        self._selection_layout.addWidget(self.mock_group)
 
     def _build_gemini_send_group(self) -> None:
         self.gemini_group = QGroupBox("Gemini Selection Advice — 人間による明示送信")
@@ -188,7 +260,7 @@ class MapleMainWindow(QMainWindow):
             "SEND SELECTION TO GEMINI", self._on_trusted_send_to_gemini
         )
         layout.addWidget(self.gemini_send_button)
-        self._root_layout.addWidget(self.gemini_group)
+        self._selection_layout.addWidget(self.gemini_group)
 
     def _build_advice_display_group(self) -> None:
         self.advice_group = QGroupBox("受領したSelection Advice")
@@ -199,7 +271,7 @@ class MapleMainWindow(QMainWindow):
         layout.addRow("提供元", self.advice_source_label)
         layout.addRow("提案3体", self.advice_three_label)
         layout.addRow("提案先発", self.advice_lead_label)
-        self._root_layout.addWidget(self.advice_group)
+        self._selection_layout.addWidget(self.advice_group)
 
     def _build_actual_selection_group(self) -> None:
         self.actual_group = QGroupBox("実際の選出 — 人間が決定")
@@ -226,7 +298,7 @@ class MapleMainWindow(QMainWindow):
         layout.addWidget(self.apply_confirm_checkbox)
         self.apply_button = TrustedSendButton("APPLY", self._on_apply)
         layout.addWidget(self.apply_button)
-        self._root_layout.addWidget(self.actual_group)
+        self._selection_layout.addWidget(self.actual_group)
 
     def _build_battle_ready_group(self) -> None:
         self.ready_group = QGroupBox("APPLY済みSelection")
@@ -284,7 +356,7 @@ class MapleMainWindow(QMainWindow):
         self.confirm_turn_facts_button = QPushButton("Turn factsを確認／修正")
         self.confirm_turn_facts_button.clicked.connect(self._on_confirm_turn_facts)
         layout.addRow(self.confirm_turn_facts_button)
-        self._root_layout.addWidget(self.turn_facts_group)
+        self._center_column_layout.addWidget(self.turn_facts_group)
 
     def _build_mock_turn_advice_group(self) -> None:
         self.mock_turn_group = QGroupBox("開発用 MOCK Turn Advice — ネットワーク送信なし")
@@ -301,27 +373,41 @@ class MapleMainWindow(QMainWindow):
         self.mock_turn_prediction_input.setPlaceholderText("相手の次行動予測")
         self.mock_turn_rationale_input = QLineEdit()
         self.mock_turn_rationale_input.setPlaceholderText("簡潔な理由")
+        self.mock_turn_warnings_input = QLineEdit()
+        self.mock_turn_warnings_input.setPlaceholderText("任意の警告（; 区切り）")
         layout.addRow("推奨action種別", self.mock_turn_action_type_box)
         layout.addRow("推奨action", self.mock_turn_action_name_box)
         layout.addRow("相手の次行動予測", self.mock_turn_prediction_input)
         layout.addRow("理由", self.mock_turn_rationale_input)
+        layout.addRow("警告", self.mock_turn_warnings_input)
         self.mock_turn_submit_button = QPushButton("MOCK Turn Adviceを投入")
         self.mock_turn_submit_button.clicked.connect(self._on_submit_mock_turn)
         layout.addRow(self.mock_turn_submit_button)
-        self._root_layout.addWidget(self.mock_turn_group)
+        self._right_column_layout.addWidget(self.mock_turn_group)
 
     def _build_turn_advice_display_group(self) -> None:
-        self.turn_advice_group = QGroupBox("受領したTurn Advice（MOCK）")
+        self.turn_advice_group = QGroupBox("受領したTurn Advice")
         layout = QFormLayout(self.turn_advice_group)
         self.turn_advice_action_label = QLabel()
         self.turn_advice_prediction_label = QLabel()
         self.turn_advice_prediction_label.setWordWrap(True)
         self.turn_advice_rationale_label = QLabel()
         self.turn_advice_rationale_label.setWordWrap(True)
+        self.turn_advice_warnings_label = QLabel()
+        self.turn_advice_warnings_label.setWordWrap(True)
+        self.turn_advice_source_label = QLabel()
+        self.turn_advice_model_label = QLabel()
+        self.turn_advice_binding_label = QLabel()
+        self.turn_advice_legality_label = QLabel()
         layout.addRow("推奨action", self.turn_advice_action_label)
         layout.addRow("相手予測", self.turn_advice_prediction_label)
         layout.addRow("理由", self.turn_advice_rationale_label)
-        self._root_layout.addWidget(self.turn_advice_group)
+        layout.addRow("警告", self.turn_advice_warnings_label)
+        layout.addRow("Source", self.turn_advice_source_label)
+        layout.addRow("Model", self.turn_advice_model_label)
+        layout.addRow("Binding", self.turn_advice_binding_label)
+        layout.addRow("Legality", self.turn_advice_legality_label)
+        self._right_column_layout.addWidget(self.turn_advice_group)
 
     def _build_actual_action_group(self) -> None:
         self.actual_action_group = QGroupBox("実際の行動 — 人間が記録")
@@ -346,11 +432,24 @@ class MapleMainWindow(QMainWindow):
         )
         layout.addRow("行動種別", self.actual_action_type_box)
         layout.addRow("実際の行動", self.actual_action_name_box)
+
+        self.opponent_action_type_box = QComboBox()
+        self.opponent_action_type_box.addItems(
+            [_PLACEHOLDER, ActionType.MOVE.value, ActionType.SWITCH.value]
+        )
+        self.opponent_action_name_input = QLineEdit()
+        self.opponent_action_name_input.setPlaceholderText("相手の実際の行動（任意）")
+        self.action_order_box = QComboBox()
+        self.action_order_box.addItems([order.value for order in ActionOrder])
+        layout.addRow("相手の行動種別（任意）", self.opponent_action_type_box)
+        layout.addRow("相手の実際の行動（任意）", self.opponent_action_name_input)
+        layout.addRow("行動順序", self.action_order_box)
+
         layout.addRow(self.actual_action_confirm_checkbox)
         self.record_action_button = QPushButton("実際の行動を記録")
         self.record_action_button.clicked.connect(self._on_record_action)
         layout.addRow(self.record_action_button)
-        self._root_layout.addWidget(self.actual_action_group)
+        self._center_column_layout.addWidget(self.actual_action_group)
 
     def _build_action_history_group(self) -> None:
         self.history_group = QGroupBox("Action-only history")
@@ -361,7 +460,7 @@ class MapleMainWindow(QMainWindow):
         self.next_turn_button = QPushButton("NEXT TURN")
         self.next_turn_button.clicked.connect(self._on_next_turn)
         layout.addWidget(self.next_turn_button)
-        self._root_layout.addWidget(self.history_group)
+        self._left_column_layout.addWidget(self.history_group)
 
     def render_view(self, view: OperatorView | None = None) -> None:
         current = view if view is not None else self._controller.refresh()
@@ -384,6 +483,24 @@ class MapleMainWindow(QMainWindow):
         self.new_match_button.setEnabled(projection.primary_cta_enabled)
         selection_open = projection.session_state == "SELECTION_OPEN"
         self.selection_facts_group.setVisible(selection_open)
+
+        battle_record_states = {
+            "BATTLE_READY",
+            "TURN_CAPTURE_PENDING",
+            "TURN_REVIEW_REQUIRED",
+            "TURN_REVIEWED",
+            "TURN_RECORDED",
+            "MATCH_ENDED",
+            "MATCH_EXPORTED",
+        }
+        if projection.session_state in battle_record_states:
+            self.header_tabs.setCurrentIndex(1)
+        elif projection.session_state in {
+            "SELECTION_OPEN",
+            "SELECTION_ADVICE_READY",
+            None,
+        }:
+            self.header_tabs.setCurrentIndex(0)
         facts_editable = projection.primary_cta == "CONFIRM_SELECTION_FACTS"
         self.confirm_facts_button.setEnabled(facts_editable)
         for field in (*self.self_team_inputs, *self.opponent_team_inputs):
@@ -464,6 +581,13 @@ class MapleMainWindow(QMainWindow):
                 current.turn_advice.opponent_prediction
             )
             self.turn_advice_rationale_label.setText(current.turn_advice.rationale)
+            self.turn_advice_warnings_label.setText(
+                "; ".join(current.turn_advice.warnings) or "—"
+            )
+            self.turn_advice_source_label.setText(current.turn_advice.source_type)
+            self.turn_advice_model_label.setText(current.turn_advice.model)
+            self.turn_advice_binding_label.setText("CURRENT")
+            self.turn_advice_legality_label.setText("VALID")
 
         self.actual_action_group.setVisible(
             projection.primary_cta == "RECORD_ACTUAL_ACTION"
@@ -473,9 +597,18 @@ class MapleMainWindow(QMainWindow):
             self.actual_action_name_box.clear()
             self.actual_action_name_box.addItem(_PLACEHOLDER)
             self.actual_action_confirm_checkbox.setChecked(False)
+            self.opponent_action_type_box.setCurrentIndex(0)
+            self.opponent_action_name_input.clear()
+            self.action_order_box.setCurrentText(ActionOrder.UNKNOWN.value)
 
         history_lines = [
-            f"Turn {item.turn_number}: {item.action_type} {item.action_name}"
+            f"Turn {item.turn_number}: 自分={item.action_type} {item.action_name}"
+            + (
+                f" / 相手={item.opponent_action_type} {item.opponent_action_name}"
+                if item.opponent_action_type is not None
+                else ""
+            )
+            + f" / 順序={item.action_order}"
             for item in current.action_history
         ]
         self.action_history_label.setText(
@@ -531,6 +664,7 @@ class MapleMainWindow(QMainWindow):
         self.mock_turn_action_type_box.setCurrentIndex(0)
         self.mock_turn_prediction_input.clear()
         self.mock_turn_rationale_input.clear()
+        self.mock_turn_warnings_input.clear()
 
     def _load_turn_facts(self, facts: TurnFactsView) -> None:
         self.self_active_box.setCurrentText(facts.self_active)
@@ -677,19 +811,31 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_submit_mock_turn(self, _checked: bool = False) -> None:
+        warnings = tuple(
+            part.strip()
+            for part in self.mock_turn_warnings_input.text().split(";")
+            if part.strip()
+        )
         view = self._controller.submit_mock_turn_advice(
             action_type=self.mock_turn_action_type_box.currentText(),
             action_name=self.mock_turn_action_name_box.currentText(),
             opponent_prediction=self.mock_turn_prediction_input.text(),
             rationale=self.mock_turn_rationale_input.text(),
+            warnings=warnings,
         )
         self.render_view(view)
 
     def _on_record_action(self, _checked: bool = False) -> None:
+        opponent_type = self.opponent_action_type_box.currentText()
+        if opponent_type == _PLACEHOLDER:
+            opponent_type = ""
         view = self._controller.record_actual_action(
             action_type=self.actual_action_type_box.currentText(),
             action_name=self.actual_action_name_box.currentText(),
             human_confirmed=self.actual_action_confirm_checkbox.isChecked(),
+            opponent_action_type=opponent_type,
+            opponent_action_name=self.opponent_action_name_input.text(),
+            action_order=self.action_order_box.currentText(),
         )
         self.render_view(view)
 

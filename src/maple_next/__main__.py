@@ -17,8 +17,10 @@ from maple_next.providers.transport import (
     GeminiSelectionAdviceTransport,
     load_provider_config_from_env,
 )
+from maple_next.providers.turn_transport import FakeTurnAdviceTransport
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
+from maple_next.ui.gemini_turn_advice import GeminiTurnAdviceAdapter
 from maple_next.ui.match_controller import MatchFlowController
 from maple_next.ui.match_window import MatchFlowWindow
 
@@ -63,6 +65,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 GeminiSelectionAdviceTransport(),
                 load_provider_config_from_env,
             ),
+            turn_gemini_adapter=GeminiTurnAdviceAdapter(FakeTurnAdviceTransport()),
         )
         window = MatchFlowWindow(controller)
         window.show()

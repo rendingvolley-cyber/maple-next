@@ -92,3 +92,32 @@ def test_pyside6_window_supports_manual_selection_apply_flow(tmp_path: Path) -> 
     assert controller.network_call_count == 0
     window.close()
     repository.close()
+
+
+def test_header_has_exactly_two_tabs_and_battle_record_uses_three_columns(
+    tmp_path: Path,
+) -> None:
+    qt_application()
+    repository = SQLiteRepository(tmp_path / "maple.db")
+    application = BattleApplication(repository)
+    controller = SelectionFlowController(
+        application,
+        repository,
+        MockSelectionAdviceAdapter(),
+    )
+    window = MapleMainWindow(controller)
+
+    assert window.header_tabs.count() == 2
+    assert window.header_tabs.tabText(0) == "選出"
+    assert window.header_tabs.tabText(1) == "バトルレコード"
+
+    assert window.capture_status_group is not None
+    assert "manual" in window.capture_status_label.text().lower()
+
+    window.set_capture_status(available=True, detail="capture OK")
+    assert window.capture_status_label.text() == "capture OK"
+    window.set_capture_status(available=False)
+    assert "manual" in window.capture_status_label.text().lower()
+
+    window.close()
+    repository.close()

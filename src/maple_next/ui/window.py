@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -22,9 +24,41 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from maple_next.capture.contracts import CaptureStatus, CaptureStatusCode, VideoCaptureBackend
+from maple_next.capture.qt_ugreen import QtMultimediaUgreenBackend
+from maple_next.capture.service import CaptureService
 from maple_next.domain.enums import ActionOrder, ActionType, HpBucket
+from maple_next.ocr.contracts import (
+    OcrCandidate,
+    OcrCandidateBackend,
+    OcrCandidateBundle,
+    OcrCandidateContext,
+    OcrFieldKey,
+)
+from maple_next.ocr.service import OcrCandidateService, UnavailableOcrCandidateBackend
 from maple_next.ui.controller import OperatorView, SelectionFlowController, TurnFactsView
 from maple_next.ui.trusted_input import TrustedSendButton
+
+#: Poll interval for capture status / OCR candidate refresh. Display-only:
+#: never triggers a Turn Advice send, a domain command, or a canonical write.
+_CAPTURE_POLL_INTERVAL_MS = 500
+
+_CAPTURE_STATUS_LABELS: dict[str, str] = {
+    CaptureStatusCode.STOPPED: (
+        "capture未接続 — manual-safe fallback。手動入力でturnを継続できます。"
+    ),
+    CaptureStatusCode.STARTING: "capture起動中…",
+    CaptureStatusCode.AVAILABLE: "capture映像を表示しています。",
+    CaptureStatusCode.DEVICE_UNAVAILABLE: (
+        "UGREENデバイスが見つかりません — manual-safe fallback。"
+    ),
+    CaptureStatusCode.OPEN_FAILED: "capture映像を開始できません — manual-safe fallback。",
+    CaptureStatusCode.FRAME_UNAVAILABLE: (
+        "映像フレームがまだありません — manual-safe fallback。"
+    ),
+    CaptureStatusCode.FRAME_STALE: "最新フレームが古いためOCR候補は使用しません。",
+    CaptureStatusCode.CAPTURE_ERROR: "capture映像でエラーが発生しました — manual-safe fallback。",
+}
 
 _CTA_LABELS = {
     "CREATE_NEW_MATCH": "NEW MATCH",
@@ -62,7 +96,14 @@ _PLACEHOLDER = "選択してください"
 class MapleMainWindow(QMainWindow):
     """Thin renderer over SelectionFlowController and DomainProjection."""
 
-    def __init__(self, controller: SelectionFlowController) -> None:
+    def __init__(
+        self,
+        controller: SelectionFlowController,
+        *,
+        capture_backend: VideoCaptureBackend | None = None,
+        ocr_backend: OcrCandidateBackend | None = None,
+        auto_start_capture: bool = True,
+    ) -> None:
         super().__init__()
         self._controller = controller
         self._loaded_team: tuple[str, ...] = ()
@@ -70,8 +111,43 @@ class MapleMainWindow(QMainWindow):
         self._loaded_turn_number: int | None = None
         self._loaded_turn_facts_id: str | None = None
         self._current_turn_facts: TurnFactsView | None = None
+
+        # -- Lane B (issue #31): UGREEN capture + OCR candidates -----------------
+        # capture_service/ocr_service are display/candidate-only: nothing here
+        # ever writes to the repository, calls a domain command, or auto-adopts
+        # a candidate into canonical turn facts. Manual entry always works,
+        # capture present or not (CaptureStatus.manual_entry_allowed is
+        # always True upstream).
+        self._capture_service = CaptureService(capture_backend or QtMultimediaUgreenBackend())
+        self._ocr_service = OcrCandidateService(ocr_backend or UnavailableOcrCandidateBackend())
+        self._latest_ocr_bundle: OcrCandidateBundle | None = None
+        self._capture_timer = QTimer(self)
+        self._capture_timer.setInterval(_CAPTURE_POLL_INTERVAL_MS)
+        self._capture_timer.timeout.connect(self._poll_capture_status)
+
         self._build_ui()
         self.render_view()
+
+        if auto_start_capture:
+            self._start_capture()
+
+    def _start_capture(self) -> None:
+        """Human has opened the Battle Record screen; begin passive capture.
+
+        Never raises and never blocks turn-fact entry: failures degrade to a
+        sanitized status string, and ``manual_entry_allowed`` stays True.
+        """
+
+        self._capture_service.start()
+        self._poll_capture_status()
+        self._capture_timer.start()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
+        """Clean shutdown: stop capture and release the device on app exit."""
+
+        self._capture_timer.stop()
+        self._capture_service.stop()
+        super().closeEvent(event)
 
     def _build_ui(self) -> None:
         self.setWindowTitle("Maple Next — Battle Record")
@@ -198,8 +274,43 @@ class MapleMainWindow(QMainWindow):
             "capture未接続 — manual-safe fallback。手動入力でturnを継続できます。"
         )
         self.capture_status_label.setWordWrap(True)
+        self.capture_freshness_label = QLabel("フレーム: —")
+        self.capture_device_label = QLabel("デバイス: —")
         layout.addWidget(self.capture_status_label)
+        layout.addWidget(self.capture_freshness_label)
+        layout.addWidget(self.capture_device_label)
         self._center_column_layout.addWidget(self.capture_status_group)
+
+        self.ocr_candidates_group = QGroupBox("OCR候補 — 参考情報のみ・自動採用しません")
+        ocr_layout = QFormLayout(self.ocr_candidates_group)
+        self.ocr_status_label = QLabel("—")
+        self.ocr_status_label.setWordWrap(True)
+        ocr_layout.addRow("状態", self.ocr_status_label)
+
+        self._ocr_field_labels: dict[str, QLabel] = {}
+        self._ocr_adopt_buttons: dict[str, QPushButton] = {}
+        for field_key in (
+            OcrFieldKey.SELF_ACTIVE,
+            OcrFieldKey.OPPONENT_ACTIVE,
+            OcrFieldKey.SELF_HP,
+            OcrFieldKey.OPPONENT_HP,
+        ):
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            candidate_label = QLabel("—")
+            candidate_label.setWordWrap(True)
+            adopt_button = QPushButton("採用")
+            adopt_button.setEnabled(False)
+            adopt_button.clicked.connect(
+                lambda _checked=False, key=field_key.value: self._on_adopt_ocr_candidate(key)
+            )
+            row_layout.addWidget(candidate_label, 1)
+            row_layout.addWidget(adopt_button)
+            self._ocr_field_labels[field_key.value] = candidate_label
+            self._ocr_adopt_buttons[field_key.value] = adopt_button
+            ocr_layout.addRow(field_key.value, row)
+        self._center_column_layout.addWidget(self.ocr_candidates_group)
 
     def set_capture_status(self, *, available: bool, detail: str = "") -> None:
         """Sanitized capture-adapter status hook (no device I/O in this module)."""
@@ -209,6 +320,82 @@ class MapleMainWindow(QMainWindow):
         else:
             text = detail or "capture未接続 — manual-safe fallback。手動入力でturnを継続できます。"
         self.capture_status_label.setText(text)
+
+    # -- Lane B (issue #31): capture/OCR polling and human-only adoption --------
+
+    def _poll_capture_status(self) -> None:
+        """Timer-driven, display-only refresh. Never a Turn Advice trigger."""
+
+        status = self._capture_service.latest_status()
+        self._render_capture_status(status)
+
+        frame = self._capture_service.latest_frame() if status.available else None
+        context = OcrCandidateContext(
+            self_active_candidates=self._loaded_applied_three,
+            opponent_active_candidates=(),
+        )
+        bundle = self._ocr_service.request_candidates_from_capture_status(
+            capture_status=status, frame=frame, context=context
+        )
+        self._latest_ocr_bundle = bundle
+        self._render_ocr_candidates(bundle)
+
+    def _render_capture_status(self, status: CaptureStatus) -> None:
+        self.set_capture_status(
+            available=status.available,
+            detail=_CAPTURE_STATUS_LABELS.get(status.status, status.operator_message or ""),
+        )
+        self.capture_device_label.setText(f"デバイス: {status.device_label or '—'}")
+        if status.age_ms is None:
+            self.capture_freshness_label.setText("フレーム: —")
+        else:
+            freshness = "fresh" if status.fresh else "stale"
+            self.capture_freshness_label.setText(f"フレーム: {status.age_ms}ms前 ({freshness})")
+
+    def _render_ocr_candidates(self, bundle: OcrCandidateBundle) -> None:
+        self.ocr_status_label.setText(bundle.operator_message or bundle.status)
+        best_by_field: dict[str, OcrCandidate] = {}
+        for candidate in bundle.candidates:
+            current = best_by_field.get(candidate.field_key)
+            if current is None or candidate.rank < current.rank:
+                best_by_field[candidate.field_key] = candidate
+
+        editable = getattr(self, "_turn_facts_editable", False)
+        for field_key, label in self._ocr_field_labels.items():
+            best_candidate = best_by_field.get(field_key)
+            button = self._ocr_adopt_buttons[field_key]
+            if best_candidate is None:
+                label.setText("—")
+                button.setEnabled(False)
+                continue
+            label.setText(
+                f"{best_candidate.suggested_value} (confidence={best_candidate.confidence:.2f})"
+            )
+            button.setEnabled(editable)
+
+    def _on_adopt_ocr_candidate(self, field_key: str) -> None:
+        """Human-triggered only: copy one OCR candidate into the manual input.
+
+        Never called by the timer/poll path itself. The human must still
+        press "Turn factsを確認／修正" to save anything — this only fills
+        the input widget, exactly like typing the value by hand, and manual
+        edits after adoption always win.
+        """
+
+        if self._latest_ocr_bundle is None:
+            return
+        candidates = [c for c in self._latest_ocr_bundle.candidates if c.field_key == field_key]
+        if not candidates:
+            return
+        best = min(candidates, key=lambda c: c.rank)
+        if field_key == OcrFieldKey.SELF_ACTIVE.value:
+            self.self_active_box.setCurrentText(best.suggested_value)
+        elif field_key == OcrFieldKey.OPPONENT_ACTIVE.value:
+            self.opponent_active_input.setText(best.suggested_value)
+        elif field_key == OcrFieldKey.SELF_HP.value:
+            self.self_hp_box.setCurrentText(best.suggested_value)
+        elif field_key == OcrFieldKey.OPPONENT_HP.value:
+            self.opponent_hp_box.setCurrentText(best.suggested_value)
 
     def _build_selection_facts_group(self) -> None:
         self.selection_facts_group = QGroupBox("Selection facts — 手動入力")
@@ -679,6 +866,7 @@ class MapleMainWindow(QMainWindow):
         self.turn_facts_confirm_checkbox.setChecked(False)
 
     def _set_turn_facts_editable(self, enabled: bool) -> None:
+        self._turn_facts_editable = enabled
         for widget in (
             self.self_active_box,
             self.opponent_active_input,

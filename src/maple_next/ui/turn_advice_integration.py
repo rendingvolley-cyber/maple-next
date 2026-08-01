@@ -153,16 +153,23 @@ class TurnAdviceIntegrationController(SelectionAdviceIntegrationController):
             self._error_message = "相手の次行動予測と理由を入力してください。"
             return self.refresh()
 
+        action_id = f"{typed_action.value}:{normalized_name}"
         adapter.enqueue_response(
             SanitizedProviderResult(
                 payload={
-                    "action_type": typed_action.value,
-                    "action_name": normalized_name,
-                    "opponent_prediction": normalized_prediction,
-                    "rationale": normalized_rationale,
+                    "recommended_action": {
+                        "action_id": action_id,
+                        "action_type": typed_action.value,
+                        "action_name": normalized_name,
+                    },
+                    "reasons": [normalized_rationale],
                     "warnings": list(warnings),
-                    "source_type": FAKE_TURN_ADVICE_SOURCE_TYPE,
-                    "model": FAKE_TURN_MODEL,
+                    "opponent_prediction": {
+                        "category": "UNKNOWN",
+                        "predicted_action": normalized_prediction,
+                        "summary": normalized_prediction,
+                        "confidence": 0.5,
+                    },
                 },
                 source_type=FAKE_TURN_ADVICE_SOURCE_TYPE,
                 model=FAKE_TURN_MODEL,
@@ -232,7 +239,7 @@ class TurnAdviceIntegrationWindow(SelectionAdviceIntegrationWindow):
         if not hasattr(controller, "turn_gemini_send_available"):
             return
         status = controller.turn_advice_gemini_status()  # type: ignore[attr-defined]
-        available = controller.turn_gemini_send_available  # type: ignore[attr-defined]
+        available = controller.turn_gemini_send_available
         self.turn_gemini_box.setVisible(
             available and current.projection.primary_cta == "REQUEST_TURN_ADVICE"
         )

@@ -16,6 +16,7 @@ import sqlite3
 from maple_next.persistence.base import StoreBase
 
 GEMINI_SELECTION_PRODUCTION_LANE = "GEMINI_SELECTION_PRODUCTION"
+TURN_ADVICE_LANE = "TURN_ADVICE"
 
 
 class AttemptLedgerStoreMixin(StoreBase):
@@ -93,6 +94,87 @@ class AttemptLedgerStoreMixin(StoreBase):
                 generation,
                 reviewed_selection_id,
                 GEMINI_SELECTION_PRODUCTION_LANE,
+            ),
+        ).fetchone()
+        return row is not None
+
+    def reserve_turn_advice_attempt(
+        self,
+        *,
+        session_id: str,
+        match_id: str,
+        generation: int,
+        turn_number: int,
+        battle_revision: int,
+        reviewed_snapshot_id: str,
+        request_payload_hash: str,
+        job_id: str,
+    ) -> bool:
+        """Atomically reserve the one durable Turn Advice attempt for this identity.
+
+        Sibling of :meth:`reserve_gemini_selection_attempt`, scoped to Turn
+        identity ``(session_id, match_id, generation, turn_number,
+        battle_revision, reviewed_snapshot_id)``. Returns True only on the
+        call that performs the reservation; False if already reserved,
+        including across a process restart.
+        """
+
+        try:
+            self.connection.execute(
+                """
+                INSERT INTO turn_advice_attempt_ledger (
+                    session_id, match_id, generation, turn_number, battle_revision,
+                    reviewed_snapshot_id, request_payload_hash, lane, job_id, consumed_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    match_id,
+                    generation,
+                    turn_number,
+                    battle_revision,
+                    reviewed_snapshot_id,
+                    request_payload_hash,
+                    TURN_ADVICE_LANE,
+                    job_id,
+                    self._now(),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+    def turn_advice_attempt_reserved(
+        self,
+        *,
+        session_id: str,
+        match_id: str,
+        generation: int,
+        turn_number: int,
+        reviewed_snapshot_id: str,
+    ) -> bool:
+        """Has this Turn round already reserved its one Turn Advice attempt?
+
+        Deliberately does not filter by ``battle_revision`` — same rationale
+        as :meth:`gemini_selection_attempt_reserved`: ``reviewed_snapshot_id``
+        stays fixed for the whole round even as ``battle_revision`` bumps
+        when the reserved attempt's result is later applied.
+        """
+
+        row = self.connection.execute(
+            """
+            SELECT 1 FROM turn_advice_attempt_ledger
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+            AND turn_number = ? AND reviewed_snapshot_id = ? AND lane = ?
+            LIMIT 1
+            """,
+            (
+                session_id,
+                match_id,
+                generation,
+                turn_number,
+                reviewed_snapshot_id,
+                TURN_ADVICE_LANE,
             ),
         ).fetchone()
         return row is not None

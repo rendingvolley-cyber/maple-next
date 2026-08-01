@@ -27,11 +27,10 @@ from typing import Protocol
 from uuid import uuid4
 
 from maple_next.application.service import BattleApplication, DomainError
-from maple_next.domain.enums import ActionType, ResultDisposition
+from maple_next.domain.enums import ResultDisposition
 from maple_next.providers.transport import ProviderConfig, SanitizedProviderResult
 from maple_next.providers.turn_request import TurnAdviceRequest
 from maple_next.providers.turn_transport import (
-    FAKE_TURN_ADVICE_SOURCE_TYPE,
     TurnProviderTransport,
 )
 from maple_next.workers.contracts.models import JobEnvelope, ResultEnvelope
@@ -127,63 +126,22 @@ def _safe_display_token(value: object) -> str:
     return "UNKNOWN"
 
 
-def _allowlisted_turn_payload(
-    payload: object,
-    legal_moves: tuple[str, ...],
-    legal_switches: tuple[str, ...],
-) -> dict[str, object]:
-    """Reject extra keys and discard arbitrary values before DB/UI handling."""
+def _raw_turn_payload(payload: object) -> dict[str, object]:
+    """Pass through only a plain dict; anything else becomes an empty object.
+
+    Real schema/legality/binding validation of the Lane C
+    ``recommended_action``/``reasons``/``warnings``/``opponent_prediction``
+    shape happens exactly once, in
+    :meth:`maple_next.application.service.BattleApplication.apply_turn_advice_result`
+    (via :func:`maple_next.providers.turn_response.turn_advice_body_from_dict`
+    and :func:`maple_next.providers.turn_validation.validate_turn_advice_result`).
+    This adapter never re-implements that logic — it only guards against a
+    non-dict payload reaching the envelope.
+    """
 
     if not isinstance(payload, dict):
         return {}
-    allowed_keys = {
-        "action_type",
-        "action_name",
-        "opponent_prediction",
-        "rationale",
-        "warnings",
-        "source_type",
-        "model",
-    }
-    if not set(payload).issubset(allowed_keys):
-        return {}
-    if not {"action_type", "action_name", "opponent_prediction", "rationale"}.issubset(
-        payload
-    ):
-        return {}
-    safe: dict[str, object] = {}
-
-    action_type = payload.get("action_type")
-    try:
-        typed_action_type = ActionType(str(action_type))
-    except ValueError:
-        return {}
-    legal_actions = legal_moves if typed_action_type is ActionType.MOVE else legal_switches
-    action_name = payload.get("action_name")
-    if not (isinstance(action_name, str) and action_name in legal_actions):
-        return {}
-    safe["action_type"] = typed_action_type.value
-    safe["action_name"] = action_name
-
-    opponent_prediction = payload.get("opponent_prediction")
-    if not (isinstance(opponent_prediction, str) and opponent_prediction.strip()):
-        return {}
-    safe["opponent_prediction"] = opponent_prediction
-
-    rationale = payload.get("rationale")
-    if not (isinstance(rationale, str) and rationale.strip()):
-        return {}
-    safe["rationale"] = rationale
-
-    warnings = payload.get("warnings", [])
-    if not (
-        isinstance(warnings, list) and all(isinstance(item, str) for item in warnings)
-    ):
-        return {}
-    safe["warnings"] = list(warnings)
-    safe["source_type"] = FAKE_TURN_ADVICE_SOURCE_TYPE
-    safe["model"] = FAKE_TURN_MODEL
-    return safe
+    return payload
 
 
 def _default_envelope_factory(
@@ -206,6 +164,7 @@ def _default_envelope_factory(
         request_payload_hash=job.request_payload_hash,
         payload=result.payload,
         source_type=result.source_type,
+        model=result.model,
     )
 
 
@@ -291,9 +250,7 @@ class GeminiTurnAdviceAdapter:
         def handle_succeeded(result: SanitizedProviderResult) -> None:
             self._in_flight = False
             sanitized_result = SanitizedProviderResult(
-                payload=_allowlisted_turn_payload(
-                    result.payload, request.legal_moves, request.legal_switches
-                ),
+                payload=_raw_turn_payload(result.payload),
                 source_type=_safe_display_token(result.source_type),
                 model=_safe_display_token(result.model),
             )

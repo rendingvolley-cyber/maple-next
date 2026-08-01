@@ -47,3 +47,4 @@ class ResultEnvelope:
     request_payload_hash: str
     payload: dict[str, Any]
     source_type: str = "MOCK"
+    model: str = "mock-dev"

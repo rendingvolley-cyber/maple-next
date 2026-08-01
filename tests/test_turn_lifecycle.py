@@ -70,14 +70,29 @@ def confirm_turn(application: BattleApplication) -> None:
     )
 
 
-def valid_result(job: JobEnvelope, **payload_overrides: str) -> ResultEnvelope:
+def valid_result(
+    job: JobEnvelope,
+    *,
+    action_type: str = ActionType.MOVE.value,
+    action_name: str = "Protect",
+    opponent_prediction: str = "Earthquake",
+    rationale: str = "Scout before committing.",
+) -> ResultEnvelope:
     payload = {
-        "action_type": ActionType.MOVE.value,
-        "action_name": "Protect",
-        "opponent_prediction": "Earthquake",
-        "rationale": "Scout before committing.",
+        "recommended_action": {
+            "action_id": f"{action_type}:{action_name}",
+            "action_type": action_type,
+            "action_name": action_name,
+        },
+        "reasons": [rationale],
+        "warnings": [],
+        "opponent_prediction": {
+            "category": "UNKNOWN",
+            "predicted_action": opponent_prediction,
+            "summary": opponent_prediction,
+            "confidence": 0.5,
+        },
     }
-    payload.update(payload_overrides)
     return ResultEnvelope(
         contract_version=job.contract_version,
         result_id=str(uuid4()),
@@ -93,6 +108,8 @@ def valid_result(job: JobEnvelope, **payload_overrides: str) -> ResultEnvelope:
         input_snapshot_id=job.input_snapshot_id,
         request_payload_hash=job.request_payload_hash,
         payload=payload,
+        source_type="MOCK",
+        model="mock-dev",
     )
 
 

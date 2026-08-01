@@ -138,11 +138,19 @@ def test_trusted_click_sends_exactly_once_and_shows_result(tmp_path: Path) -> No
         responses=[
             SanitizedProviderResult(
                 payload={
-                    "action_type": "MOVE",
-                    "action_name": "Wave Crash",
-                    "opponent_prediction": "Protect",
-                    "rationale": "STAB and pressure.",
+                    "recommended_action": {
+                        "action_id": "MOVE:Wave Crash",
+                        "action_type": "MOVE",
+                        "action_name": "Wave Crash",
+                    },
+                    "reasons": ["STAB and pressure."],
                     "warnings": ["HP不明のためswitchも検討"],
+                    "opponent_prediction": {
+                        "category": "UNKNOWN",
+                        "predicted_action": "Protect",
+                        "summary": "Protect",
+                        "confidence": 0.5,
+                    },
                 },
                 source_type=FAKE_TURN_ADVICE_SOURCE_TYPE,
                 model=FAKE_TURN_MODEL,

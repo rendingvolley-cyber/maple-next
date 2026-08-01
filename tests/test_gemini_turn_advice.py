@@ -11,7 +11,6 @@ contract in ``apply_turn_advice_result``.
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -20,8 +19,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from maple_next.application.service import BattleApplication, DomainError
-from maple_next.domain.enums import ActionType, BattleState, JobStatus, ResultDisposition
-from maple_next.domain.enums import JobType
+from maple_next.domain.enums import BattleState, JobStatus, JobType, ResultDisposition
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers.transport import ProviderConfig, SanitizedProviderResult
 from maple_next.providers.turn_transport import (
@@ -137,11 +135,19 @@ def test_single_send_dispatches_once_with_current_identity(tmp_path: Path) -> No
         responses=[
             SanitizedProviderResult(
                 payload={
-                    "action_type": "MOVE",
-                    "action_name": "Wave Crash",
-                    "opponent_prediction": "Protect",
-                    "rationale": "STAB and pressure.",
+                    "recommended_action": {
+                        "action_id": "MOVE:Wave Crash",
+                        "action_type": "MOVE",
+                        "action_name": "Wave Crash",
+                    },
+                    "reasons": ["STAB and pressure."],
                     "warnings": ["HP不明のためswitchも検討"],
+                    "opponent_prediction": {
+                        "category": "UNKNOWN",
+                        "predicted_action": "Protect",
+                        "summary": "Protect",
+                        "confidence": 0.5,
+                    },
                 },
                 source_type=FAKE_TURN_ADVICE_SOURCE_TYPE,
                 model=FAKE_TURN_MODEL,
@@ -160,7 +166,7 @@ def test_single_send_dispatches_once_with_current_identity(tmp_path: Path) -> No
     assert request.session_id == session.session_id
     assert request.match_id == session.match_id
     assert request.generation == session.generation
-    assert request.reviewed_turn_facts_id == session.current_reviewed_board_id
+    assert request.reviewed_snapshot_id == session.current_reviewed_board_id
 
     view = controller.refresh()
     assert view.turn_advice is not None
@@ -219,18 +225,34 @@ def test_refresh_and_render_never_dispatch(tmp_path: Path) -> None:
     "payload",
     [
         {  # action_name outside reviewed legal moves
-            "action_type": "MOVE",
-            "action_name": "Not A Real Move",
-            "opponent_prediction": "Protect",
-            "rationale": "STAB.",
+            "recommended_action": {
+                "action_id": "MOVE:Not A Real Move",
+                "action_type": "MOVE",
+                "action_name": "Not A Real Move",
+            },
+            "reasons": ["STAB."],
             "warnings": [],
+            "opponent_prediction": {
+                "category": "UNKNOWN",
+                "predicted_action": "Protect",
+                "summary": "Protect",
+                "confidence": 0.5,
+            },
         },
         {  # SWITCH naming a Pokemon not among the reviewed legal switches
-            "action_type": "SWITCH",
-            "action_name": "MissingNo",
-            "opponent_prediction": "Protect",
-            "rationale": "Bad matchup.",
+            "recommended_action": {
+                "action_id": "SWITCH:MissingNo",
+                "action_type": "SWITCH",
+                "action_name": "MissingNo",
+            },
+            "reasons": ["Bad matchup."],
             "warnings": [],
+            "opponent_prediction": {
+                "category": "UNKNOWN",
+                "predicted_action": "Protect",
+                "summary": "Protect",
+                "confidence": 0.5,
+            },
         },
         {},
     ],
@@ -291,12 +313,22 @@ def test_stale_identity_result_rejected_via_existing_binding_contract(tmp_path: 
         input_snapshot_id=job.input_snapshot_id,
         request_payload_hash=job.request_payload_hash,
         payload={
-            "action_type": "MOVE",
-            "action_name": "Wave Crash",
-            "opponent_prediction": "Protect",
-            "rationale": "STAB.",
+            "recommended_action": {
+                "action_id": "MOVE:Wave Crash",
+                "action_type": "MOVE",
+                "action_name": "Wave Crash",
+            },
+            "reasons": ["STAB."],
+            "warnings": [],
+            "opponent_prediction": {
+                "category": "UNKNOWN",
+                "predicted_action": "Protect",
+                "summary": "Protect",
+                "confidence": 0.5,
+            },
         },
         source_type=FAKE_TURN_ADVICE_SOURCE_TYPE,
+        model=FAKE_TURN_MODEL,
     )
     disposition = application.apply_turn_advice_result(tampered)
     assert disposition is ResultDisposition.STALE_REJECTED
@@ -347,11 +379,19 @@ def test_no_secret_leakage_into_repository_or_ui(tmp_path: Path) -> None:
         responses=[
             SanitizedProviderResult(
                 payload={
-                    "action_type": "MOVE",
-                    "action_name": "Wave Crash",
-                    "opponent_prediction": "Protect",
-                    "rationale": "STAB.",
+                    "recommended_action": {
+                        "action_id": "MOVE:Wave Crash",
+                        "action_type": "MOVE",
+                        "action_name": "Wave Crash",
+                    },
+                    "reasons": ["STAB."],
                     "warnings": [],
+                    "opponent_prediction": {
+                        "category": "UNKNOWN",
+                        "predicted_action": "Protect",
+                        "summary": "Protect",
+                        "confidence": 0.5,
+                    },
                 },
                 source_type=FAKE_TURN_ADVICE_SOURCE_TYPE,
                 model=FAKE_TURN_MODEL,

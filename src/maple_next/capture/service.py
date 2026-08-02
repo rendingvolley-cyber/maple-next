@@ -146,8 +146,19 @@ class CaptureService(QObject):
         return status
 
     def latest_status(self) -> CaptureStatus:
+        status, _frame = self.latest_snapshot()
+        return status
+
+    def latest_snapshot(self) -> tuple[CaptureStatus, FramePacket | None]:
+        """Read the latest status and frame from one backend snapshot.
+
+        Consumers that display both metadata and pixels must use this method so
+        a status frame id cannot accidentally describe a different backend read
+        than the image sent to the preview or OCR path.
+        """
+
         if not self._backend.is_running():
-            return self._status
+            return self._status, None
         try:
             frame = self._backend.get_latest_frame()
         except Exception:  # noqa: BLE001
@@ -157,16 +168,14 @@ class CaptureService(QObject):
                 device_label=self._status.device_label,
             )
             self._set_status(status)
-            return status
+            return status, None
         status = self._status_from_frame(frame)
         self._set_status(status)
-        return status
+        return status, frame
 
     def latest_frame(self) -> FramePacket | None:
-        try:
-            return self._backend.get_latest_frame()
-        except Exception:  # noqa: BLE001
-            return None
+        _status, frame = self.latest_snapshot()
+        return frame
 
     # -- internals --------------------------------------------------------------
 

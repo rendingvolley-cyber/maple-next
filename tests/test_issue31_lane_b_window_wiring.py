@@ -26,6 +26,7 @@ from typing import cast
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -55,14 +56,21 @@ class FakeCaptureBackend:
     def __init__(self, frame: FramePacket | None) -> None:
         self._frame = frame
         self._running = False
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.duplicate_start_calls = 0
 
     def start(self, selector: str, on_frame: object | None = None) -> DeviceOpenResult:
+        self.start_calls += 1
+        if self._running:
+            self.duplicate_start_calls += 1
         self._running = True
         return DeviceOpenResult(
             opened=True, device_found=True, device_label="FAKE_UGREEN", error_code=None
         )
 
     def stop(self) -> None:
+        self.stop_calls += 1
         self._running = False
 
     def get_latest_frame(self) -> FramePacket | None:
@@ -104,7 +112,7 @@ class FakeOcrBackend:
         return self._candidates
 
 
-def _fresh_frame(frame_id: str = "frame-1") -> FramePacket:
+def _fresh_frame(frame_id: str = "frame-1", image: QImage | None = None) -> FramePacket:
     import time
 
     return FramePacket(
@@ -112,8 +120,9 @@ def _fresh_frame(frame_id: str = "frame-1") -> FramePacket:
         source="UGREEN_DIRECT",
         captured_at_utc=datetime.now(UTC),
         captured_monotonic_ns=time.monotonic_ns(),
-        width=1280,
-        height=720,
+        width=image.width() if image is not None else 1280,
+        height=image.height() if image is not None else 720,
+        image=image,
     )
 
 
@@ -200,6 +209,143 @@ def test_fresh_frame_yields_an_adoptable_candidate(tmp_path: Path) -> None:
     assert window._ocr_adopt_buttons["self_active"].isEnabled() is True  # noqa: SLF001
 
     window.close()
+    repository.close()
+
+
+def test_injected_non_black_frame_is_drawn_with_matching_identity(tmp_path: Path) -> None:
+    qt_application()
+    image = QImage(640, 360, QImage.Format.Format_RGB32)
+    image.fill(0x00D12A2A)
+    frame = _fresh_frame("colored-frame", image)
+    repository, window = build_window(
+        tmp_path,
+        capture_backend=FakeCaptureBackend(frame),
+        ocr_backend=FakeOcrBackend(()),
+    )
+    window.resize(1000, 800)
+    window.show()
+    window._start_capture()  # noqa: SLF001
+    QApplication.processEvents()
+
+    pixmap = window.capture_preview_label.pixmap()
+    assert pixmap is not None
+    assert not pixmap.isNull()
+    center = pixmap.toImage().pixelColor(pixmap.width() // 2, pixmap.height() // 2)
+    assert center.red() > 0
+    assert center.green() > 0
+    assert window._capture_preview_frame_id == frame.frame_id  # noqa: SLF001
+    status, snapshot_frame = window._capture_service.latest_snapshot()  # noqa: SLF001
+    assert status.frame_id == snapshot_frame.frame_id == window._capture_preview_frame_id  # noqa: SLF001
+    assert "preview表示中" in window.capture_status_label.text()
+
+    window.close()
+    repository.close()
+
+
+def test_preview_keeps_aspect_ratio_after_resize(tmp_path: Path) -> None:
+    qt_application()
+    image = QImage(640, 360, QImage.Format.Format_RGB32)
+    image.fill(0x0000C875)
+    repository, window = build_window(
+        tmp_path,
+        capture_backend=FakeCaptureBackend(_fresh_frame("resize-frame", image)),
+        ocr_backend=FakeOcrBackend(()),
+    )
+    window.resize(1000, 800)
+    window.show()
+    window._start_capture()  # noqa: SLF001
+    QApplication.processEvents()
+    window.capture_preview_label.resize(800, 450)
+    window._render_capture_preview()  # noqa: SLF001
+    first = window.capture_preview_label.pixmap()
+    assert first is not None and not first.isNull()
+    assert first.width() * 9 == first.height() * 16
+
+    window.capture_preview_label.resize(400, 225)
+    window._render_capture_preview()  # noqa: SLF001
+    second = window.capture_preview_label.pixmap()
+    assert second is not None and not second.isNull()
+    assert second.width() * 9 == second.height() * 16
+
+    window.close()
+    repository.close()
+
+
+def test_unavailable_stale_and_invalid_frames_use_truthful_placeholder(
+    tmp_path: Path,
+) -> None:
+    qt_application()
+    null_image = QImage()
+    zero_image = QImage(0, 0, QImage.Format.Format_RGB32)
+    cases = (
+        (UnavailableCaptureBackend(), "unavailable"),
+        (FakeCaptureBackend(_fresh_frame("null-frame", null_image)), "invalid"),
+        (FakeCaptureBackend(_fresh_frame("zero-frame", zero_image)), "invalid"),
+        (
+            FakeCaptureBackend(
+                FramePacket(
+                    frame_id="stale-preview",
+                    source="UGREEN_DIRECT",
+                    captured_at_utc=datetime.now(UTC),
+                    captured_monotonic_ns=1,
+                    width=640,
+                    height=360,
+                    image=null_image,
+                )
+            ),
+            "stale",
+        ),
+    )
+    for index, (backend, expected) in enumerate(cases):
+        case_dir = tmp_path / f"{expected}-{index}"
+        case_dir.mkdir()
+        repository, window = build_window(
+            case_dir,
+            capture_backend=backend,
+            ocr_backend=FakeOcrBackend(()),
+        )
+        window._start_capture()  # noqa: SLF001
+        pixmap = window.capture_preview_label.pixmap()
+        assert pixmap is None or pixmap.isNull()
+        assert "preview表示中" not in window.capture_status_label.text()
+        assert "previewなし" in window.capture_preview_label.text()
+        if expected == "stale":
+            assert "stale" in window.capture_preview_label.text()
+        elif expected == "invalid":
+            assert "invalid" in window.capture_preview_label.text()
+        else:
+            assert "drawable" in window.capture_preview_label.text()
+        window.close()
+        repository.close()
+
+
+def test_human_reconnect_is_one_bounded_attempt_without_duplicate_lease(
+    tmp_path: Path,
+) -> None:
+    qt_application()
+    backend = FakeCaptureBackend(_fresh_frame())
+    repository, window = build_window(
+        tmp_path, capture_backend=backend, ocr_backend=FakeOcrBackend(())
+    )
+    window._start_capture()  # noqa: SLF001
+    for _ in range(5):
+        window._poll_capture_status()  # noqa: SLF001
+    assert backend.start_calls == 1
+    assert backend.stop_calls == 0
+
+    window.reconnect_capture_button.click()
+    assert backend.stop_calls == 1
+    assert backend.start_calls == 2
+    assert backend.duplicate_start_calls == 0
+    for _ in range(5):
+        window._poll_capture_status()  # noqa: SLF001
+    assert backend.stop_calls == 1
+    assert backend.start_calls == 2
+    assert backend.duplicate_start_calls == 0
+
+    window.close()
+    assert backend.stop_calls == 2
+    assert backend.is_running() is False
     repository.close()
 
 

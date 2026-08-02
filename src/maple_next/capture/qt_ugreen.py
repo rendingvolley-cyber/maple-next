@@ -144,6 +144,8 @@ class QtMultimediaUgreenBackend:
         try:
             image = qt_frame.toImage()  # type: ignore[attr-defined]
             detached = image.copy()
+            if detached.isNull() or detached.width() <= 0 or detached.height() <= 0:
+                return
             width = detached.width()
             height = detached.height()
         except Exception:  # noqa: BLE001 - never crash on a bad frame

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QCloseEvent, QImage, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,12 +19,18 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from maple_next.capture.contracts import CaptureStatus, CaptureStatusCode, VideoCaptureBackend
+from maple_next.capture.contracts import (
+    CaptureStatus,
+    CaptureStatusCode,
+    FramePacket,
+    VideoCaptureBackend,
+)
 from maple_next.capture.qt_ugreen import QtMultimediaUgreenBackend
 from maple_next.capture.service import CaptureService
 from maple_next.domain.enums import ActionOrder, ActionType, HpBucket
@@ -48,7 +54,7 @@ _CAPTURE_STATUS_LABELS: dict[str, str] = {
         "capture未接続 — manual-safe fallback。手動入力でturnを継続できます。"
     ),
     CaptureStatusCode.STARTING: "capture起動中…",
-    CaptureStatusCode.AVAILABLE: "capture映像を表示しています。",
+    CaptureStatusCode.AVAILABLE: "fresh frameを受信しています。",
     CaptureStatusCode.DEVICE_UNAVAILABLE: (
         "UGREENデバイスが見つかりません — manual-safe fallback。"
     ),
@@ -91,6 +97,25 @@ _MESSAGE_LABELS = {
 }
 
 _PLACEHOLDER = "選択してください"
+_PREVIEW_DISPLAY_LABEL = "preview表示中"
+_PREVIEW_UNAVAILABLE_LABEL = (
+    "previewなし — drawable frameがありません。manual-safe fallback。"
+)
+_PREVIEW_STALE_LABEL = "previewなし — frameがstaleです。manual-safe fallback。"
+_PREVIEW_INVALID_LABEL = "previewなし — frame imageがinvalidです。manual-safe fallback。"
+
+
+class _AspectRatioPreviewLabel(QLabel):
+    """A QLabel whose layout slot follows the Battle Record 16:9 preview."""
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        return max(1, round(width * 9 / 16))
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(640, 360)
 
 
 class MapleMainWindow(QMainWindow):
@@ -121,9 +146,14 @@ class MapleMainWindow(QMainWindow):
         self._capture_service = CaptureService(capture_backend or QtMultimediaUgreenBackend())
         self._ocr_service = OcrCandidateService(ocr_backend or UnavailableOcrCandidateBackend())
         self._latest_ocr_bundle: OcrCandidateBundle | None = None
+        self._capture_preview_pixmap = QPixmap()
+        self._capture_preview_frame_id: str | None = None
         self._capture_timer = QTimer(self)
         self._capture_timer.setInterval(_CAPTURE_POLL_INTERVAL_MS)
         self._capture_timer.timeout.connect(self._poll_capture_status)
+        frame_ready = getattr(self._capture_service, "frame_ready", None)
+        if frame_ready is not None:
+            frame_ready.connect(self._on_frame_ready)
 
         self._build_ui()
         self.render_view()
@@ -142,12 +172,26 @@ class MapleMainWindow(QMainWindow):
         self._poll_capture_status()
         self._capture_timer.start()
 
+    def _on_reconnect_capture(self, _checked: bool = False) -> None:
+        """Perform exactly one human-requested capture reacquisition attempt."""
+
+        self._capture_timer.stop()
+        self._capture_service.stop()
+        self._capture_service.start()
+        self._poll_capture_status()
+        self._capture_timer.start()
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
         """Clean shutdown: stop capture and release the device on app exit."""
 
         self._capture_timer.stop()
         self._capture_service.stop()
         super().closeEvent(event)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if hasattr(self, "capture_preview_label"):
+            self._render_capture_preview()
 
     def _build_ui(self) -> None:
         self.setWindowTitle("Maple Next — Battle Record")
@@ -270,6 +314,24 @@ class MapleMainWindow(QMainWindow):
     def _build_capture_status_group(self) -> None:
         self.capture_status_group = QGroupBox("UGREEN映像")
         layout = QVBoxLayout(self.capture_status_group)
+        self.capture_preview_label = _AspectRatioPreviewLabel(_PREVIEW_UNAVAILABLE_LABEL)
+        self.capture_preview_label.setObjectName("capturePreviewLabel")
+        self.capture_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.capture_preview_label.setMinimumSize(320, 180)
+        self.capture_preview_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        self.capture_preview_label.setStyleSheet(
+            "QLabel { background: #111827; color: #d1d5db; border: 1px solid #374151; "
+            "padding: 12px; }"
+        )
+        layout.addWidget(self.capture_preview_label)
+
+        self.reconnect_capture_button = QPushButton("UGREEN 再接続 / capture再開始")
+        self.reconnect_capture_button.setObjectName("reconnectCaptureButton")
+        self.reconnect_capture_button.clicked.connect(self._on_reconnect_capture)
+        layout.addWidget(self.reconnect_capture_button)
+
         self.capture_status_label = QLabel(
             "capture未接続 — manual-safe fallback。手動入力でturnを継続できます。"
         )
@@ -316,7 +378,7 @@ class MapleMainWindow(QMainWindow):
         """Sanitized capture-adapter status hook (no device I/O in this module)."""
 
         if available:
-            text = detail or "capture映像を表示しています。"
+            text = detail or "fresh frameを受信しています。"
         else:
             text = detail or "capture未接続 — manual-safe fallback。手動入力でturnを継続できます。"
         self.capture_status_label.setText(text)
@@ -326,31 +388,120 @@ class MapleMainWindow(QMainWindow):
     def _poll_capture_status(self) -> None:
         """Timer-driven, display-only refresh. Never a Turn Advice trigger."""
 
-        status = self._capture_service.latest_status()
-        self._render_capture_status(status)
+        status, frame = self._capture_service.latest_snapshot()
+        self._render_capture_status(status, frame)
 
-        frame = self._capture_service.latest_frame() if status.available else None
+        frame_for_ocr = frame if status.available else None
         context = OcrCandidateContext(
             self_active_candidates=self._loaded_applied_three,
             opponent_active_candidates=(),
         )
         bundle = self._ocr_service.request_candidates_from_capture_status(
-            capture_status=status, frame=frame, context=context
+            capture_status=status, frame=frame_for_ocr, context=context
         )
         self._latest_ocr_bundle = bundle
         self._render_ocr_candidates(bundle)
 
-    def _render_capture_status(self, status: CaptureStatus) -> None:
-        self.set_capture_status(
-            available=status.available,
-            detail=_CAPTURE_STATUS_LABELS.get(status.status, status.operator_message or ""),
-        )
+    def _on_frame_ready(self, _frame: object) -> None:
+        """Render the callback's newest snapshot without waiting for the poll timer."""
+
+        status, frame = self._capture_service.latest_snapshot()
+        self._render_capture_status(status, frame)
+
+    def _render_capture_status(
+        self, status: CaptureStatus, frame: FramePacket | None = None
+    ) -> None:
+        preview_installed = self._render_capture_snapshot(status, frame)
+        if preview_installed:
+            detail = _PREVIEW_DISPLAY_LABEL
+            available = True
+        elif status.status == CaptureStatusCode.AVAILABLE:
+            detail = (
+                _PREVIEW_UNAVAILABLE_LABEL
+                if frame is None
+                else _PREVIEW_INVALID_LABEL
+            )
+            available = False
+        else:
+            detail = _CAPTURE_STATUS_LABELS.get(status.status, status.operator_message or "")
+            available = status.available
+        self.set_capture_status(available=available, detail=detail)
         self.capture_device_label.setText(f"デバイス: {status.device_label or '—'}")
         if status.age_ms is None:
             self.capture_freshness_label.setText("フレーム: —")
         else:
             freshness = "fresh" if status.fresh else "stale"
             self.capture_freshness_label.setText(f"フレーム: {status.age_ms}ms前 ({freshness})")
+
+    @staticmethod
+    def _detached_qimage(image: object) -> QImage | None:
+        """Return a validated QImage detached from a producer-owned buffer."""
+
+        if isinstance(image, QImage):
+            detached = image.copy()
+        elif isinstance(image, QPixmap):
+            detached = image.toImage().copy()
+        else:
+            return None
+        if detached.isNull() or detached.width() <= 0 or detached.height() <= 0:
+            return None
+        return detached
+
+    def _clear_capture_preview(self, *, placeholder: str) -> None:
+        self._capture_preview_pixmap = QPixmap()
+        self._capture_preview_frame_id = None
+        self.capture_preview_label.clear()
+        self.capture_preview_label.setText(placeholder)
+
+    def _render_capture_preview(self) -> bool:
+        if self._capture_preview_pixmap.isNull():
+            return False
+        target_size = self.capture_preview_label.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            target_size = self.capture_preview_label.sizeHint()
+        scaled = self._capture_preview_pixmap.scaled(
+            target_size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ).copy()
+        if scaled.isNull():
+            return False
+        self.capture_preview_label.setText("")
+        self.capture_preview_label.setPixmap(scaled)
+        installed = self.capture_preview_label.pixmap()
+        return installed is not None and not installed.isNull()
+
+    def _render_capture_snapshot(
+        self, status: CaptureStatus, frame: object | None
+    ) -> bool:
+        """Render pixels only when fresh metadata and the same frame are valid."""
+
+        if not status.fresh or not isinstance(frame, FramePacket):
+            placeholder = (
+                _PREVIEW_STALE_LABEL
+                if not status.fresh and status.status == CaptureStatusCode.FRAME_STALE
+                else _PREVIEW_UNAVAILABLE_LABEL
+            )
+            self._clear_capture_preview(placeholder=placeholder)
+            return False
+
+        if status.frame_id != frame.frame_id:
+            self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
+            return False
+        detached = self._detached_qimage(frame.image)
+        if detached is None:
+            self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
+            return False
+        pixmap = QPixmap.fromImage(detached).copy()
+        if pixmap.isNull():
+            self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
+            return False
+        self._capture_preview_pixmap = pixmap
+        self._capture_preview_frame_id = frame.frame_id
+        if not self._render_capture_preview():
+            self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
+            return False
+        return True
 
     def _render_ocr_candidates(self, bundle: OcrCandidateBundle) -> None:
         self.ocr_status_label.setText(bundle.operator_message or bundle.status)

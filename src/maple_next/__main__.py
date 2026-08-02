@@ -15,10 +15,15 @@ from maple_next.application.match_service import MatchApplication
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers.transport import (
     GeminiSelectionAdviceTransport,
-    load_provider_config_from_env,
+    load_selection_provider_config_from_env,
+)
+from maple_next.providers.turn_transport import (
+    GeminiTurnAdviceTransport,
+    load_authorized_turn_provider_config_from_env,
 )
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
+from maple_next.ui.gemini_turn_advice import GeminiTurnAdviceAdapter
 from maple_next.ui.match_controller import MatchFlowController
 from maple_next.ui.match_window import MatchFlowWindow
 
@@ -35,6 +40,15 @@ def default_export_directory() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".maple-next" / "exports"
+
+
+def build_turn_gemini_adapter() -> GeminiTurnAdviceAdapter:
+    """Build the fail-closed production Turn Advice adapter."""
+
+    return GeminiTurnAdviceAdapter(
+        GeminiTurnAdviceTransport(),
+        load_authorized_turn_provider_config_from_env,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -61,8 +75,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             MockSelectionAdviceAdapter(),
             gemini_adapter=GeminiSelectionAdviceAdapter(
                 GeminiSelectionAdviceTransport(),
-                load_provider_config_from_env,
+                load_selection_provider_config_from_env,
             ),
+            turn_gemini_adapter=build_turn_gemini_adapter(),
         )
         window = MatchFlowWindow(controller)
         window.show()

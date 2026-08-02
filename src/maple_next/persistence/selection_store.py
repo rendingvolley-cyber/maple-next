@@ -41,16 +41,6 @@ class SelectionStoreMixin(StoreBase):
             ),
         )
 
-    def set_selection_advice_model(self, advice_id: str, model: str) -> None:
-        """Attach the sanitized provider model after strict advice acceptance."""
-
-        cursor = self.connection.execute(
-            "UPDATE selection_advices SET model = ? WHERE advice_id = ?",
-            (model, advice_id),
-        )
-        if cursor.rowcount != 1:
-            raise KeyError(advice_id)
-
     def get_selection_advice(self, advice_id: str) -> dict[str, Any]:
         row = self.connection.execute(
             "SELECT * FROM selection_advices WHERE advice_id = ?", (advice_id,)

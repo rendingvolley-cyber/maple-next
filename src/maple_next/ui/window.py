@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QCloseEvent, QImage, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -17,13 +19,52 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from maple_next.domain.enums import ActionType, HpBucket
+from maple_next.capture.contracts import (
+    CaptureStatus,
+    CaptureStatusCode,
+    FramePacket,
+    VideoCaptureBackend,
+)
+from maple_next.capture.qt_ugreen import QtMultimediaUgreenBackend
+from maple_next.capture.service import CaptureService
+from maple_next.domain.enums import ActionOrder, ActionType, HpBucket
+from maple_next.ocr.contracts import (
+    OcrCandidate,
+    OcrCandidateBackend,
+    OcrCandidateBundle,
+    OcrCandidateContext,
+    OcrFieldKey,
+)
+from maple_next.ocr.service import OcrCandidateService, UnavailableOcrCandidateBackend
 from maple_next.ui.controller import OperatorView, SelectionFlowController, TurnFactsView
 from maple_next.ui.trusted_input import TrustedSendButton
+
+#: Poll interval for capture status / OCR candidate refresh. Display-only:
+#: never triggers a Turn Advice send, a domain command, or a canonical write.
+_CAPTURE_POLL_INTERVAL_MS = 500
+
+_CAPTURE_STATUS_LABELS: dict[str, str] = {
+    CaptureStatusCode.STOPPED: (
+        "capture未接続 — manual-safe fallback。手動入力でturnを継続できます。"
+    ),
+    CaptureStatusCode.STARTING: "capture起動中…",
+    CaptureStatusCode.AVAILABLE: "fresh frameを受信しています。",
+    CaptureStatusCode.DEVICE_UNAVAILABLE: (
+        "UGREENデバイスが見つかりません — manual-safe fallback。"
+    ),
+    CaptureStatusCode.OPEN_FAILED: "capture映像を開始できません — manual-safe fallback。",
+    CaptureStatusCode.FRAME_UNAVAILABLE: (
+        "映像フレームがまだありません — manual-safe fallback。"
+    ),
+    CaptureStatusCode.FRAME_STALE: "最新フレームが古いためOCR候補は使用しません。",
+    CaptureStatusCode.CAPTURE_ERROR: "capture映像でエラーが発生しました — manual-safe fallback。",
+}
 
 _CTA_LABELS = {
     "CREATE_NEW_MATCH": "NEW MATCH",
@@ -56,12 +97,38 @@ _MESSAGE_LABELS = {
 }
 
 _PLACEHOLDER = "選択してください"
+_PREVIEW_DISPLAY_LABEL = "preview表示中"
+_PREVIEW_UNAVAILABLE_LABEL = (
+    "previewなし — drawable frameがありません。manual-safe fallback。"
+)
+_PREVIEW_STALE_LABEL = "previewなし — frameがstaleです。manual-safe fallback。"
+_PREVIEW_INVALID_LABEL = "previewなし — frame imageがinvalidです。manual-safe fallback。"
+
+
+class _AspectRatioPreviewLabel(QLabel):
+    """A QLabel whose layout slot follows the Battle Record 16:9 preview."""
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        return max(1, round(width * 9 / 16))
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(640, 360)
 
 
 class MapleMainWindow(QMainWindow):
     """Thin renderer over SelectionFlowController and DomainProjection."""
 
-    def __init__(self, controller: SelectionFlowController) -> None:
+    def __init__(
+        self,
+        controller: SelectionFlowController,
+        *,
+        capture_backend: VideoCaptureBackend | None = None,
+        ocr_backend: OcrCandidateBackend | None = None,
+        auto_start_capture: bool = True,
+    ) -> None:
         super().__init__()
         self._controller = controller
         self._loaded_team: tuple[str, ...] = ()
@@ -69,19 +136,69 @@ class MapleMainWindow(QMainWindow):
         self._loaded_turn_number: int | None = None
         self._loaded_turn_facts_id: str | None = None
         self._current_turn_facts: TurnFactsView | None = None
+
+        # -- Lane B (issue #31): UGREEN capture + OCR candidates -----------------
+        # capture_service/ocr_service are display/candidate-only: nothing here
+        # ever writes to the repository, calls a domain command, or auto-adopts
+        # a candidate into canonical turn facts. Manual entry always works,
+        # capture present or not (CaptureStatus.manual_entry_allowed is
+        # always True upstream).
+        self._capture_service = CaptureService(capture_backend or QtMultimediaUgreenBackend())
+        self._ocr_service = OcrCandidateService(ocr_backend or UnavailableOcrCandidateBackend())
+        self._latest_ocr_bundle: OcrCandidateBundle | None = None
+        self._capture_preview_pixmap = QPixmap()
+        self._capture_preview_frame_id: str | None = None
+        self._capture_timer = QTimer(self)
+        self._capture_timer.setInterval(_CAPTURE_POLL_INTERVAL_MS)
+        self._capture_timer.timeout.connect(self._poll_capture_status)
+
         self._build_ui()
+        self._restore_last_used_self_team_preset()
         self.render_view()
+
+        if auto_start_capture:
+            self._start_capture()
+
+    def _start_capture(self) -> None:
+        """Human has opened the Battle Record screen; begin passive capture.
+
+        Never raises and never blocks turn-fact entry: failures degrade to a
+        sanitized status string, and ``manual_entry_allowed`` stays True.
+        """
+
+        self._capture_service.start()
+        self._poll_capture_status()
+        self._capture_timer.start()
+
+    def _on_reconnect_capture(self, _checked: bool = False) -> None:
+        """Perform exactly one human-requested capture reacquisition attempt."""
+
+        self._capture_timer.stop()
+        self._capture_service.stop()
+        self._capture_service.start()
+        self._poll_capture_status()
+        self._capture_timer.start()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
+        """Clean shutdown: stop capture and release the device on app exit."""
+
+        self._capture_timer.stop()
+        self._capture_service.stop()
+        super().closeEvent(event)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if hasattr(self, "capture_preview_label"):
+            self._render_capture_preview()
 
     def _build_ui(self) -> None:
         self.setWindowTitle("Maple Next — Battle Record")
-        self.resize(980, 960)
+        self.resize(1180, 960)
 
-        scroll = QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        root = QWidget(scroll)
-        self._root_layout = QVBoxLayout(root)
-        self._root_layout.setContentsMargins(24, 24, 24, 24)
-        self._root_layout.setSpacing(16)
+        outer = QWidget(self)
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(24, 24, 24, 24)
+        outer_layout.setSpacing(16)
 
         heading = QLabel("今なにをすべきか")
         heading.setStyleSheet("font-size: 22px; font-weight: 700;")
@@ -121,22 +238,317 @@ class MapleMainWindow(QMainWindow):
             status_frame,
             self.new_match_button,
         ):
-            self._root_layout.addWidget(widget)
+            outer_layout.addWidget(widget)
+
+        self.header_tabs = QTabWidget()
+        outer_layout.addWidget(self.header_tabs, 1)
+
+        selection_scroll = QScrollArea()
+        selection_scroll.setWidgetResizable(True)
+        selection_page = QWidget()
+        self._selection_layout = QVBoxLayout(selection_page)
+        self._selection_layout.setContentsMargins(4, 4, 4, 4)
+        self._selection_layout.setSpacing(16)
+        selection_scroll.setWidget(selection_page)
+        self.header_tabs.addTab(selection_scroll, "選出")
+
+        battle_scroll = QScrollArea()
+        battle_scroll.setWidgetResizable(True)
+        battle_page = QWidget()
+        self._root_layout = QVBoxLayout(battle_page)
+        self._root_layout.setContentsMargins(4, 4, 4, 4)
+        self._root_layout.setSpacing(16)
+        battle_scroll.setWidget(battle_page)
+        self.header_tabs.addTab(battle_scroll, "バトルレコード")
 
         self._build_selection_facts_group()
+        self._build_self_team_presets_group()
         self._build_mock_advice_group()
         self._build_gemini_send_group()
         self._build_advice_display_group()
         self._build_actual_selection_group()
+        self._selection_layout.addStretch(1)
+
         self._build_battle_ready_group()
+        self._build_battle_record_columns()
+        self._root_layout.addStretch(1)
+
+        self.setCentralWidget(outer)
+
+    def _build_battle_record_columns(self) -> None:
+        """左: 確定turn log / 中央: 映像・事実・行動入力 / 右: Gemini Turn Advice."""
+        columns = QHBoxLayout()
+        columns.setSpacing(16)
+
+        left_widget = QWidget()
+        self._left_column_layout = QVBoxLayout(left_widget)
+        self._left_column_layout.setContentsMargins(0, 0, 0, 0)
+        columns.addWidget(left_widget, 1)
+
+        center_widget = QWidget()
+        self._center_column_layout = QVBoxLayout(center_widget)
+        self._center_column_layout.setContentsMargins(0, 0, 0, 0)
+        columns.addWidget(center_widget, 2)
+
+        right_widget = QWidget()
+        self._right_column_layout = QVBoxLayout(right_widget)
+        self._right_column_layout.setContentsMargins(0, 0, 0, 0)
+        columns.addWidget(right_widget, 1)
+
+        self._root_layout.addLayout(columns)
+
+        self._build_action_history_group()
+
+        self._build_capture_status_group()
         self._build_turn_facts_group()
+        self._build_actual_action_group()
+
         self._build_mock_turn_advice_group()
         self._build_turn_advice_display_group()
-        self._build_actual_action_group()
-        self._build_action_history_group()
-        self._root_layout.addStretch(1)
-        scroll.setWidget(root)
-        self.setCentralWidget(scroll)
+
+        self._left_column_layout.addStretch(1)
+        self._center_column_layout.addStretch(1)
+        self._right_column_layout.addStretch(1)
+
+    def _build_capture_status_group(self) -> None:
+        self.capture_status_group = QGroupBox("UGREEN映像")
+        layout = QVBoxLayout(self.capture_status_group)
+        self.capture_preview_label = _AspectRatioPreviewLabel(_PREVIEW_UNAVAILABLE_LABEL)
+        self.capture_preview_label.setObjectName("capturePreviewLabel")
+        self.capture_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.capture_preview_label.setMinimumSize(320, 180)
+        self.capture_preview_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        self.capture_preview_label.setStyleSheet(
+            "QLabel { background: #111827; color: #d1d5db; border: 1px solid #374151; "
+            "padding: 12px; }"
+        )
+        layout.addWidget(self.capture_preview_label)
+
+        self.reconnect_capture_button = QPushButton("UGREEN 再接続 / capture再開始")
+        self.reconnect_capture_button.setObjectName("reconnectCaptureButton")
+        self.reconnect_capture_button.clicked.connect(self._on_reconnect_capture)
+        layout.addWidget(self.reconnect_capture_button)
+
+        self.capture_status_label = QLabel(
+            "capture未接続 — manual-safe fallback。手動入力でturnを継続できます。"
+        )
+        self.capture_status_label.setWordWrap(True)
+        self.capture_freshness_label = QLabel("フレーム: —")
+        self.capture_device_label = QLabel("デバイス: —")
+        layout.addWidget(self.capture_status_label)
+        layout.addWidget(self.capture_freshness_label)
+        layout.addWidget(self.capture_device_label)
+        self._center_column_layout.addWidget(self.capture_status_group)
+
+        self.ocr_candidates_group = QGroupBox("OCR候補 — 参考情報のみ・自動採用しません")
+        ocr_layout = QFormLayout(self.ocr_candidates_group)
+        self.ocr_status_label = QLabel("—")
+        self.ocr_status_label.setWordWrap(True)
+        ocr_layout.addRow("状態", self.ocr_status_label)
+
+        self._ocr_field_labels: dict[str, QLabel] = {}
+        self._ocr_adopt_buttons: dict[str, QPushButton] = {}
+        for field_key in (
+            OcrFieldKey.SELF_ACTIVE,
+            OcrFieldKey.OPPONENT_ACTIVE,
+            OcrFieldKey.SELF_HP,
+            OcrFieldKey.OPPONENT_HP,
+        ):
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            candidate_label = QLabel("—")
+            candidate_label.setWordWrap(True)
+            adopt_button = QPushButton("採用")
+            adopt_button.setEnabled(False)
+            adopt_button.clicked.connect(
+                lambda _checked=False, key=field_key.value: self._on_adopt_ocr_candidate(key)
+            )
+            row_layout.addWidget(candidate_label, 1)
+            row_layout.addWidget(adopt_button)
+            self._ocr_field_labels[field_key.value] = candidate_label
+            self._ocr_adopt_buttons[field_key.value] = adopt_button
+            ocr_layout.addRow(field_key.value, row)
+        self._center_column_layout.addWidget(self.ocr_candidates_group)
+
+    def set_capture_status(self, *, available: bool, detail: str = "") -> None:
+        """Sanitized capture-adapter status hook (no device I/O in this module)."""
+
+        if available:
+            text = detail or "fresh frameを受信しています。"
+        else:
+            text = detail or "capture未接続 — manual-safe fallback。手動入力でturnを継続できます。"
+        self.capture_status_label.setText(text)
+
+    # -- Lane B (issue #31): capture/OCR polling and human-only adoption --------
+
+    def _poll_capture_status(self) -> None:
+        """Timer-driven, display-only refresh. Never a Turn Advice trigger."""
+
+        status, frame = self._capture_service.latest_snapshot()
+        self._render_capture_status(status, frame)
+
+        frame_for_ocr = frame if status.available else None
+        context = OcrCandidateContext(
+            self_active_candidates=self._loaded_applied_three,
+            opponent_active_candidates=(),
+        )
+        bundle = self._ocr_service.request_candidates_from_capture_status(
+            capture_status=status, frame=frame_for_ocr, context=context
+        )
+        self._latest_ocr_bundle = bundle
+        self._render_ocr_candidates(bundle)
+
+    def _render_capture_status(
+        self, status: CaptureStatus, frame: FramePacket | None = None
+    ) -> None:
+        preview_installed = self._render_capture_snapshot(status, frame)
+        if preview_installed:
+            detail = _PREVIEW_DISPLAY_LABEL
+            available = True
+        elif status.status == CaptureStatusCode.AVAILABLE:
+            detail = (
+                _PREVIEW_UNAVAILABLE_LABEL
+                if frame is None
+                else _PREVIEW_INVALID_LABEL
+            )
+            available = False
+        else:
+            detail = _CAPTURE_STATUS_LABELS.get(status.status, status.operator_message or "")
+            available = status.available
+        self.set_capture_status(available=available, detail=detail)
+        self.capture_device_label.setText(f"デバイス: {status.device_label or '—'}")
+        if status.age_ms is None:
+            self.capture_freshness_label.setText("フレーム: —")
+        else:
+            freshness = "fresh" if status.fresh else "stale"
+            self.capture_freshness_label.setText(f"フレーム: {status.age_ms}ms前 ({freshness})")
+
+    @staticmethod
+    def _detached_qimage(image: object) -> QImage | None:
+        """Validate the already-detached canonical image without another copy."""
+
+        if isinstance(image, QImage):
+            detached = image
+        elif isinstance(image, QPixmap):
+            detached = image.toImage()
+        else:
+            return None
+        if detached.isNull() or detached.width() <= 0 or detached.height() <= 0:
+            return None
+        return detached
+
+    def _clear_capture_preview(self, *, placeholder: str) -> None:
+        self._capture_preview_pixmap = QPixmap()
+        self._capture_preview_frame_id = None
+        self.capture_preview_label.clear()
+        self.capture_preview_label.setText(placeholder)
+
+    def _render_capture_preview(self) -> bool:
+        if self._capture_preview_pixmap.isNull():
+            return False
+        target_size = self.capture_preview_label.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            target_size = self.capture_preview_label.sizeHint()
+        source_size = self._capture_preview_pixmap.size()
+        target_contains_source = (
+            target_size.width() >= source_size.width()
+            and target_size.height() >= source_size.height()
+        )
+        if target_contains_source:
+            scaled = self._capture_preview_pixmap
+        else:
+            scaled = self._capture_preview_pixmap.scaled(
+                target_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        if scaled.isNull():
+            return False
+        self.capture_preview_label.setText("")
+        self.capture_preview_label.setPixmap(scaled)
+        installed = self.capture_preview_label.pixmap()
+        return installed is not None and not installed.isNull()
+
+    def _render_capture_snapshot(
+        self, status: CaptureStatus, frame: object | None
+    ) -> bool:
+        """Render pixels only when fresh metadata and the same frame are valid."""
+
+        if not status.fresh or not isinstance(frame, FramePacket):
+            if not status.fresh and status.status == CaptureStatusCode.FRAME_STALE:
+                placeholder = _PREVIEW_STALE_LABEL
+            elif status.status == CaptureStatusCode.AVAILABLE:
+                placeholder = _PREVIEW_INVALID_LABEL
+            else:
+                placeholder = _PREVIEW_UNAVAILABLE_LABEL
+            self._clear_capture_preview(placeholder=placeholder)
+            return False
+
+        if status.frame_id != frame.frame_id:
+            self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
+            return False
+        detached = self._detached_qimage(frame.image)
+        if detached is None:
+            self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
+            return False
+        pixmap = QPixmap.fromImage(detached)
+        if pixmap.isNull():
+            self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
+            return False
+        self._capture_preview_pixmap = pixmap
+        self._capture_preview_frame_id = frame.frame_id
+        if not self._render_capture_preview():
+            self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
+            return False
+        return True
+
+    def _render_ocr_candidates(self, bundle: OcrCandidateBundle) -> None:
+        self.ocr_status_label.setText(bundle.operator_message or bundle.status)
+        best_by_field: dict[str, OcrCandidate] = {}
+        for candidate in bundle.candidates:
+            current = best_by_field.get(candidate.field_key)
+            if current is None or candidate.rank < current.rank:
+                best_by_field[candidate.field_key] = candidate
+
+        editable = getattr(self, "_turn_facts_editable", False)
+        for field_key, label in self._ocr_field_labels.items():
+            best_candidate = best_by_field.get(field_key)
+            button = self._ocr_adopt_buttons[field_key]
+            if best_candidate is None:
+                label.setText("—")
+                button.setEnabled(False)
+                continue
+            label.setText(
+                f"{best_candidate.suggested_value} (confidence={best_candidate.confidence:.2f})"
+            )
+            button.setEnabled(editable)
+
+    def _on_adopt_ocr_candidate(self, field_key: str) -> None:
+        """Human-triggered only: copy one OCR candidate into the manual input.
+
+        Never called by the timer/poll path itself. The human must still
+        press "Turn factsを確認／修正" to save anything — this only fills
+        the input widget, exactly like typing the value by hand, and manual
+        edits after adoption always win.
+        """
+
+        if self._latest_ocr_bundle is None:
+            return
+        candidates = [c for c in self._latest_ocr_bundle.candidates if c.field_key == field_key]
+        if not candidates:
+            return
+        best = min(candidates, key=lambda c: c.rank)
+        if field_key == OcrFieldKey.SELF_ACTIVE.value:
+            self.self_active_box.setCurrentText(best.suggested_value)
+        elif field_key == OcrFieldKey.OPPONENT_ACTIVE.value:
+            self.opponent_active_input.setText(best.suggested_value)
+        elif field_key == OcrFieldKey.SELF_HP.value:
+            self.self_hp_box.setCurrentText(best.suggested_value)
+        elif field_key == OcrFieldKey.OPPONENT_HP.value:
+            self.opponent_hp_box.setCurrentText(best.suggested_value)
 
     def _build_selection_facts_group(self) -> None:
         self.selection_facts_group = QGroupBox("Selection facts — 手動入力")
@@ -157,7 +569,133 @@ class MapleMainWindow(QMainWindow):
         self.confirm_facts_button = QPushButton("6体を確認")
         self.confirm_facts_button.clicked.connect(self._on_confirm_facts)
         layout.addWidget(self.confirm_facts_button, 7, 0, 1, 2)
-        self._root_layout.addWidget(self.selection_facts_group)
+        self._selection_layout.addWidget(self.selection_facts_group)
+
+    def _build_self_team_presets_group(self) -> None:
+        self.self_team_presets_group = QGroupBox("自分の構築プリセット")
+        layout = QFormLayout(self.self_team_presets_group)
+        self.self_team_preset_box = QComboBox()
+        self.self_team_preset_box.currentIndexChanged.connect(
+            self._on_self_team_preset_selected
+        )
+        self.self_team_preset_name = QLineEdit()
+        self.self_team_preset_name.setPlaceholderText("構築名")
+        layout.addRow("一覧", self.self_team_preset_box)
+        layout.addRow("構築名", self.self_team_preset_name)
+
+        buttons = QWidget()
+        button_layout = QHBoxLayout(buttons)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        self.save_self_team_preset_button = QPushButton("新規保存")
+        self.use_self_team_preset_button = QPushButton("この構築を使用")
+        self.update_self_team_preset_button = QPushButton("更新")
+        self.delete_self_team_preset_button = QPushButton("削除")
+        self.save_self_team_preset_button.clicked.connect(self._on_save_self_team_preset)
+        self.use_self_team_preset_button.clicked.connect(self._on_use_self_team_preset)
+        self.update_self_team_preset_button.clicked.connect(self._on_update_self_team_preset)
+        self.delete_self_team_preset_button.clicked.connect(self._on_delete_self_team_preset)
+        for button in (
+            self.save_self_team_preset_button,
+            self.use_self_team_preset_button,
+            self.update_self_team_preset_button,
+            self.delete_self_team_preset_button,
+        ):
+            button_layout.addWidget(button)
+        layout.addRow(buttons)
+        helper = QLabel(
+            "使用後は今回限りの手動修正ができます。6体確認時に試合用snapshotを保存します。"
+        )
+        helper.setWordWrap(True)
+        layout.addRow(helper)
+        self._selection_layout.addWidget(self.self_team_presets_group)
+        self._refresh_self_team_presets()
+
+    def _refresh_self_team_presets(self, selected_id: str | None = None) -> None:
+        self.self_team_preset_box.blockSignals(True)
+        self.self_team_preset_box.clear()
+        self.self_team_preset_box.addItem("選択してください", None)
+        selected_index = 0
+        for preset in self._controller.list_self_team_presets():
+            self.self_team_preset_box.addItem(preset.name, preset.preset_id)
+            if preset.preset_id == selected_id:
+                selected_index = self.self_team_preset_box.count() - 1
+        self.self_team_preset_box.setCurrentIndex(selected_index)
+        self.self_team_preset_box.blockSignals(False)
+        self._update_self_team_preset_buttons()
+
+    def _selected_self_team_preset_id(self) -> str | None:
+        value = self.self_team_preset_box.currentData()
+        return value if isinstance(value, str) and value else None
+
+    def _restore_last_used_self_team_preset(self) -> None:
+        preset = self._controller.last_used_self_team_preset()
+        if preset is None:
+            return
+        self._copy_self_team_to_inputs(preset.self_team)
+        self._refresh_self_team_presets(preset.preset_id)
+        self.self_team_preset_name.setText(preset.name)
+
+    def _copy_self_team_to_inputs(self, team: Sequence[str]) -> None:
+        for field, value in zip(self.self_team_inputs, team, strict=True):
+            field.setText(value)
+
+    def _on_self_team_preset_selected(self, _index: int) -> None:
+        preset_id = self._selected_self_team_preset_id()
+        preset = next(
+            (
+                item
+                for item in self._controller.list_self_team_presets()
+                if item.preset_id == preset_id
+            ),
+            None,
+        )
+        self.self_team_preset_name.setText(preset.name if preset is not None else "")
+        self._update_self_team_preset_buttons()
+
+    def _update_self_team_preset_buttons(self) -> None:
+        selected = self._selected_self_team_preset_id() is not None
+        self.use_self_team_preset_button.setEnabled(selected)
+        self.update_self_team_preset_button.setEnabled(selected)
+        self.delete_self_team_preset_button.setEnabled(selected)
+
+    def _on_save_self_team_preset(self, _checked: bool = False) -> None:
+        view = self._controller.save_self_team_preset(
+            self.self_team_preset_name.text(),
+            [field.text() for field in self.self_team_inputs],
+        )
+        self._refresh_self_team_presets()
+        self.render_view(view)
+
+    def _on_use_self_team_preset(self, _checked: bool = False) -> None:
+        preset_id = self._selected_self_team_preset_id()
+        if preset_id is None:
+            return
+        preset = self._controller.use_self_team_preset(preset_id)
+        if preset is not None:
+            self._copy_self_team_to_inputs(preset.self_team)
+            self.self_team_preset_name.setText(preset.name)
+        self.render_view(self._controller.refresh())
+
+    def _on_update_self_team_preset(self, _checked: bool = False) -> None:
+        preset_id = self._selected_self_team_preset_id()
+        if preset_id is None:
+            return
+        view = self._controller.update_self_team_preset(
+            preset_id,
+            self.self_team_preset_name.text(),
+            [field.text() for field in self.self_team_inputs],
+        )
+        self._refresh_self_team_presets(preset_id)
+        self.render_view(view)
+
+    def _on_delete_self_team_preset(self, _checked: bool = False) -> None:
+        preset_id = self._selected_self_team_preset_id()
+        if preset_id is None:
+            return
+        view = self._controller.delete_self_team_preset(preset_id)
+        self._refresh_self_team_presets()
+        self.self_team_preset_name.clear()
+        self.render_view(view)
 
     def _build_mock_advice_group(self) -> None:
         self.mock_group = QGroupBox("開発用 MOCK Selection Advice — ネットワーク送信なし")
@@ -173,7 +711,7 @@ class MapleMainWindow(QMainWindow):
         self.mock_submit_button = QPushButton("MOCK Adviceを投入")
         self.mock_submit_button.clicked.connect(self._on_submit_mock)
         layout.addRow(self.mock_submit_button)
-        self._root_layout.addWidget(self.mock_group)
+        self._selection_layout.addWidget(self.mock_group)
 
     def _build_gemini_send_group(self) -> None:
         self.gemini_group = QGroupBox("Gemini Selection Advice — 人間による明示送信")
@@ -188,7 +726,7 @@ class MapleMainWindow(QMainWindow):
             "SEND SELECTION TO GEMINI", self._on_trusted_send_to_gemini
         )
         layout.addWidget(self.gemini_send_button)
-        self._root_layout.addWidget(self.gemini_group)
+        self._selection_layout.addWidget(self.gemini_group)
 
     def _build_advice_display_group(self) -> None:
         self.advice_group = QGroupBox("受領したSelection Advice")
@@ -199,7 +737,7 @@ class MapleMainWindow(QMainWindow):
         layout.addRow("提供元", self.advice_source_label)
         layout.addRow("提案3体", self.advice_three_label)
         layout.addRow("提案先発", self.advice_lead_label)
-        self._root_layout.addWidget(self.advice_group)
+        self._selection_layout.addWidget(self.advice_group)
 
     def _build_actual_selection_group(self) -> None:
         self.actual_group = QGroupBox("実際の選出 — 人間が決定")
@@ -226,7 +764,7 @@ class MapleMainWindow(QMainWindow):
         layout.addWidget(self.apply_confirm_checkbox)
         self.apply_button = TrustedSendButton("APPLY", self._on_apply)
         layout.addWidget(self.apply_button)
-        self._root_layout.addWidget(self.actual_group)
+        self._selection_layout.addWidget(self.actual_group)
 
     def _build_battle_ready_group(self) -> None:
         self.ready_group = QGroupBox("APPLY済みSelection")
@@ -284,7 +822,7 @@ class MapleMainWindow(QMainWindow):
         self.confirm_turn_facts_button = QPushButton("Turn factsを確認／修正")
         self.confirm_turn_facts_button.clicked.connect(self._on_confirm_turn_facts)
         layout.addRow(self.confirm_turn_facts_button)
-        self._root_layout.addWidget(self.turn_facts_group)
+        self._center_column_layout.addWidget(self.turn_facts_group)
 
     def _build_mock_turn_advice_group(self) -> None:
         self.mock_turn_group = QGroupBox("開発用 MOCK Turn Advice — ネットワーク送信なし")
@@ -301,27 +839,41 @@ class MapleMainWindow(QMainWindow):
         self.mock_turn_prediction_input.setPlaceholderText("相手の次行動予測")
         self.mock_turn_rationale_input = QLineEdit()
         self.mock_turn_rationale_input.setPlaceholderText("簡潔な理由")
+        self.mock_turn_warnings_input = QLineEdit()
+        self.mock_turn_warnings_input.setPlaceholderText("任意の警告（; 区切り）")
         layout.addRow("推奨action種別", self.mock_turn_action_type_box)
         layout.addRow("推奨action", self.mock_turn_action_name_box)
         layout.addRow("相手の次行動予測", self.mock_turn_prediction_input)
         layout.addRow("理由", self.mock_turn_rationale_input)
+        layout.addRow("警告", self.mock_turn_warnings_input)
         self.mock_turn_submit_button = QPushButton("MOCK Turn Adviceを投入")
         self.mock_turn_submit_button.clicked.connect(self._on_submit_mock_turn)
         layout.addRow(self.mock_turn_submit_button)
-        self._root_layout.addWidget(self.mock_turn_group)
+        self._right_column_layout.addWidget(self.mock_turn_group)
 
     def _build_turn_advice_display_group(self) -> None:
-        self.turn_advice_group = QGroupBox("受領したTurn Advice（MOCK）")
+        self.turn_advice_group = QGroupBox("受領したTurn Advice")
         layout = QFormLayout(self.turn_advice_group)
         self.turn_advice_action_label = QLabel()
         self.turn_advice_prediction_label = QLabel()
         self.turn_advice_prediction_label.setWordWrap(True)
         self.turn_advice_rationale_label = QLabel()
         self.turn_advice_rationale_label.setWordWrap(True)
+        self.turn_advice_warnings_label = QLabel()
+        self.turn_advice_warnings_label.setWordWrap(True)
+        self.turn_advice_source_label = QLabel()
+        self.turn_advice_model_label = QLabel()
+        self.turn_advice_binding_label = QLabel()
+        self.turn_advice_legality_label = QLabel()
         layout.addRow("推奨action", self.turn_advice_action_label)
         layout.addRow("相手予測", self.turn_advice_prediction_label)
         layout.addRow("理由", self.turn_advice_rationale_label)
-        self._root_layout.addWidget(self.turn_advice_group)
+        layout.addRow("警告", self.turn_advice_warnings_label)
+        layout.addRow("Source", self.turn_advice_source_label)
+        layout.addRow("Model", self.turn_advice_model_label)
+        layout.addRow("Binding", self.turn_advice_binding_label)
+        layout.addRow("Legality", self.turn_advice_legality_label)
+        self._right_column_layout.addWidget(self.turn_advice_group)
 
     def _build_actual_action_group(self) -> None:
         self.actual_action_group = QGroupBox("実際の行動 — 人間が記録")
@@ -346,11 +898,24 @@ class MapleMainWindow(QMainWindow):
         )
         layout.addRow("行動種別", self.actual_action_type_box)
         layout.addRow("実際の行動", self.actual_action_name_box)
+
+        self.opponent_action_type_box = QComboBox()
+        self.opponent_action_type_box.addItems(
+            [_PLACEHOLDER, ActionType.MOVE.value, ActionType.SWITCH.value]
+        )
+        self.opponent_action_name_input = QLineEdit()
+        self.opponent_action_name_input.setPlaceholderText("相手の実際の行動（任意）")
+        self.action_order_box = QComboBox()
+        self.action_order_box.addItems([order.value for order in ActionOrder])
+        layout.addRow("相手の行動種別（任意）", self.opponent_action_type_box)
+        layout.addRow("相手の実際の行動（任意）", self.opponent_action_name_input)
+        layout.addRow("行動順序", self.action_order_box)
+
         layout.addRow(self.actual_action_confirm_checkbox)
         self.record_action_button = QPushButton("実際の行動を記録")
         self.record_action_button.clicked.connect(self._on_record_action)
         layout.addRow(self.record_action_button)
-        self._root_layout.addWidget(self.actual_action_group)
+        self._center_column_layout.addWidget(self.actual_action_group)
 
     def _build_action_history_group(self) -> None:
         self.history_group = QGroupBox("Action-only history")
@@ -361,7 +926,7 @@ class MapleMainWindow(QMainWindow):
         self.next_turn_button = QPushButton("NEXT TURN")
         self.next_turn_button.clicked.connect(self._on_next_turn)
         layout.addWidget(self.next_turn_button)
-        self._root_layout.addWidget(self.history_group)
+        self._left_column_layout.addWidget(self.history_group)
 
     def render_view(self, view: OperatorView | None = None) -> None:
         current = view if view is not None else self._controller.refresh()
@@ -384,10 +949,36 @@ class MapleMainWindow(QMainWindow):
         self.new_match_button.setEnabled(projection.primary_cta_enabled)
         selection_open = projection.session_state == "SELECTION_OPEN"
         self.selection_facts_group.setVisible(selection_open)
+        self.self_team_presets_group.setVisible(selection_open)
+
+        battle_record_states = {
+            "BATTLE_READY",
+            "TURN_CAPTURE_PENDING",
+            "TURN_REVIEW_REQUIRED",
+            "TURN_REVIEWED",
+            "TURN_RECORDED",
+            "MATCH_ENDED",
+            "MATCH_EXPORTED",
+        }
+        if projection.session_state in battle_record_states:
+            self.header_tabs.setCurrentIndex(1)
+        elif projection.session_state in {
+            "SELECTION_OPEN",
+            "SELECTION_ADVICE_READY",
+            None,
+        }:
+            self.header_tabs.setCurrentIndex(0)
         facts_editable = projection.primary_cta == "CONFIRM_SELECTION_FACTS"
         self.confirm_facts_button.setEnabled(facts_editable)
         for field in (*self.self_team_inputs, *self.opponent_team_inputs):
             field.setEnabled(facts_editable)
+        self.save_self_team_preset_button.setEnabled(facts_editable)
+        self.use_self_team_preset_button.setEnabled(
+            facts_editable and self._selected_self_team_preset_id() is not None
+        )
+        self.update_self_team_preset_button.setEnabled(
+            facts_editable and self._selected_self_team_preset_id() is not None
+        )
 
         if current.self_team and current.self_team != self._loaded_team:
             self._loaded_team = current.self_team
@@ -464,6 +1055,13 @@ class MapleMainWindow(QMainWindow):
                 current.turn_advice.opponent_prediction
             )
             self.turn_advice_rationale_label.setText(current.turn_advice.rationale)
+            self.turn_advice_warnings_label.setText(
+                "; ".join(current.turn_advice.warnings) or "—"
+            )
+            self.turn_advice_source_label.setText(current.turn_advice.source_type)
+            self.turn_advice_model_label.setText(current.turn_advice.model)
+            self.turn_advice_binding_label.setText("CURRENT")
+            self.turn_advice_legality_label.setText("VALID")
 
         self.actual_action_group.setVisible(
             projection.primary_cta == "RECORD_ACTUAL_ACTION"
@@ -473,9 +1071,18 @@ class MapleMainWindow(QMainWindow):
             self.actual_action_name_box.clear()
             self.actual_action_name_box.addItem(_PLACEHOLDER)
             self.actual_action_confirm_checkbox.setChecked(False)
+            self.opponent_action_type_box.setCurrentIndex(0)
+            self.opponent_action_name_input.clear()
+            self.action_order_box.setCurrentText(ActionOrder.UNKNOWN.value)
 
         history_lines = [
-            f"Turn {item.turn_number}: {item.action_type} {item.action_name}"
+            f"Turn {item.turn_number}: 自分={item.action_type} {item.action_name}"
+            + (
+                f" / 相手={item.opponent_action_type} {item.opponent_action_name}"
+                if item.opponent_action_type is not None
+                else ""
+            )
+            + f" / 順序={item.action_order}"
             for item in current.action_history
         ]
         self.action_history_label.setText(
@@ -531,6 +1138,7 @@ class MapleMainWindow(QMainWindow):
         self.mock_turn_action_type_box.setCurrentIndex(0)
         self.mock_turn_prediction_input.clear()
         self.mock_turn_rationale_input.clear()
+        self.mock_turn_warnings_input.clear()
 
     def _load_turn_facts(self, facts: TurnFactsView) -> None:
         self.self_active_box.setCurrentText(facts.self_active)
@@ -545,6 +1153,7 @@ class MapleMainWindow(QMainWindow):
         self.turn_facts_confirm_checkbox.setChecked(False)
 
     def _set_turn_facts_editable(self, enabled: bool) -> None:
+        self._turn_facts_editable = enabled
         for widget in (
             self.self_active_box,
             self.opponent_active_input,
@@ -677,19 +1286,31 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_submit_mock_turn(self, _checked: bool = False) -> None:
+        warnings = tuple(
+            part.strip()
+            for part in self.mock_turn_warnings_input.text().split(";")
+            if part.strip()
+        )
         view = self._controller.submit_mock_turn_advice(
             action_type=self.mock_turn_action_type_box.currentText(),
             action_name=self.mock_turn_action_name_box.currentText(),
             opponent_prediction=self.mock_turn_prediction_input.text(),
             rationale=self.mock_turn_rationale_input.text(),
+            warnings=warnings,
         )
         self.render_view(view)
 
     def _on_record_action(self, _checked: bool = False) -> None:
+        opponent_type = self.opponent_action_type_box.currentText()
+        if opponent_type == _PLACEHOLDER:
+            opponent_type = ""
         view = self._controller.record_actual_action(
             action_type=self.actual_action_type_box.currentText(),
             action_name=self.actual_action_name_box.currentText(),
             human_confirmed=self.actual_action_confirm_checkbox.isChecked(),
+            opponent_action_type=opponent_type,
+            opponent_action_name=self.opponent_action_name_input.text(),
+            action_order=self.action_order_box.currentText(),
         )
         self.render_view(view)
 

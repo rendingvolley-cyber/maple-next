@@ -317,8 +317,81 @@ def test_turn_export_uses_mock_source_and_action_only_history(tmp_path: Path) ->
             "turn_number": 1,
             "action_type": "MOVE",
             "action_name": "Wave Crash",
+            "opponent_action_type": None,
+            "opponent_action_name": "",
+            "action_order": "UNKNOWN",
         }
     ]
+
+
+def test_turn_export_includes_model_and_warnings(tmp_path: Path) -> None:
+    _, application, _, turn_adapter = build_ready_application(tmp_path)
+    application.start_turn_capture()
+    confirm_turn(application)
+    result = turn_adapter.submit(
+        application,
+        action_type=ActionType.MOVE,
+        action_name="Protect",
+        opponent_prediction="Earthquake",
+        rationale="Scout before committing.",
+        warnings=("HP不明のためswitchも検討", "追加warning"),
+    )
+    assert result.disposition is ResultDisposition.APPLIED
+    application.record_actual_action(
+        action_type=ActionType.MOVE,
+        action_name="Wave Crash",
+        human_confirmed=True,
+    )
+    application.end_match(MatchOutcome.WIN, human_confirmed=True)
+    record = application.export_match()
+    payload = load_export(record.export_path)
+    turn = payload["turns"][0]  # type: ignore[index]
+
+    assert turn["advice"]["model"] == "mock-dev"
+    assert turn["advice"]["warnings"] == ["HP不明のためswitchも検討", "追加warning"]
+
+
+def test_export_includes_opponent_action_and_action_order(tmp_path: Path) -> None:
+    from maple_next.domain.enums import ActionOrder
+
+    _, application, _, turn_adapter = build_ready_application(tmp_path)
+    application.start_turn_capture()
+    confirm_turn(application)
+    result = turn_adapter.submit(
+        application,
+        action_type=ActionType.MOVE,
+        action_name="Protect",
+        opponent_prediction="Earthquake",
+        rationale="Scout before committing.",
+    )
+    assert result.disposition is ResultDisposition.APPLIED
+    application.record_actual_action(
+        action_type=ActionType.MOVE,
+        action_name="Wave Crash",
+        human_confirmed=True,
+        opponent_action_type=ActionType.SWITCH,
+        opponent_action_name="Garganacl",
+        action_order=ActionOrder.SELF_FIRST,
+    )
+    application.end_match(MatchOutcome.WIN, human_confirmed=True)
+    record = application.export_match()
+    payload = load_export(record.export_path)
+    turn = payload["turns"][0]  # type: ignore[index]
+
+    assert turn["self_executed_action"] == {"action_type": "MOVE", "action_name": "Wave Crash"}
+    assert turn["opponent_executed_action"] == {
+        "action_type": "SWITCH",
+        "action_name": "Garganacl",
+    }
+    assert turn["action_order"] == "SELF_FIRST"
+    assert turn["reviewed_facts"]["provenance"] == "HUMAN_CONFIRMED"
+    assert turn["advice"]["binding"] == "APPLIED"
+    assert turn["advice"]["legality"] == "VALID"
+
+    history_entry = payload["action_history"][0]  # type: ignore[index]
+    assert history_entry["opponent_action_type"] == "SWITCH"
+    assert history_entry["opponent_action_name"] == "Garganacl"
+    assert history_entry["action_order"] == "SELF_FIRST"
 
 
 def test_export_excludes_internal_and_sensitive_fields(tmp_path: Path) -> None:

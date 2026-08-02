@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import cast
+from uuid import uuid4
 
 from maple_next.application.projection import DomainProjection
 from maple_next.application.service import BattleApplication, DomainError
-from maple_next.domain.enums import ActionType, HpBucket, ResultDisposition
-from maple_next.domain.models import AppliedSelectionSnapshot
+from maple_next.domain.enums import ActionOrder, ActionType, HpBucket, ResultDisposition
+from maple_next.domain.models import AppliedSelectionSnapshot, SelfTeamPreset
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter, describe_gemini_failure
@@ -54,6 +56,9 @@ class TurnAdviceView:
     opponent_prediction: str
     rationale: str
     is_mock: bool = True
+    source_type: str = "MOCK"
+    model: str = "mock-dev"
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +66,9 @@ class RecordedActionView:
     turn_number: int
     action_type: str
     action_name: str
+    opponent_action_type: str | None = None
+    opponent_action_name: str = ""
+    action_order: str = "UNKNOWN"
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +256,95 @@ class SelectionFlowController:
             + gemini_count
         )
 
+    def list_self_team_presets(self) -> tuple[SelfTeamPreset, ...]:
+        return self._repository.list_self_team_presets()
+
+    def last_used_self_team_preset(self) -> SelfTeamPreset | None:
+        return self._repository.get_last_used_self_team_preset()
+
+    def save_self_team_preset(
+        self, name: str, self_entries: Sequence[str]
+    ) -> OperatorView:
+        try:
+            display_name, normalized_name = self._validate_preset_name(name)
+            self_team = self._validate_preset_team(self_entries)
+            with self._repository.transaction():
+                self._repository.insert_self_team_preset(
+                    preset_id=str(uuid4()),
+                    name=display_name,
+                    normalized_name=normalized_name,
+                    self_team=self_team,
+                )
+        except (OperatorInputError, sqlite3.IntegrityError) as error:
+            self._error_message = self._preset_error_message(error)
+        else:
+            self._error_message = None
+        return self.refresh()
+
+    def update_self_team_preset(
+        self, preset_id: str, name: str, self_entries: Sequence[str]
+    ) -> OperatorView:
+        try:
+            display_name, normalized_name = self._validate_preset_name(name)
+            self_team = self._validate_preset_team(self_entries)
+            with self._repository.transaction():
+                updated = self._repository.update_self_team_preset(
+                    preset_id=preset_id,
+                    name=display_name,
+                    normalized_name=normalized_name,
+                    self_team=self_team,
+                )
+                if not updated:
+                    raise OperatorInputError("選択した構築が見つかりません。")
+        except (OperatorInputError, sqlite3.IntegrityError) as error:
+            self._error_message = self._preset_error_message(error)
+        else:
+            self._error_message = None
+        return self.refresh()
+
+    def delete_self_team_preset(self, preset_id: str) -> OperatorView:
+        try:
+            with self._repository.transaction():
+                if not self._repository.delete_self_team_preset(preset_id):
+                    raise OperatorInputError("選択した構築が見つかりません。")
+        except OperatorInputError as error:
+            self._error_message = str(error)
+        else:
+            self._error_message = None
+        return self.refresh()
+
+    def use_self_team_preset(self, preset_id: str) -> SelfTeamPreset | None:
+        preset = self._repository.get_self_team_preset(preset_id)
+        if preset is None:
+            self._error_message = "選択した構築が見つかりません。"
+            return None
+        with self._repository.transaction():
+            self._repository.set_last_used_self_team_preset(preset_id)
+        self._error_message = None
+        return preset
+
+    @staticmethod
+    def _validate_preset_name(name: str) -> tuple[str, str]:
+        display_name = name.strip()
+        if not display_name:
+            raise OperatorInputError("構築名を入力してください。")
+        if len(display_name) > 80:
+            raise OperatorInputError("構築名は80文字以内で入力してください。")
+        return display_name, display_name.casefold()
+
+    @staticmethod
+    def _validate_preset_team(
+        entries: Sequence[str],
+    ) -> tuple[str, str, str, str, str, str]:
+        team = validate_team(entries, label="自分の構築")
+        return (team[0], team[1], team[2], team[3], team[4], team[5])
+
+    @staticmethod
+    def _preset_error_message(error: Exception) -> str:
+        if isinstance(error, sqlite3.IntegrityError):
+            return "同じ名前の構築が既にあります。"
+        return str(error)
+
     def refresh(self) -> OperatorView:
         projection = self._application.projection()
         self_team: tuple[str, ...] = ()
@@ -305,6 +402,9 @@ class SelectionFlowController:
                 opponent_prediction=stored_turn_advice.opponent_prediction,
                 rationale=stored_turn_advice.rationale,
                 is_mock=stored_turn_advice.is_mock,
+                source_type=stored_turn_advice.source_type,
+                model=stored_turn_advice.model,
+                warnings=stored_turn_advice.warnings,
             )
         if projection.session_id is not None:
             action_history = tuple(
@@ -312,6 +412,13 @@ class SelectionFlowController:
                     turn_number=action.turn_number,
                     action_type=action.action_type.value,
                     action_name=action.action_name,
+                    opponent_action_type=(
+                        action.opponent_action_type.value
+                        if action.opponent_action_type is not None
+                        else None
+                    ),
+                    opponent_action_name=action.opponent_action_name,
+                    action_order=action.action_order.value,
                 )
                 for action in self._repository.list_recorded_actions(
                     projection.session_id
@@ -409,7 +516,7 @@ class SelectionFlowController:
     ) -> OperatorView:
         """Human-only explicit send. Must only be invoked from a trusted gate.
 
-        Creates exactly one immutable job, dispatches exactly one transport
+        Creates exactly one immutable job and dispatches its bounded provider policy
         call off the UI thread, and never auto-applies or auto-retries. The
         provider result — success or failure — arrives later via
         ``on_result`` once the strict binding contract has been applied (or
@@ -550,6 +657,7 @@ class SelectionFlowController:
         action_name: str,
         opponent_prediction: str,
         rationale: str,
+        warnings: tuple[str, ...] = (),
     ) -> OperatorView:
         current = self.refresh()
         try:
@@ -576,6 +684,7 @@ class SelectionFlowController:
                 action_name=normalized_name,
                 opponent_prediction=normalized_prediction,
                 rationale=normalized_rationale,
+                warnings=tuple(item.strip() for item in warnings if item.strip()),
             )
             if result.disposition is not ResultDisposition.APPLIED:
                 raise OperatorInputError("MOCK Turn Adviceを適用できませんでした。")
@@ -595,16 +704,33 @@ class SelectionFlowController:
         action_type: str,
         action_name: str,
         human_confirmed: bool,
+        opponent_action_type: str = "",
+        opponent_action_name: str = "",
+        action_order: str = ActionOrder.UNKNOWN.value,
     ) -> OperatorView:
         try:
             typed_action = validate_action_type(action_type)
             normalized_name = action_name.strip()
             if not normalized_name:
                 raise OperatorInputError("実際に選んだ行動を選択してください。")
+            normalized_opponent_type = opponent_action_type.strip()
+            typed_opponent_type: ActionType | None = None
+            if normalized_opponent_type:
+                typed_opponent_type = validate_action_type(normalized_opponent_type)
+            normalized_opponent_name = opponent_action_name.strip()
+            if typed_opponent_type is not None and not normalized_opponent_name:
+                raise OperatorInputError("相手の実際の行動名を入力してください。")
+            try:
+                typed_order = ActionOrder(action_order.strip() or ActionOrder.UNKNOWN.value)
+            except ValueError as exc:
+                raise OperatorInputError("行動順序は一覧から選択してください。") from exc
             self._application.record_actual_action(
                 action_type=typed_action,
                 action_name=normalized_name,
                 human_confirmed=human_confirmed,
+                opponent_action_type=typed_opponent_type,
+                opponent_action_name=normalized_opponent_name,
+                action_order=typed_order,
             )
         except OperatorInputError as error:
             self._error_message = str(error)

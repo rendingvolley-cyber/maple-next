@@ -106,7 +106,7 @@ def test_window_supports_one_manual_turn_and_action_history(tmp_path: Path) -> N
     window.record_action_button.click()
     qapp.processEvents()
     assert window.session_state_label.text() == "TURN_RECORDED"
-    assert window.action_history_label.text() == "Turn 1: MOVE Wave Crash"
+    assert window.action_history_label.text() == "Turn 1: 自分=MOVE Wave Crash / 順序=UNKNOWN"
     assert controller.network_call_count == 0
 
     window.next_turn_button.click()

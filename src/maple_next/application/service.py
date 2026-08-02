@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from maple_next.application.projection import DomainProjection, project
 from maple_next.domain.enums import (
+    ActionOrder,
     ActionType,
     BattleState,
     HpBucket,
@@ -22,6 +23,7 @@ from maple_next.domain.models import (
     BattleSession,
     BattleTurn,
     RecordedAction,
+    ReviewedBoardSnapshot,
     SelectionFacts,
     TurnAdviceSnapshot,
     TurnFactsSnapshot,
@@ -34,11 +36,78 @@ from maple_next.providers.selection_request import (
 from maple_next.providers.selection_request import (
     request_payload_hash as compute_selection_request_payload_hash,
 )
+from maple_next.providers.turn_boundary import DispatchTrigger, decide_turn_advice_dispatch
+from maple_next.providers.turn_request import (
+    LegalAction,
+    TurnAdviceRequest,
+    build_turn_advice_request,
+)
+from maple_next.providers.turn_request import (
+    request_payload_hash as compute_turn_request_payload_hash,
+)
+from maple_next.providers.turn_response import (
+    NormalizedTurnAdviceResult,
+    TurnAdviceSchemaError,
+    turn_advice_body_from_dict,
+)
+from maple_next.providers.turn_validation import (
+    TurnAdviceResultCode,
+    build_normalized_turn_advice_result,
+    sanitized_reason_for,
+    validate_turn_advice_result,
+)
 from maple_next.workers.contracts.models import JobEnvelope, ResultEnvelope
 
 
 class DomainError(RuntimeError):
     """Raised when a command violates the canonical transition contract."""
+
+
+def _reviewed_board_snapshot_from_turn_facts(facts: TurnFactsSnapshot) -> ReviewedBoardSnapshot:
+    """Adapt the flat, human-confirmed :class:`TurnFactsSnapshot` into the
+    richer Lane C :class:`ReviewedBoardSnapshot` shape.
+
+    Only ``self_active``/``opponent_active``/``self_hp``/``opponent_hp`` are
+    captured by the current human turn-facts review flow; every other
+    reviewed field (status, stat stages, weather, terrain, side effects) is
+    not yet collected anywhere in this codebase, so it is explicit
+    ``"UNKNOWN"``/default rather than guessed.
+    """
+
+    return ReviewedBoardSnapshot(
+        reviewed_board_id=facts.turn_facts_id,
+        turn_id=facts.turn_id,
+        self_active=facts.self_active,
+        opponent_active=facts.opponent_active,
+        self_hp=facts.self_hp,
+        opponent_hp=facts.opponent_hp,
+        self_status="UNKNOWN",
+        opponent_status="UNKNOWN",
+    )
+
+
+def _legal_actions_from_turn_facts(facts: TurnFactsSnapshot) -> tuple[LegalAction, ...]:
+    """Build the canonical Lane C legal-action list from reviewed turn facts."""
+
+    moves = tuple(
+        LegalAction(
+            action_id=f"MOVE:{name}",
+            action_type=ActionType.MOVE,
+            action_name=name,
+            owner_active=facts.self_active,
+        )
+        for name in facts.legal_moves
+    )
+    switches = tuple(
+        LegalAction(
+            action_id=f"SWITCH:{name}",
+            action_type=ActionType.SWITCH,
+            action_name=name,
+            switch_target=name,
+        )
+        for name in facts.legal_switches
+    )
+    return moves + switches
 
 
 class BattleApplication:
@@ -347,9 +416,9 @@ class BattleApplication:
                     raise ValueError("selection outside reviewed team")
                 backline_values = tuple(name for name in typed_three if name != lead)
                 backline = (backline_values[0], backline_values[1])
-            except (KeyError, IndexError, TypeError, ValueError) as exc:
+            except (KeyError, IndexError, TypeError, ValueError):
                 self.repository.audit_result(
-                    result, ResultDisposition.INVALID_REJECTED, f"INVALID_PAYLOAD:{exc}"
+                    result, ResultDisposition.INVALID_REJECTED, "INVALID_PAYLOAD"
                 )
                 self.repository.update_job_status(job.job_id, JobStatus.FAILED)
                 return ResultDisposition.INVALID_REJECTED
@@ -363,6 +432,7 @@ class BattleApplication:
                 lead,
                 backline,
                 source_type=result.source_type,
+                model=result.model,
             )
             session.current_selection_advice_id = advice_id
             session.state = BattleState.SELECTION_ADVICE_READY
@@ -514,27 +584,117 @@ class BattleApplication:
             self.repository.save_session(session)
         return snapshot
 
+    def _build_turn_advice_request(
+        self,
+        *,
+        session_id: str,
+        match_id: str,
+        generation: int,
+        battle_revision: int,
+        facts: TurnFactsSnapshot,
+        selected_three: tuple[str, str, str],
+    ) -> TurnAdviceRequest:
+        """Pure reconstruction of the canonical Lane C request from stored facts.
+
+        Never touches the network, never mutates state. Called from both
+        ``request_turn_advice`` (to compute the durable ledger identity and
+        the job's recorded hash) and ``build_turn_advice_transport_request``
+        (to hand the exact same request to the off-thread transport).
+        """
+
+        reviewed_snapshot = _reviewed_board_snapshot_from_turn_facts(facts)
+        legal_actions = _legal_actions_from_turn_facts(facts)
+        return build_turn_advice_request(
+            session_id=session_id,
+            match_id=match_id,
+            generation=generation,
+            turn_number=facts.turn_number,
+            battle_revision=battle_revision,
+            reviewed_snapshot_id=facts.turn_facts_id,
+            reviewed_snapshot=reviewed_snapshot,
+            self_active=facts.self_active,
+            selected_three=selected_three,
+            legal_actions=legal_actions,
+        )
+
     def request_turn_advice(self, command_id: str) -> JobEnvelope:
+        """Reserve the one durable Turn Advice attempt and create its job.
+
+        Every input to the dispatch decision (current binding, pending job,
+        already-consumed attempt) is recomputed here from durable repository
+        state inside one transaction — never from UI in-memory state — so a
+        stale UI, a resend after restart, or a resend after a terminal
+        failure can never produce a second attempt for the same Turn
+        identity ``(session_id, match_id, generation, turn_number,
+        battle_revision, reviewed_snapshot_id, request_payload_hash)``.
+        """
+
+        job_id = str(uuid4())
         with self.repository.transaction():
             session = self._require_session(BattleState.TURN_REVIEWED)
             if session.current_turn_id is None:
                 raise DomainError("CURRENT_TURN_REQUIRED")
             if session.current_reviewed_board_id is None:
                 raise DomainError("REVIEWED_TURN_FACTS_REQUIRED")
+            if session.current_applied_selection_id is None:
+                raise DomainError("APPLIED_SELECTION_REQUIRED")
             if session.current_turn_advice_id is not None:
                 raise DomainError("CURRENT_TURN_ADVICE_EXISTS")
 
             turn = self.repository.get_turn(session.current_turn_id)
             facts = self.repository.get_turn_facts(session.current_reviewed_board_id)
+            applied = self.repository.get_applied_selection(session.current_applied_selection_id)
             latest_job = self.repository.latest_job_by_type(
                 session.session_id, JobType.TURN_ADVICE
             )
             self._guard_provider_request(latest_job)
-            payload = facts.to_canonical_dict()
-            payload["battle_revision"] = session.battle_revision
+
+            request = self._build_turn_advice_request(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                battle_revision=session.battle_revision,
+                facts=facts,
+                selected_three=applied.selected_three,
+            )
+            request_hash = compute_turn_request_payload_hash(request)
+
+            has_pending_job = latest_job is not None and latest_job.status in {
+                JobStatus.QUEUED,
+                JobStatus.IN_FLIGHT,
+            }
+            attempt_consumed = self.repository.turn_advice_attempt_reserved(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                turn_number=turn.turn_number,
+                reviewed_snapshot_id=facts.turn_facts_id,
+            )
+            decision = decide_turn_advice_dispatch(
+                trigger=DispatchTrigger.TRUSTED_HUMAN_ACTIVATION,
+                is_current_binding=True,
+                has_pending_job=has_pending_job,
+                attempt_consumed=attempt_consumed,
+            )
+            if not decision.allowed:
+                raise DomainError(decision.reason_code)
+
+            reserved = self.repository.reserve_turn_advice_attempt(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                turn_number=turn.turn_number,
+                battle_revision=session.battle_revision,
+                reviewed_snapshot_id=facts.turn_facts_id,
+                request_payload_hash=request_hash,
+                job_id=job_id,
+            )
+            if not reserved:
+                raise DomainError("TURN_ADVICE_ATTEMPT_CONSUMED")
+
             job = JobEnvelope(
                 contract_version="maple-worker.v1",
-                job_id=str(uuid4()),
+                job_id=job_id,
                 command_id=command_id,
                 job_type=JobType.TURN_ADVICE,
                 session_id=session.session_id,
@@ -544,12 +704,105 @@ class BattleApplication:
                 base_battle_revision=session.battle_revision,
                 expected_state=BattleState.TURN_REVIEWED,
                 input_snapshot_id=facts.turn_facts_id,
-                request_payload_hash=self.payload_hash(payload),
+                request_payload_hash=request_hash,
                 human_authorized_at=datetime.now(UTC),
                 status=JobStatus.QUEUED,
             )
             self.repository.insert_job(job)
         return job
+
+    def turn_advice_attempt_consumed(self) -> bool:
+        """Durable, restart-safe check for the session's current Turn identity.
+
+        Always recomputed from the database; correct immediately after a
+        fresh restart with a brand-new application/adapter instance.
+        """
+
+        session = self.repository.load_active_session()
+        if (
+            session is None
+            or session.current_turn_id is None
+            or session.current_reviewed_board_id is None
+        ):
+            return False
+        turn = self.repository.get_turn(session.current_turn_id)
+        return self.repository.turn_advice_attempt_reserved(
+            session_id=session.session_id,
+            match_id=session.match_id,
+            generation=session.generation,
+            turn_number=turn.turn_number,
+            reviewed_snapshot_id=session.current_reviewed_board_id,
+        )
+
+    def build_turn_advice_transport_request(self, job: JobEnvelope) -> TurnAdviceRequest:
+        """Reconstruct the exact canonical Turn Advice request for a job.
+
+        Used by the UI thread, once, right before handing immutable values to
+        the off-thread fake/injected worker. Never called from the worker
+        itself. Raises :class:`DomainError` if the reconstructed payload hash
+        no longer matches the job's recorded hash (defense in depth against
+        a stale/tampered job id).
+        """
+
+        if job.job_type is not JobType.TURN_ADVICE:
+            raise DomainError("JOB_TYPE_NOT_TURN_ADVICE")
+        facts = self.repository.get_turn_facts(job.input_snapshot_id)
+        session = self._require_active_session()
+        if session.current_applied_selection_id is None:
+            raise DomainError("APPLIED_SELECTION_REQUIRED")
+        applied = self.repository.get_applied_selection(session.current_applied_selection_id)
+        request = self._build_turn_advice_request(
+            session_id=job.session_id,
+            match_id=job.match_id,
+            generation=job.generation,
+            battle_revision=job.base_battle_revision,
+            facts=facts,
+            selected_three=applied.selected_three,
+        )
+        if compute_turn_request_payload_hash(request) != job.request_payload_hash:
+            raise DomainError("REQUEST_PAYLOAD_HASH_MISMATCH")
+        return request
+
+    def mark_turn_advice_dispatched(self, job_id: str) -> None:
+        """Transition exactly one QUEUED Turn Advice job to IN_FLIGHT.
+
+        Guards against dispatching the same job twice: a second call raises
+        ``DomainError`` instead of allowing a second transport.send().
+        """
+
+        with self.repository.transaction():
+            job = self.repository.get_job(job_id)
+            if job.job_type is not JobType.TURN_ADVICE:
+                raise DomainError("JOB_TYPE_NOT_TURN_ADVICE")
+            session = self._require_active_session()
+            latest_job = self.repository.latest_job_by_type(
+                session.session_id, JobType.TURN_ADVICE
+            )
+            if latest_job is None or latest_job.job_id != job.job_id:
+                raise DomainError("JOB_ID_NOT_CURRENT")
+            if job.status is not JobStatus.QUEUED:
+                raise DomainError("JOB_NOT_DISPATCHABLE")
+            self.repository.mark_job_in_flight(job.job_id)
+
+    def fail_turn_advice_job(self, job_id: str, reason: str) -> None:
+        """Fail-closed transport/config failure. Never mutates canonical state.
+
+        Turn facts, session state, battle_revision, and the current advice id
+        are left untouched; only the job's own status changes.
+        ``GEMINI_TIMEOUT`` maps to ``TIMED_OUT``; every other transport or
+        config failure reason maps to ``FAILED``.
+        """
+
+        target_status = JobStatus.TIMED_OUT if reason == "GEMINI_TIMEOUT" else JobStatus.FAILED
+        with self.repository.transaction():
+            try:
+                job = self.repository.get_job(job_id)
+            except KeyError:
+                return
+            if job.job_type is not JobType.TURN_ADVICE:
+                return
+            if job.status in {JobStatus.QUEUED, JobStatus.IN_FLIGHT}:
+                self.repository.update_job_status(job.job_id, target_status)
 
     def apply_turn_advice_result(self, result: ResultEnvelope) -> ResultDisposition:
         with self.repository.transaction():
@@ -596,18 +849,41 @@ class BattleApplication:
             assert session is not None
             assert session.current_turn_id is not None
             try:
-                action_type = ActionType(str(result.payload["action_type"]))
-                action_name = str(result.payload["action_name"]).strip()
-                opponent_prediction = str(result.payload["opponent_prediction"]).strip()
-                rationale = str(result.payload["rationale"]).strip()
-                facts = self.repository.get_turn_facts(job.input_snapshot_id)
-                legal_actions = (
-                    facts.legal_moves
-                    if action_type is ActionType.MOVE
-                    else facts.legal_switches
+                if session.current_applied_selection_id is None:
+                    raise ValueError("applied selection required")
+                applied = self.repository.get_applied_selection(
+                    session.current_applied_selection_id
                 )
-                if action_name not in legal_actions:
-                    raise ValueError("action outside reviewed legal actions")
+                facts = self.repository.get_turn_facts(job.input_snapshot_id)
+                request = self._build_turn_advice_request(
+                    session_id=session.session_id,
+                    match_id=session.match_id,
+                    generation=session.generation,
+                    battle_revision=job.base_battle_revision,
+                    facts=facts,
+                    selected_three=applied.selected_three,
+                )
+
+                source_type = str(result.source_type).strip()
+                model = str(result.model).strip()
+                body = turn_advice_body_from_dict(result.payload)
+                normalized: NormalizedTurnAdviceResult = build_normalized_turn_advice_result(
+                    request=request,
+                    body=body,
+                    request_payload_hash_value=result.request_payload_hash,
+                    source_type=source_type,
+                    model=model,
+                )
+                code = validate_turn_advice_result(request, normalized)
+                if code is not TurnAdviceResultCode.VALID:
+                    raise ValueError(sanitized_reason_for(code))
+
+                recommended = body.recommended_action
+                action_type = ActionType(recommended.action_type)
+                action_name = recommended.action_name
+                opponent_prediction = body.opponent_prediction.summary
+                rationale = "; ".join(body.reasons)
+                warnings = tuple(body.warnings)
                 advice = TurnAdviceSnapshot(
                     turn_advice_id=result.result_id,
                     turn_id=session.current_turn_id,
@@ -618,11 +894,14 @@ class BattleApplication:
                     action_name=action_name,
                     opponent_prediction=opponent_prediction,
                     rationale=rationale,
-                    is_mock=True,
+                    is_mock=source_type != "GEMINI",
+                    source_type=source_type,
+                    model=model,
+                    warnings=warnings,
                 )
-            except (KeyError, TypeError, ValueError) as exc:
+            except (KeyError, TypeError, ValueError, TurnAdviceSchemaError):
                 self.repository.audit_result(
-                    result, ResultDisposition.INVALID_REJECTED, f"INVALID_PAYLOAD:{exc}"
+                    result, ResultDisposition.INVALID_REJECTED, "INVALID_PAYLOAD"
                 )
                 self.repository.update_job_status(job.job_id, JobStatus.FAILED)
                 return ResultDisposition.INVALID_REJECTED
@@ -641,6 +920,9 @@ class BattleApplication:
         action_type: ActionType,
         action_name: str,
         human_confirmed: bool,
+        opponent_action_type: ActionType | None = None,
+        opponent_action_name: str = "",
+        action_order: ActionOrder = ActionOrder.UNKNOWN,
     ) -> RecordedAction:
         if not human_confirmed:
             raise DomainError("HUMAN_ACTION_CONFIRMATION_REQUIRED")
@@ -663,14 +945,21 @@ class BattleApplication:
             normalized_name = action_name.strip()
             if normalized_name not in legal_actions:
                 raise DomainError("ACTION_OUTSIDE_REVIEWED_LEGAL_ACTIONS")
+            normalized_opponent_name = opponent_action_name.strip()
 
-            action = RecordedAction(
-                action_id=str(uuid4()),
-                turn_id=session.current_turn_id,
-                turn_number=facts.turn_number,
-                action_type=action_type,
-                action_name=normalized_name,
-            )
+            try:
+                action = RecordedAction(
+                    action_id=str(uuid4()),
+                    turn_id=session.current_turn_id,
+                    turn_number=facts.turn_number,
+                    action_type=action_type,
+                    action_name=normalized_name,
+                    opponent_action_type=opponent_action_type,
+                    opponent_action_name=normalized_opponent_name,
+                    action_order=action_order,
+                )
+            except ValueError as exc:
+                raise DomainError(f"INVALID_RECORDED_ACTION:{exc}") from exc
             self.repository.append_recorded_action(session.session_id, action)
             session.state = BattleState.TURN_RECORDED
             session.bump_battle()

@@ -1,0 +1,225 @@
+"""Strict result-apply gate for Turn Advice. Pure functions only.
+
+Mirrors the "strict result apply gate" pattern used for Selection Advice
+(see ``application/service.py``'s ``_binding_failure_reason`` /
+``apply_selection_advice_result``), but scoped entirely to the offline Lane
+C contract: no persistence, no application-service coupling, no network.
+
+Raw provider text is parsed and validated here and then discarded — it is
+never attached to :class:`~maple_next.providers.turn_response.NormalizedTurnAdviceResult`
+or to any value returned from this module. Only sanitized result codes
+travel outward; no raw provider error text is ever concatenated into a
+returned value.
+"""
+
+from __future__ import annotations
+
+import json
+from enum import StrEnum
+from typing import Final
+
+from maple_next.domain.enums import ActionType
+from maple_next.providers.turn_request import TurnAdviceRequest, request_payload_hash
+from maple_next.providers.turn_response import (
+    NormalizedTurnAdviceResult,
+    TurnAdviceBody,
+    TurnAdviceSchemaError,
+    turn_advice_body_from_dict,
+)
+
+
+class TurnAdviceResultCode(StrEnum):
+    VALID = "VALID"
+    INVALID_SCHEMA = "INVALID_SCHEMA"
+    ILLEGAL_ACTION = "ILLEGAL_ACTION"
+    NON_OWNED_ACTION = "NON_OWNED_ACTION"
+    SESSION_MISMATCH = "SESSION_MISMATCH"
+    MATCH_MISMATCH = "MATCH_MISMATCH"
+    GENERATION_MISMATCH = "GENERATION_MISMATCH"
+    TURN_MISMATCH = "TURN_MISMATCH"
+    REVISION_MISMATCH = "REVISION_MISMATCH"
+    SNAPSHOT_ID_MISMATCH = "SNAPSHOT_ID_MISMATCH"
+    SNAPSHOT_HASH_MISMATCH = "SNAPSHOT_HASH_MISMATCH"
+    REQUEST_HASH_MISMATCH = "REQUEST_HASH_MISMATCH"
+    SOURCE_INVALID = "SOURCE_INVALID"
+    MODEL_INVALID = "MODEL_INVALID"
+    STALE_REJECTED = "STALE_REJECTED"
+
+
+#: Sanitized, fixed error tokens. Never built by string-formatting raw
+#: provider text or exception details into the result.
+_SANITIZED_REASON: Final[dict[TurnAdviceResultCode, str]] = {
+    TurnAdviceResultCode.VALID: "TURN_ADVICE_VALID",
+    TurnAdviceResultCode.INVALID_SCHEMA: "TURN_ADVICE_SCHEMA_REJECTED",
+    TurnAdviceResultCode.ILLEGAL_ACTION: "TURN_ADVICE_ILLEGAL_ACTION",
+    TurnAdviceResultCode.NON_OWNED_ACTION: "TURN_ADVICE_ILLEGAL_ACTION",
+    TurnAdviceResultCode.SESSION_MISMATCH: "TURN_ADVICE_STALE",
+    TurnAdviceResultCode.MATCH_MISMATCH: "TURN_ADVICE_STALE",
+    TurnAdviceResultCode.GENERATION_MISMATCH: "TURN_ADVICE_STALE",
+    TurnAdviceResultCode.TURN_MISMATCH: "TURN_ADVICE_STALE",
+    TurnAdviceResultCode.REVISION_MISMATCH: "TURN_ADVICE_STALE",
+    TurnAdviceResultCode.SNAPSHOT_ID_MISMATCH: "TURN_ADVICE_STALE",
+    TurnAdviceResultCode.SNAPSHOT_HASH_MISMATCH: "TURN_ADVICE_STALE",
+    TurnAdviceResultCode.REQUEST_HASH_MISMATCH: "TURN_ADVICE_STALE",
+    TurnAdviceResultCode.SOURCE_INVALID: "TURN_ADVICE_SOURCE_INVALID",
+    TurnAdviceResultCode.MODEL_INVALID: "TURN_ADVICE_MODEL_INVALID",
+    TurnAdviceResultCode.STALE_REJECTED: "TURN_ADVICE_STALE",
+}
+
+
+class TurnAdviceParseError(ValueError):
+    """Raised by :func:`parse_turn_advice_body`. Message is a sanitized token only."""
+
+
+def sanitized_reason_for(code: TurnAdviceResultCode) -> str:
+    """Map a result code to its fixed sanitized reason token."""
+
+    return _SANITIZED_REASON[code]
+
+
+def parse_turn_advice_body(provider_text: str) -> TurnAdviceBody:
+    """Parse and strictly validate raw provider text into a TurnAdviceBody.
+
+    ``provider_text`` is consumed here only; the returned value never
+    retains it. Markdown, code fences, non-JSON text, or a top-level JSON
+    array/scalar all raise :class:`TurnAdviceParseError` with the sanitized
+    message ``"TURN_ADVICE_INVALID_JSON"``. Any structurally-parseable JSON
+    object that fails the strict schema raises
+    ``"TURN_ADVICE_SCHEMA_REJECTED"``.
+    """
+
+    try:
+        parsed = json.loads(provider_text)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise TurnAdviceParseError("TURN_ADVICE_INVALID_JSON") from exc
+
+    if not isinstance(parsed, dict):
+        raise TurnAdviceParseError("TURN_ADVICE_INVALID_JSON")
+
+    try:
+        return turn_advice_body_from_dict(parsed)
+    except TurnAdviceSchemaError as exc:
+        raise TurnAdviceParseError("TURN_ADVICE_SCHEMA_REJECTED") from exc
+
+
+def build_normalized_turn_advice_result(
+    *,
+    request: TurnAdviceRequest,
+    body: TurnAdviceBody,
+    request_payload_hash_value: str,
+    source_type: str,
+    model: str,
+) -> NormalizedTurnAdviceResult:
+    """Build the trusted normalized envelope.
+
+    ``source_type`` and ``model`` must be supplied explicitly by a trusted
+    caller (e.g. the transport boundary that actually made the call, or a
+    test fixture) — they are never read from the provider's own JSON body,
+    which does not even carry a slot for them (see
+    ``turn_response.TOP_LEVEL_ALLOWED_KEYS``).
+    """
+
+    if not isinstance(source_type, str) or not source_type.strip():
+        raise ValueError(sanitized_reason_for(TurnAdviceResultCode.SOURCE_INVALID))
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError(sanitized_reason_for(TurnAdviceResultCode.MODEL_INVALID))
+
+    return NormalizedTurnAdviceResult(
+        contract_version=request.contract_version,
+        job_type=request.job_type,
+        session_id=request.session_id,
+        match_id=request.match_id,
+        generation=request.generation,
+        turn_number=request.turn_number,
+        battle_revision=request.battle_revision,
+        reviewed_snapshot_id=request.reviewed_snapshot_id,
+        reviewed_snapshot_hash=request.reviewed_snapshot_hash,
+        request_payload_hash=request_payload_hash_value,
+        source_type=source_type,
+        model=model,
+        advice=body,
+    )
+
+
+def validate_turn_advice_binding(
+    expected: TurnAdviceRequest, result: NormalizedTurnAdviceResult
+) -> TurnAdviceResultCode:
+    """Compare every binding field of ``result`` against ``expected``.
+
+    Pure comparison only — never mutates ``expected`` or ``result``. Returns
+    the first mismatch found, in the field order documented on
+    :class:`TurnAdviceResultCode`, or ``VALID`` if every field matches.
+    """
+
+    if result.contract_version != expected.contract_version:
+        return TurnAdviceResultCode.STALE_REJECTED
+    if result.job_type != expected.job_type:
+        return TurnAdviceResultCode.STALE_REJECTED
+    if result.session_id != expected.session_id:
+        return TurnAdviceResultCode.SESSION_MISMATCH
+    if result.match_id != expected.match_id:
+        return TurnAdviceResultCode.MATCH_MISMATCH
+    if result.generation != expected.generation:
+        return TurnAdviceResultCode.GENERATION_MISMATCH
+    if result.turn_number != expected.turn_number:
+        return TurnAdviceResultCode.TURN_MISMATCH
+    if result.battle_revision != expected.battle_revision:
+        return TurnAdviceResultCode.REVISION_MISMATCH
+    if result.reviewed_snapshot_id != expected.reviewed_snapshot_id:
+        return TurnAdviceResultCode.SNAPSHOT_ID_MISMATCH
+    if result.reviewed_snapshot_hash != expected.reviewed_snapshot_hash:
+        return TurnAdviceResultCode.SNAPSHOT_HASH_MISMATCH
+    if result.request_payload_hash != request_payload_hash(expected):
+        return TurnAdviceResultCode.REQUEST_HASH_MISMATCH
+    return TurnAdviceResultCode.VALID
+
+
+def validate_turn_advice_legality(
+    request: TurnAdviceRequest, result: NormalizedTurnAdviceResult
+) -> TurnAdviceResultCode:
+    """Exact 3-way legal-action match plus MOVE/SWITCH ownership re-check.
+
+    The recommended action's ``action_id``, ``action_type``, and
+    ``action_name`` must all match one legal action in ``request.legal_actions``
+    — matching on id alone (or any two of the three fields) is not enough.
+    Never substitutes or auto-corrects a bad response with a legal one.
+    """
+
+    chosen = result.advice.recommended_action
+    id_matches = [a for a in request.legal_actions if a.action_id == chosen.action_id]
+    if not id_matches:
+        return TurnAdviceResultCode.ILLEGAL_ACTION
+
+    exact_matches = [
+        a
+        for a in id_matches
+        if a.action_type.value == chosen.action_type and a.action_name == chosen.action_name
+    ]
+    if not exact_matches:
+        return TurnAdviceResultCode.ILLEGAL_ACTION
+
+    action = exact_matches[0]
+    if action.action_type is ActionType.MOVE and action.owner_active != request.self_active:
+        return TurnAdviceResultCode.NON_OWNED_ACTION
+    if action.action_type is ActionType.SWITCH and (
+        action.switch_target not in request.selected_three
+        or action.switch_target == request.self_active
+    ):
+        return TurnAdviceResultCode.NON_OWNED_ACTION
+
+    return TurnAdviceResultCode.VALID
+
+
+def validate_turn_advice_result(
+    request: TurnAdviceRequest, result: NormalizedTurnAdviceResult
+) -> TurnAdviceResultCode:
+    """Compose binding validation and legality validation.
+
+    Binding is checked first: a stale/mismatched result is rejected before
+    its recommended action is ever compared against the legal-action list.
+    """
+
+    binding_code = validate_turn_advice_binding(request, result)
+    if binding_code is not TurnAdviceResultCode.VALID:
+        return binding_code
+    return validate_turn_advice_legality(request, result)

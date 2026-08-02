@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 11
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -114,6 +114,9 @@ def migrate(connection: sqlite3.Connection) -> None:
             opponent_prediction TEXT NOT NULL,
             rationale TEXT NOT NULL,
             is_mock INTEGER NOT NULL CHECK (is_mock IN (0, 1)),
+            source_type TEXT NOT NULL DEFAULT 'MOCK',
+            model TEXT NOT NULL DEFAULT 'mock-dev',
+            warnings_json TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL,
             FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id),
             FOREIGN KEY(turn_id) REFERENCES battle_turns(turn_id),
@@ -199,7 +202,55 @@ def migrate(connection: sqlite3.Connection) -> None:
             )
         );
 
-        UPDATE schema_meta SET schema_version = 6 WHERE singleton_id = 1;
+        CREATE TABLE IF NOT EXISTS turn_advice_attempt_ledger (
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            turn_number INTEGER NOT NULL,
+            battle_revision INTEGER NOT NULL,
+            reviewed_snapshot_id TEXT NOT NULL,
+            request_payload_hash TEXT NOT NULL,
+            lane TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            consumed_at_utc TEXT NOT NULL,
+            PRIMARY KEY (
+                session_id, match_id, generation, turn_number, battle_revision,
+                reviewed_snapshot_id, lane
+            )
+        );
+
+        CREATE TABLE IF NOT EXISTS provider_attempt_audits (
+            audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            lane TEXT NOT NULL,
+            attempt_ordinal INTEGER NOT NULL CHECK (attempt_ordinal IN (1, 2)),
+            model TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK (outcome IN ('STARTED', 'SUCCEEDED', 'FAILED')),
+            reason TEXT NOT NULL DEFAULT '',
+            started_at_utc TEXT NOT NULL,
+            completed_at_utc TEXT NULL,
+            UNIQUE(job_id, lane, attempt_ordinal),
+            FOREIGN KEY(job_id) REFERENCES async_jobs(job_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS self_team_presets (
+            preset_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL UNIQUE,
+            self_team_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS operator_preferences (
+            singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+            last_used_self_team_preset_id TEXT NULL,
+            FOREIGN KEY(last_used_self_team_preset_id)
+                REFERENCES self_team_presets(preset_id) ON DELETE SET NULL
+        );
+        INSERT OR IGNORE INTO operator_preferences(singleton_id) VALUES (1);
+
+        UPDATE schema_meta SET schema_version = 11 WHERE singleton_id = 1;
         """
     )
     _ensure_column(
@@ -214,4 +265,55 @@ def migrate(connection: sqlite3.Connection) -> None:
         "model",
         "TEXT NOT NULL DEFAULT ''",
     )
+    _ensure_column(
+        connection,
+        "turn_advices",
+        "source_type",
+        "TEXT NOT NULL DEFAULT 'MOCK'",
+    )
+    _ensure_column(
+        connection,
+        "turn_advices",
+        "model",
+        "TEXT NOT NULL DEFAULT 'mock-dev'",
+    )
+    _ensure_column(
+        connection,
+        "turn_advices",
+        "warnings_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )
+    _ensure_column(
+        connection,
+        "recorded_actions",
+        "opponent_action_type",
+        "TEXT NULL",
+    )
+    _ensure_column(
+        connection,
+        "recorded_actions",
+        "opponent_action_name",
+        "TEXT NOT NULL DEFAULT ''",
+    )
+    _ensure_column(
+        connection,
+        "recorded_actions",
+        "action_order",
+        "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+    )
+    _sanitize_async_job_result_payloads(connection)
     connection.commit()
+
+
+def _sanitize_async_job_result_payloads(connection: sqlite3.Connection) -> None:
+    """Scrub any historical raw provider payload from async_job_results.
+
+    Older runtime databases may still hold raw ``ResultEnvelope.payload``
+    content written before ``JobStore.audit_result`` was changed to persist
+    only a fixed canonical value. This runs on every startup migration and
+    is idempotent: rows already at the canonical value are left untouched.
+    """
+
+    connection.execute(
+        "UPDATE async_job_results SET payload_json = '{}' WHERE payload_json != '{}'"
+    )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import cast
 
-from maple_next.domain.enums import ActionType, HpBucket
+from maple_next.domain.enums import ActionOrder, ActionType, HpBucket
 from maple_next.domain.models import (
     BattleTurn,
     RecordedAction,
@@ -89,8 +89,8 @@ class TurnStoreMixin(StoreBase):
             INSERT INTO turn_advices (
                 turn_advice_id, session_id, turn_id, turn_number, job_id,
                 input_snapshot_id, action_type, action_name, opponent_prediction,
-                rationale, is_mock, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rationale, is_mock, source_type, model, warnings_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 advice.turn_advice_id,
@@ -104,6 +104,9 @@ class TurnStoreMixin(StoreBase):
                 advice.opponent_prediction,
                 advice.rationale,
                 int(advice.is_mock),
+                advice.source_type,
+                advice.model,
+                json.dumps(list(advice.warnings), ensure_ascii=False),
                 self._now(),
             ),
         )
@@ -115,6 +118,7 @@ class TurnStoreMixin(StoreBase):
         ).fetchone()
         if row is None:
             raise KeyError(turn_advice_id)
+        warnings = cast(list[str], json.loads(str(row["warnings_json"])))
         return TurnAdviceSnapshot(
             turn_advice_id=str(row["turn_advice_id"]),
             turn_id=str(row["turn_id"]),
@@ -126,6 +130,9 @@ class TurnStoreMixin(StoreBase):
             opponent_prediction=str(row["opponent_prediction"]),
             rationale=str(row["rationale"]),
             is_mock=bool(row["is_mock"]),
+            source_type=str(row["source_type"]),
+            model=str(row["model"]),
+            warnings=tuple(warnings),
         )
 
     def append_recorded_action(self, session_id: str, action: RecordedAction) -> None:
@@ -133,8 +140,9 @@ class TurnStoreMixin(StoreBase):
             """
             INSERT INTO recorded_actions (
                 action_id, session_id, turn_id, turn_number, action_type,
-                action_name, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                action_name, opponent_action_type, opponent_action_name,
+                action_order, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 action.action_id,
@@ -143,6 +151,13 @@ class TurnStoreMixin(StoreBase):
                 action.turn_number,
                 action.action_type.value,
                 action.action_name,
+                (
+                    action.opponent_action_type.value
+                    if action.opponent_action_type is not None
+                    else None
+                ),
+                action.opponent_action_name,
+                action.action_order.value,
                 self._now(),
             ),
         )
@@ -154,6 +169,24 @@ class TurnStoreMixin(StoreBase):
         ).fetchone()
         return row is not None
 
+    @staticmethod
+    def _recorded_action_from_row(row: object) -> RecordedAction:
+        opponent_action_type_raw = row["opponent_action_type"]  # type: ignore[index]
+        return RecordedAction(
+            action_id=str(row["action_id"]),  # type: ignore[index]
+            turn_id=str(row["turn_id"]),  # type: ignore[index]
+            turn_number=int(row["turn_number"]),  # type: ignore[index]
+            action_type=ActionType(str(row["action_type"])),  # type: ignore[index]
+            action_name=str(row["action_name"]),  # type: ignore[index]
+            opponent_action_type=(
+                ActionType(str(opponent_action_type_raw))
+                if opponent_action_type_raw is not None
+                else None
+            ),
+            opponent_action_name=str(row["opponent_action_name"]),  # type: ignore[index]
+            action_order=ActionOrder(str(row["action_order"])),  # type: ignore[index]
+        )
+
     def list_recorded_actions(self, session_id: str) -> tuple[RecordedAction, ...]:
         rows = self.connection.execute(
             """
@@ -162,13 +195,4 @@ class TurnStoreMixin(StoreBase):
             """,
             (session_id,),
         ).fetchall()
-        return tuple(
-            RecordedAction(
-                action_id=str(row["action_id"]),
-                turn_id=str(row["turn_id"]),
-                turn_number=int(row["turn_number"]),
-                action_type=ActionType(str(row["action_type"])),
-                action_name=str(row["action_name"]),
-            )
-            for row in rows
-        )
+        return tuple(self._recorded_action_from_row(row) for row in rows)

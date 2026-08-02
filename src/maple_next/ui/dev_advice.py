@@ -70,8 +70,10 @@ class MockTurnAdviceAdapter:
         action_name: str,
         opponent_prediction: str,
         rationale: str,
+        warnings: tuple[str, ...] = (),
     ) -> MockTurnAdviceResult:
         job = application.request_turn_advice(f"mock-turn-ui-{uuid4()}")
+        action_id = f"{action_type.value}:{action_name}"
         result = ResultEnvelope(
             contract_version=job.contract_version,
             result_id=str(uuid4()),
@@ -87,11 +89,22 @@ class MockTurnAdviceAdapter:
             input_snapshot_id=job.input_snapshot_id,
             request_payload_hash=job.request_payload_hash,
             payload={
-                "action_type": action_type.value,
-                "action_name": action_name,
-                "opponent_prediction": opponent_prediction,
-                "rationale": rationale,
+                "recommended_action": {
+                    "action_id": action_id,
+                    "action_type": action_type.value,
+                    "action_name": action_name,
+                },
+                "reasons": [rationale],
+                "warnings": list(warnings),
+                "opponent_prediction": {
+                    "category": "UNKNOWN",
+                    "predicted_action": opponent_prediction,
+                    "summary": opponent_prediction,
+                    "confidence": 0.5,
+                },
             },
+            source_type="MOCK",
+            model="mock-dev",
         )
         disposition = application.apply_turn_advice_result(result)
         return MockTurnAdviceResult(result_id=result.result_id, disposition=disposition)

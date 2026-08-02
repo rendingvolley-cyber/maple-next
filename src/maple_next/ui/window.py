@@ -82,7 +82,9 @@ _CTA_LABELS = {
 }
 
 _MESSAGE_LABELS = {
-    "NO_ACTIVE_MATCH": "対戦を開始してください。",
+    "NO_ACTIVE_MATCH": (
+        "自分の構築を準備し、対戦相手が決まったらNEW MATCHしてください。"
+    ),
     "SELECTION_FACTS_REQUIRED": "自分と相手の6体を手動入力してください。",
     "SELECTION_FACTS_CONFIRMED": "確認済み6体を使ってMOCK Adviceを投入してください。",
     "SELECTION_ADVICE_PENDING": "MOCK Adviceを処理しています。",
@@ -261,8 +263,9 @@ class MapleMainWindow(QMainWindow):
         battle_scroll.setWidget(battle_page)
         self.header_tabs.addTab(battle_scroll, "バトルレコード")
 
-        self._build_selection_facts_group()
+        self._build_self_team_group()
         self._build_self_team_presets_group()
+        self._build_opponent_facts_group()
         self._build_mock_advice_group()
         self._build_gemini_send_group()
         self._build_advice_display_group()
@@ -550,26 +553,40 @@ class MapleMainWindow(QMainWindow):
         elif field_key == OcrFieldKey.OPPONENT_HP.value:
             self.opponent_hp_box.setCurrentText(best.suggested_value)
 
-    def _build_selection_facts_group(self) -> None:
-        self.selection_facts_group = QGroupBox("Selection facts — 手動入力")
-        layout = QGridLayout(self.selection_facts_group)
+    def _build_self_team_group(self) -> None:
+        """自分の構築準備 — visible/editable in NO_ACTIVE_MATCH and SELECTION_OPEN.
+
+        Deliberately independent of an active session: the human prepares
+        their own 6 before an opponent (and therefore a match) exists.
+        """
+
+        self.self_team_group = QGroupBox("自分の構築準備 — 自分の6体")
+        layout = QGridLayout(self.self_team_group)
         layout.addWidget(QLabel("自分の6体"), 0, 0)
-        layout.addWidget(QLabel("相手の6体"), 0, 1)
         self.self_team_inputs: list[QLineEdit] = []
-        self.opponent_team_inputs: list[QLineEdit] = []
         for index in range(6):
             self_input = QLineEdit()
             self_input.setPlaceholderText(f"自分 {index + 1}体目")
+            self.self_team_inputs.append(self_input)
+            layout.addWidget(self_input, index + 1, 0)
+        self._selection_layout.addWidget(self.self_team_group)
+
+    def _build_opponent_facts_group(self) -> None:
+        """対戦相手 — visible/enabled only once SELECTION_OPEN (post NEW MATCH)."""
+
+        self.opponent_facts_group = QGroupBox("対戦相手 — 相手の6体")
+        layout = QGridLayout(self.opponent_facts_group)
+        layout.addWidget(QLabel("相手の6体"), 0, 0)
+        self.opponent_team_inputs: list[QLineEdit] = []
+        for index in range(6):
             opponent_input = QLineEdit()
             opponent_input.setPlaceholderText(f"相手 {index + 1}体目")
-            self.self_team_inputs.append(self_input)
             self.opponent_team_inputs.append(opponent_input)
-            layout.addWidget(self_input, index + 1, 0)
-            layout.addWidget(opponent_input, index + 1, 1)
+            layout.addWidget(opponent_input, index + 1, 0)
         self.confirm_facts_button = QPushButton("6体を確認")
         self.confirm_facts_button.clicked.connect(self._on_confirm_facts)
-        layout.addWidget(self.confirm_facts_button, 7, 0, 1, 2)
-        self._selection_layout.addWidget(self.selection_facts_group)
+        layout.addWidget(self.confirm_facts_button, 7, 0)
+        self._selection_layout.addWidget(self.opponent_facts_group)
 
     def _build_self_team_presets_group(self) -> None:
         self.self_team_presets_group = QGroupBox("自分の構築プリセット")
@@ -653,7 +670,8 @@ class MapleMainWindow(QMainWindow):
         self._update_self_team_preset_buttons()
 
     def _update_self_team_preset_buttons(self) -> None:
-        selected = self._selected_self_team_preset_id() is not None
+        editable = getattr(self, "_self_team_editable", True)
+        selected = editable and self._selected_self_team_preset_id() is not None
         self.use_self_team_preset_button.setEnabled(selected)
         self.update_self_team_preset_button.setEnabled(selected)
         self.delete_self_team_preset_button.setEnabled(selected)
@@ -948,8 +966,11 @@ class MapleMainWindow(QMainWindow):
         self.new_match_button.setVisible(projection.primary_cta == "CREATE_NEW_MATCH")
         self.new_match_button.setEnabled(projection.primary_cta_enabled)
         selection_open = projection.session_state == "SELECTION_OPEN"
-        self.selection_facts_group.setVisible(selection_open)
-        self.self_team_presets_group.setVisible(selection_open)
+        no_active_match = projection.session_state is None
+        self_team_prep_visible = no_active_match or selection_open
+        self.self_team_group.setVisible(self_team_prep_visible)
+        self.self_team_presets_group.setVisible(self_team_prep_visible)
+        self.opponent_facts_group.setVisible(selection_open)
 
         battle_record_states = {
             "BATTLE_READY",
@@ -969,16 +990,20 @@ class MapleMainWindow(QMainWindow):
         }:
             self.header_tabs.setCurrentIndex(0)
         facts_editable = projection.primary_cta == "CONFIRM_SELECTION_FACTS"
+        # 自分の6体とpresetはNO_ACTIVE_MATCH（対戦準備）とSELECTION_OPEN未確認時に編集可能。
+        # 確定後（facts_editable=False）はmatch-time snapshotを保護するためロックする。
+        self_team_editable = no_active_match or facts_editable
+        self._self_team_editable = self_team_editable
         self.confirm_facts_button.setEnabled(facts_editable)
-        for field in (*self.self_team_inputs, *self.opponent_team_inputs):
+        for field in self.opponent_team_inputs:
             field.setEnabled(facts_editable)
-        self.save_self_team_preset_button.setEnabled(facts_editable)
-        self.use_self_team_preset_button.setEnabled(
-            facts_editable and self._selected_self_team_preset_id() is not None
-        )
-        self.update_self_team_preset_button.setEnabled(
-            facts_editable and self._selected_self_team_preset_id() is not None
-        )
+        for field in self.self_team_inputs:
+            field.setEnabled(self_team_editable)
+        preset_selected = self._selected_self_team_preset_id() is not None
+        self.save_self_team_preset_button.setEnabled(self_team_editable)
+        self.use_self_team_preset_button.setEnabled(self_team_editable and preset_selected)
+        self.update_self_team_preset_button.setEnabled(self_team_editable and preset_selected)
+        self.delete_self_team_preset_button.setEnabled(self_team_editable and preset_selected)
 
         if current.self_team and current.self_team != self._loaded_team:
             self._loaded_team = current.self_team

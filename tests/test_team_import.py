@@ -37,6 +37,22 @@ def test_parse_utf8_text_import_forms(text: str) -> None:
     assert imported.name is None
 
 
+def test_parse_fullwidth_comma_import_preserves_order() -> None:
+    imported = parse_team_import(
+        "ブリジュラス、ハッサム、ゲッコウガ、ガブリアス、ラウドボーン、マスカーニャ"
+    )
+
+    assert imported.pokemon == (
+        "ブリジュラス",
+        "ハッサム",
+        "ゲッコウガ",
+        "ガブリアス",
+        "ラウドボーン",
+        "マスカーニャ",
+    )
+    assert imported.name is None
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -44,6 +60,10 @@ def test_parse_utf8_text_import_forms(text: str) -> None:
         '{"schema_version":"maple-team.v1","pokemon":["one","two"]}',
         "one,two,three,four,five,five",
         "one,two,,four,five,six",
+        "one、two、three、four、five",
+        "one、two、three、four、five、six、seven",
+        "one、two、、four、five、six",
+        "one、two、three、four、five、five",
     ],
 )
 def test_invalid_import_is_rejected(text: str) -> None:

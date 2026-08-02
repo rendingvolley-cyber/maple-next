@@ -66,7 +66,7 @@ def parse_team_import(text: str) -> ImportedTeam:
 
 def _parse_text_team(text: str) -> tuple[Any, ...]:
     normalized = text.strip()
-    return tuple(piece.strip() for piece in re.split(r"[\r\n,]", normalized))
+    return tuple(piece.strip() for piece in re.split(r"[\r\n,、]", normalized))
 
 
 def _validate_team(entries: tuple[Any, ...] | list[Any]) -> tuple[str, str, str, str, str, str]:

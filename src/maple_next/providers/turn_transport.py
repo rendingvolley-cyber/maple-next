@@ -1,52 +1,139 @@
-"""Injectable Turn Advice provider transport boundary — fake/injected only.
+"""Injectable Gemini Turn Advice transport boundary.
 
-Distinct from :mod:`maple_next.providers.transport` (the Selection lane,
-which does have a production ``GeminiSelectionAdviceTransport``): Issue #31
-explicitly forbids ever sending a real Turn Advice request to a live
-provider. This module therefore intentionally contains **no** production
-HTTP transport class — only the shared ``ProviderConfig``/``SanitizedProviderResult``
-types (imported from :mod:`maple_next.providers.transport`) and a
-test/dev-only fake transport that a human explicitly seeds with content
-before every send. Nothing in this module imports SQLite, the repository,
-or any PySide6 widget.
+The production transport is inert until a trusted human activation reaches
+the adapter and the runtime authorization flag is explicitly enabled. Tests
+use :class:`FakeTurnAdviceTransport`; they never require network or secrets.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
-from maple_next.providers.transport import ProviderConfig, SanitizedProviderResult
-from maple_next.providers.turn_request import TurnAdviceRequest
+from maple_next.providers.transport import (
+    ProviderConfig,
+    ProviderConfigError,
+    SanitizedProviderResult,
+    _sanitized_http_error_reason,
+    load_provider_config_from_env,
+)
+from maple_next.providers.transport import (
+    ProviderTransportError as ProviderTransportError,
+)
+from maple_next.providers.turn_request import (
+    TurnAdviceRequest,
+    build_provider_request_body,
+)
 
-#: Turn Advice never has a production Gemini lane in this codebase. Any
-#: source_type string is permitted through this fake transport, but the
-#: adapter that owns it (see maple_next.ui.gemini_turn_advice) always uses a
-#: model name that is clearly distinguishable from a real Gemini model.
-FAKE_TURN_ADVICE_SOURCE_TYPE = "GEMINI"
+GEMINI_TURN_SOURCE_TYPE = "GEMINI"
+FAKE_TURN_ADVICE_SOURCE_TYPE = GEMINI_TURN_SOURCE_TYPE
+TURN_PROVIDER_AUTHORIZATION_ENV = "MAPLE_NEXT_GEMINI_TURN_AUTHORIZED"
 
 
-class ProviderTransportError(RuntimeError):
-    """Raised for fake-transport failures. Never includes secrets."""
+def load_authorized_turn_provider_config_from_env() -> ProviderConfig:
+    """Fail closed unless real Turn Advice was explicitly authorized.
+
+    The flag is deliberately separate from the API key. Merely having a key
+    in the environment can never enable Turn Advice network access.
+    """
+
+    if os.environ.get(TURN_PROVIDER_AUTHORIZATION_ENV, "").strip() != "1":
+        raise ProviderConfigError("GEMINI_TURN_NOT_AUTHORIZED")
+    return load_provider_config_from_env()
 
 
 class TurnProviderTransport(Protocol):
-    """Injectable transport boundary. Only fake/injected implementations exist."""
+    """Injectable transport boundary for production and fake implementations."""
 
     def send(
         self, request: TurnAdviceRequest, config: ProviderConfig
     ) -> SanitizedProviderResult: ...
 
 
+class GeminiTurnAdviceTransport:
+    """Production Gemini transport for a single reviewed Turn Advice request.
+
+    One call to :meth:`send` performs at most one HTTP request. There is no
+    retry, resend, fallback model, or game-operation capability here.
+    """
+
+    def __init__(self, *, endpoint_template: str | None = None) -> None:
+        self._endpoint_template = (
+            endpoint_template
+            or "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        )
+
+    def send(
+        self, request: TurnAdviceRequest, config: ProviderConfig
+    ) -> SanitizedProviderResult:
+        body = build_provider_request_body(request)
+        endpoint = self._endpoint_template.format(model=config.model)
+        http_request = urllib.request.Request(
+            endpoint,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": config.api_key,
+            },
+        )
+        try:
+            with urllib.request.urlopen(  # noqa: S310 - fixed production HTTPS endpoint
+                http_request, timeout=config.timeout_seconds
+            ) as response:
+                raw_body = response.read()
+        except urllib.error.HTTPError as exc:
+            raise ProviderTransportError(_sanitized_http_error_reason(exc)) from None
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise ProviderTransportError("GEMINI_TIMEOUT") from None
+            raise ProviderTransportError("GEMINI_NETWORK_ERROR") from None
+        except TimeoutError:
+            raise ProviderTransportError("GEMINI_TIMEOUT") from None
+
+        text = self._extract_text(raw_body)
+        payload = self._parse_turn_payload(text)
+        return SanitizedProviderResult(
+            payload=payload,
+            source_type=GEMINI_TURN_SOURCE_TYPE,
+            model=config.model,
+        )
+
+    @staticmethod
+    def _extract_text(raw_body: bytes) -> str:
+        try:
+            envelope = json.loads(raw_body.decode("utf-8"))
+            text = envelope["candidates"][0]["content"]["parts"][0]["text"]
+        except (
+            json.JSONDecodeError,
+            KeyError,
+            IndexError,
+            TypeError,
+            UnicodeDecodeError,
+        ):
+            raise ProviderTransportError("GEMINI_RESPONSE_ENVELOPE_MALFORMED") from None
+        if not isinstance(text, str):
+            raise ProviderTransportError("GEMINI_RESPONSE_ENVELOPE_MALFORMED")
+        return text
+
+    @staticmethod
+    def _parse_turn_payload(text: str) -> dict[str, Any]:
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return parsed
+
+
 @dataclass
 class FakeTurnAdviceTransport:
-    """Fake/injected transport. Records every call; never touches the network.
-
-    A human (via the UI adapter) or a test enqueues the exact
-    :class:`SanitizedProviderResult` (or exception) to return next, then
-    triggers exactly one trusted send. This is the Turn-side analog of
-    :class:`maple_next.providers.transport.FakeSelectionAdviceTransport`.
-    """
+    """Fake/injected transport. Records calls and never touches the network."""
 
     responses: list[SanitizedProviderResult | Exception] = field(default_factory=list)
     calls: list[tuple[TurnAdviceRequest, ProviderConfig]] = field(default_factory=list)

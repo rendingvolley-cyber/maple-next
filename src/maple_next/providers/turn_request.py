@@ -258,3 +258,42 @@ def encode_canonical_request(request: TurnAdviceRequest) -> bytes:
 
 def request_payload_hash(request: TurnAdviceRequest) -> str:
     return hashlib.sha256(encode_canonical_request(request)).hexdigest()
+
+
+def build_provider_prompt(request: TurnAdviceRequest) -> str:
+    """Build the deterministic, secret-free prompt for one Turn Advice call."""
+
+    canonical = json.dumps(
+        canonical_request_dict(request),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        "You are advising a human Pokemon Champions player for exactly one reviewed turn.\n"
+        "Recommend exactly one action from legal_actions. Copy its action_id, action_type, "
+        "and action_name exactly; never invent, translate, or normalize an action.\n"
+        "Give 1 to 3 concise reasons, 0 to 5 concise warnings, and one opponent prediction.\n"
+        "Do not execute a move, switch, keyboard input, controller input, or any other game "
+        "action. The human alone decides and operates the game.\n"
+        "Respond with strict JSON only, matching requested_output_schema exactly. Do not add "
+        "markdown, code fences, source_type, model, or any additional field.\n"
+        f"Canonical reviewed turn request:\n{canonical}"
+    )
+
+
+def build_provider_request_body(request: TurnAdviceRequest) -> dict[str, Any]:
+    """Build the deterministic Gemini generateContent body without secrets."""
+
+    return {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": build_provider_prompt(request)}],
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": request.requested_output_schema,
+        },
+    }

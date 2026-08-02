@@ -21,11 +21,16 @@ from PySide6.QtWidgets import QApplication
 from maple_next.application.service import BattleApplication, DomainError
 from maple_next.domain.enums import BattleState, JobStatus, JobType, ResultDisposition
 from maple_next.persistence.sqlite import SQLiteRepository
-from maple_next.providers.transport import ProviderConfig, SanitizedProviderResult
+from maple_next.providers.transport import (
+    ProviderConfig,
+    ProviderConfigError,
+    SanitizedProviderResult,
+)
 from maple_next.providers.turn_transport import (
     FAKE_TURN_ADVICE_SOURCE_TYPE,
     FakeTurnAdviceTransport,
     ProviderTransportError,
+    TurnProviderTransport,
 )
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
 from maple_next.ui.gemini_turn_advice import FAKE_TURN_MODEL, GeminiTurnAdviceAdapter
@@ -37,6 +42,7 @@ OPPONENT_TEAM = ("Garchomp", "Gholdengo", "Dragonite", "Flutter Mane", "Garganac
 SELECTED_THREE = ("Dondozo", "Flutter Mane", "Urshifu")
 LEGAL_MOVES = ("Protect", "Wave Crash", "Earthquake")
 LEGAL_SWITCHES = ("Flutter Mane", "Urshifu")
+TEST_CONFIG = ProviderConfig(api_key="test-key", model="test-model", timeout_seconds=5.0)
 
 
 class SyncDispatch:
@@ -66,6 +72,22 @@ class SyncDispatch:
             self._on_succeeded(result)  # type: ignore[operator]
 
 
+class ProductionLikeTurnTransport:
+    """Injected non-fake transport used to exercise the production controller branch."""
+
+    def __init__(self, result: SanitizedProviderResult) -> None:
+        self.result = result
+        self.calls: list[tuple[object, ProviderConfig]] = []
+
+    def send(self, request: object, config: ProviderConfig) -> SanitizedProviderResult:
+        self.calls.append((request, config))
+        return self.result
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+
 def qt_application() -> QApplication:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     existing = QApplication.instance()
@@ -75,11 +97,18 @@ def qt_application() -> QApplication:
 
 
 def build_controller(
-    tmp_path: Path, transport: FakeTurnAdviceTransport
+    tmp_path: Path,
+    transport: TurnProviderTransport,
+    *,
+    load_config: object | None = None,
 ) -> tuple[SQLiteRepository, BattleApplication, TurnAdviceIntegrationController]:
     repository = SQLiteRepository(tmp_path / "maple.db")
     application = BattleApplication(repository)
-    turn_gemini_adapter = GeminiTurnAdviceAdapter(transport, dispatch_factory=SyncDispatch)  # type: ignore[arg-type]
+    turn_gemini_adapter = GeminiTurnAdviceAdapter(
+        transport,
+        load_config,  # type: ignore[arg-type]
+        dispatch_factory=SyncDispatch,  # type: ignore[arg-type]
+    )
     controller = TurnAdviceIntegrationController(
         application,
         repository,
@@ -124,6 +153,90 @@ def send_and_wait(controller: TurnAdviceIntegrationController) -> list[object]:
         on_result=results.append,
     )
     return results
+
+
+def _valid_result() -> SanitizedProviderResult:
+    return SanitizedProviderResult(
+        payload={
+            "recommended_action": {
+                "action_id": "MOVE:Wave Crash",
+                "action_type": "MOVE",
+                "action_name": "Wave Crash",
+            },
+            "reasons": ["STAB and pressure."],
+            "warnings": [],
+            "opponent_prediction": {
+                "category": "UNKNOWN",
+                "predicted_action": "Protect",
+                "summary": "Protect",
+                "confidence": 0.5,
+            },
+        },
+        source_type="GEMINI",
+        model="test-model",
+    )
+
+
+def test_production_controller_path_uses_reviewed_request_not_mock_advice_fields(
+    tmp_path: Path,
+) -> None:
+    qt_application()
+    transport = ProductionLikeTurnTransport(_valid_result())
+    repository, _application, controller = build_controller(
+        tmp_path,
+        transport,
+        load_config=lambda: TEST_CONFIG,
+    )
+    ready_for_turn_advice(controller)
+
+    results: list[object] = []
+    controller.send_turn_advice_to_gemini(
+        action_type="",
+        action_name="",
+        opponent_prediction="",
+        rationale="",
+        warnings=(),
+        on_result=results.append,
+    )
+
+    assert transport.call_count == 1
+    assert results
+    view = controller.refresh()
+    assert view.error_message is None
+    assert view.turn_advice is not None
+    assert view.turn_advice.action_name == "Wave Crash"
+    repository.close()
+
+
+def test_unauthorized_production_path_creates_no_job_or_transport_call(tmp_path: Path) -> None:
+    qt_application()
+    transport = ProductionLikeTurnTransport(_valid_result())
+
+    def unauthorized() -> ProviderConfig:
+        raise ProviderConfigError("GEMINI_TURN_NOT_AUTHORIZED")
+
+    repository, _application, controller = build_controller(
+        tmp_path,
+        transport,
+        load_config=unauthorized,
+    )
+    ready_for_turn_advice(controller)
+    jobs_before = repository.connection.execute("SELECT COUNT(*) FROM async_jobs").fetchone()[0]
+
+    view = controller.send_turn_advice_to_gemini(
+        action_type="",
+        action_name="",
+        opponent_prediction="",
+        rationale="",
+        warnings=(),
+        on_result=lambda _view: None,
+    )
+
+    jobs_after = repository.connection.execute("SELECT COUNT(*) FROM async_jobs").fetchone()[0]
+    assert transport.call_count == 0
+    assert jobs_after == jobs_before
+    assert view.error_message is not None
+    repository.close()
 
 
 # --- exactly one dispatch on trusted send; request carries current identity --

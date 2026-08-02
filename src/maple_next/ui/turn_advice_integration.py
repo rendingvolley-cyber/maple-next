@@ -1,12 +1,10 @@
-"""Issue #31 app integration for fake/injected Gemini-pattern Turn Advice.
+"""Issue #31 app integration for human-triggered Gemini Turn Advice.
 
 Mirrors :mod:`maple_next.ui.selection_advice_integration`. Adds a
 human-only ``TrustedSendButton`` that dispatches exactly one Turn Advice
-job through :class:`maple_next.ui.gemini_turn_advice.GeminiTurnAdviceAdapter`
-— always backed by
-:class:`maple_next.providers.turn_transport.FakeTurnAdviceTransport`, never a
-real network call. The existing strict identity/hash/staleness/legality
-binding contract in ``apply_turn_advice_result`` is reused unchanged.
+job through :class:`maple_next.ui.gemini_turn_advice.GeminiTurnAdviceAdapter`.
+The existing strict identity/hash/staleness/legality binding contract in
+``apply_turn_advice_result`` is reused unchanged for production and fake paths.
 """
 
 from __future__ import annotations
@@ -47,7 +45,7 @@ class TurnAdviceGeminiStatusView:
 
 
 class TurnAdviceIntegrationController(SelectionAdviceIntegrationController):
-    """Adds explicit human-triggered fake/injected Gemini-pattern Turn Advice."""
+    """Adds explicit human-triggered Gemini Turn Advice."""
 
     def __init__(
         self,
@@ -64,6 +62,11 @@ class TurnAdviceIntegrationController(SelectionAdviceIntegrationController):
     @property
     def turn_gemini_send_available(self) -> bool:
         return self._turn_gemini_adapter is not None
+
+    @property
+    def turn_gemini_uses_injected_transport(self) -> bool:
+        adapter = self._turn_gemini_adapter
+        return adapter is not None and adapter.uses_injected_transport
 
     def turn_advice_gemini_status(self) -> TurnAdviceGeminiStatusView:
         adapter = self._turn_gemini_adapter
@@ -130,6 +133,8 @@ class TurnAdviceIntegrationController(SelectionAdviceIntegrationController):
         if current.projection.primary_cta != "REQUEST_TURN_ADVICE":
             self._error_message = "確認済みTurn factsが必要です。"
             return self.refresh()
+        if not adapter.uses_injected_transport:
+            return self._dispatch_turn_advice_to_gemini(adapter, on_result)
         try:
             typed_action = ActionType(action_type.strip())
         except ValueError:
@@ -176,6 +181,15 @@ class TurnAdviceIntegrationController(SelectionAdviceIntegrationController):
             )
         )
 
+        return self._dispatch_turn_advice_to_gemini(adapter, on_result)
+
+    def _dispatch_turn_advice_to_gemini(
+        self,
+        adapter: GeminiTurnAdviceAdapter,
+        on_result: Callable[[OperatorView], None],
+    ) -> OperatorView:
+        """Dispatch one request after fake seeding or through production transport."""
+
         callback_already_ran = False
 
         def handle_applied(disposition: ResultDisposition) -> None:
@@ -202,7 +216,7 @@ class TurnAdviceIntegrationController(SelectionAdviceIntegrationController):
 
 
 class TurnAdviceIntegrationWindow(SelectionAdviceIntegrationWindow):
-    """Adds the fake/injected Gemini-pattern Turn Advice send group."""
+    """Adds the trusted Gemini Turn Advice send group."""
 
     def _build_mock_turn_advice_group(self) -> None:
         super()._build_mock_turn_advice_group()
@@ -213,12 +227,12 @@ class TurnAdviceIntegrationWindow(SelectionAdviceIntegrationWindow):
             "Gemini Turn Advice（Fake/Injected — 実際のGemini APIには送信しません）"
         )
         layout = QVBoxLayout(self.turn_gemini_box)
-        helper = QLabel(
+        self.turn_gemini_helper_label = QLabel(
             "上のMOCK欄と同じ内容を、Selectionと同じ明示送信アーキテクチャ（identity/hash/"
             "staleness/legality検証つき）で適用します。自動送信・自動retryはありません。"
         )
-        helper.setWordWrap(True)
-        layout.addWidget(helper)
+        self.turn_gemini_helper_label.setWordWrap(True)
+        layout.addWidget(self.turn_gemini_helper_label)
         self.turn_gemini_send_button = TrustedSendButton(
             "SEND TURN TO GEMINI（FAKE）", self._on_trusted_send_turn_to_gemini
         )
@@ -240,6 +254,19 @@ class TurnAdviceIntegrationWindow(SelectionAdviceIntegrationWindow):
             return
         status = controller.turn_advice_gemini_status()  # type: ignore[attr-defined]
         available = controller.turn_gemini_send_available
+        injected = controller.turn_gemini_uses_injected_transport  # type: ignore[attr-defined]
+        if injected:
+            self.turn_gemini_box.setTitle("Gemini Turn Advice（Fake/Injected）")
+            self.turn_gemini_send_button.setText("SEND TURN TO GEMINI（FAKE）")
+            self.turn_gemini_helper_label.setText(
+                "上のMOCK欄の内容を、productionと同じbinding経路へ明示送信します。"
+            )
+        else:
+            self.turn_gemini_box.setTitle("Gemini Turn Advice")
+            self.turn_gemini_send_button.setText("SEND TURN TO GEMINI")
+            self.turn_gemini_helper_label.setText(
+                "確認済み盤面と合法行動をGeminiへ1回だけ送信します。ゲーム操作は行いません。"
+            )
         self.turn_gemini_box.setVisible(
             available and current.projection.primary_cta == "REQUEST_TURN_ADVICE"
         )

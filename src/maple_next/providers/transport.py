@@ -20,8 +20,8 @@ from maple_next.providers.selection_request import (
     build_provider_request_body,
 )
 
-#: Gemini send is never implemented for Turn Advice by this module or any
-#: other module in this package. Only SELECTION_ADVICE is wired to production.
+#: Shared trusted source token used by Selection Advice. Turn Advice has its
+#: own production boundary in ``turn_transport.py``.
 GEMINI_SOURCE_TYPE = "GEMINI"
 
 _DEFAULT_MODEL = "gemini-2.5-flash"

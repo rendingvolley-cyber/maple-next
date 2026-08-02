@@ -53,6 +53,20 @@ or set `MAPLE_NEXT_RUNTIME_ROOT` before launching.
   enter board facts by hand and keep playing. Do not wait for UGREEN before continuing a match.
 - **Do not use OBS.** It is not part of this app's capture path.
 
+## Gemini Turn Advice authorization
+
+- The production Turn provider is fail-closed by default. An API key by itself does not
+  authorize or enable a Turn request.
+- Before the exact authorization is recorded on Issue #31, keep
+  `MAPLE_NEXT_GEMINI_TURN_AUTHORIZED` unset. The app will report
+  `GEMINI_TURN_NOT_AUTHORIZED` and perform zero provider/network sends.
+- After the exact authorization is recorded, configure the Gemini credentials through the
+  approved runtime secret mechanism and set `MAPLE_NEXT_GEMINI_TURN_AUTHORIZED=1` only in
+  the launcher process environment. Never paste the API key into this runbook, a command
+  transcript, a screenshot, or a GitHub comment.
+- Even when authorized, only a trusted human activation of **SEND TURN TO GEMINI** sends one
+  request. There is no retry, resend, fallback model, or automatic game action.
+
 ## Ending the app
 
 - Normal exit: close the app window, or `Ctrl+C` in the launcher console. The launcher

@@ -93,7 +93,7 @@ def test_confirmed_match_snapshot_survives_preset_update_and_delete(tmp_path: Pa
     repository.close()
 
 
-def test_window_restores_last_used_team_and_keeps_one_match_manual_edits(
+def test_window_does_not_restore_last_used_team_and_keeps_manual_edits(
     tmp_path: Path,
 ) -> None:
     _qt_application()
@@ -107,7 +107,7 @@ def test_window_restores_last_used_team_and_keeps_one_match_manual_edits(
     reopened = SQLiteRepository(database)
     restarted = _controller(reopened)
     window = MapleMainWindow(restarted, auto_start_capture=False)
-    assert tuple(field.text() for field in window.self_team_inputs) == TEAM_ALPHA
+    assert tuple(field.text() for field in window.self_team_inputs) == ("",) * 6
     window.self_team_inputs[0].setText("manual-for-this-match")
     assert window.self_team_inputs[0].text() == "manual-for-this-match"
     assert restarted.list_self_team_presets()[0].self_team == TEAM_ALPHA

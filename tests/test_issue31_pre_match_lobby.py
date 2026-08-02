@@ -17,6 +17,8 @@ import os
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
@@ -78,6 +80,119 @@ def test_no_active_match_self_team_and_preset_ui_visible_and_enabled(tmp_path: P
         repository.close()
 
 
+def test_manual_team_import_populates_inputs_without_startup_restore_or_activity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, controller, window = _build(tmp_path)
+    import_path = tmp_path / "last-used-team.json"
+    import_path.write_text(
+        '{"schema_version":"maple-team.v1","name":"Imported",'
+        '"pokemon":["A","B","C","D","E","F"],'
+        '"source":{"kind":"selection_snapshot"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "maple_next.ui.window.QFileDialog.getOpenFileName",
+        lambda *args, **kwargs: (str(import_path), ""),
+    )
+    try:
+        assert window.import_self_team_button.isVisible()
+        assert window.import_self_team_button.isEnabled()
+        window.import_self_team_button.click()
+
+        assert tuple(field.text() for field in window.self_team_inputs) == TEAM_ALPHA
+        assert window.self_team_preset_name.text() == "Imported"
+        assert repository.load_active_session() is None
+        assert controller.network_call_count == 0
+        _assert_zero_activity(repository)
+    finally:
+        window.close()
+        repository.close()
+
+
+def test_import_error_preserves_existing_inputs_and_shows_sanitized_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, controller, window = _build(tmp_path)
+    import_path = tmp_path / "invalid.json"
+    import_path.write_text('{"schema_version":"maple-team.v2"}', encoding="utf-8")
+    for field, value in zip(window.self_team_inputs, TEAM_ALPHA, strict=True):
+        field.setText(value)
+    monkeypatch.setattr(
+        "maple_next.ui.window.QFileDialog.getOpenFileName",
+        lambda *args, **kwargs: (str(import_path), ""),
+    )
+    try:
+        window.import_self_team_button.click()
+
+        assert tuple(field.text() for field in window.self_team_inputs) == TEAM_ALPHA
+        assert window.error_label.isVisible()
+        assert str(import_path) not in window.error_label.text()
+        assert controller.network_call_count == 0
+        _assert_zero_activity(repository)
+    finally:
+        window.close()
+        repository.close()
+
+
+def test_import_preserves_existing_preset_and_allows_manual_edit_and_new_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, controller, window = _build(tmp_path)
+    controller.save_self_team_preset("Existing", TEAM_ALPHA)
+    existing = controller.list_self_team_presets()[0]
+    window.self_team_preset_box.setCurrentIndex(window.self_team_preset_box.findData(existing.preset_id))
+    import_path = tmp_path / "import.txt"
+    import_path.write_text("G\nH\nI\nJ\nK\nL\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "maple_next.ui.window.QFileDialog.getOpenFileName",
+        lambda *args, **kwargs: (str(import_path), ""),
+    )
+    try:
+        window.import_self_team_button.click()
+        assert tuple(field.text() for field in window.self_team_inputs) == TEAM_BETA
+        assert controller.list_self_team_presets()[0].self_team == TEAM_ALPHA
+
+        window.self_team_inputs[0].setText("manual-edit")
+        window.self_team_preset_name.setText("Imported copy")
+        window.save_self_team_preset_button.click()
+
+        assert [item.name for item in controller.list_self_team_presets()] == [
+            "Existing",
+            "Imported copy",
+        ]
+        assert controller.network_call_count == 0
+        _assert_zero_activity(repository)
+    finally:
+        window.close()
+        repository.close()
+
+
+def test_imported_inputs_survive_new_match_and_import_is_disabled_after_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, controller, window = _build(tmp_path)
+    import_path = tmp_path / "import.txt"
+    import_path.write_text(",".join(TEAM_ALPHA), encoding="utf-8")
+    monkeypatch.setattr(
+        "maple_next.ui.window.QFileDialog.getOpenFileName",
+        lambda *args, **kwargs: (str(import_path), ""),
+    )
+    try:
+        window.import_self_team_button.click()
+        window.new_match_button.click()
+        assert tuple(field.text() for field in window.self_team_inputs) == TEAM_ALPHA
+
+        for field, value in zip(window.opponent_team_inputs, OPPONENT, strict=True):
+            field.setText(value)
+        window.confirm_facts_button.click()
+        assert not window.import_self_team_button.isEnabled()
+        assert controller.network_call_count == 0
+    finally:
+        window.close()
+        repository.close()
+
+
 def test_no_active_match_opponent_and_confirm_hidden_or_disabled(tmp_path: Path) -> None:
     repository, _controller, window = _build(tmp_path)
     try:
@@ -126,7 +241,7 @@ def test_no_active_match_preset_crud_succeeds_without_activity(tmp_path: Path) -
         repository.close()
 
 
-def test_last_used_preset_restores_on_no_active_match_startup(tmp_path: Path) -> None:
+def test_last_used_preset_does_not_restore_on_no_active_match_startup(tmp_path: Path) -> None:
     database = tmp_path / "runtime.db"
     repository = SQLiteRepository(database)
     application = BattleApplication(repository)
@@ -146,8 +261,8 @@ def test_last_used_preset_restores_on_no_active_match_startup(tmp_path: Path) ->
     window = MapleMainWindow(restarted, auto_start_capture=False)
     try:
         assert reopened.load_active_session() is None
-        assert tuple(field.text() for field in window.self_team_inputs) == TEAM_ALPHA
-        assert window.self_team_preset_name.text() == "Alpha"
+        assert tuple(field.text() for field in window.self_team_inputs) == ("",) * 6
+        assert window.self_team_preset_name.text() == ""
         assert restarted.network_call_count == 0
         _assert_zero_activity(reopened)
     finally:

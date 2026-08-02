@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
@@ -192,6 +193,86 @@ def test_abort_transaction_failure_rolls_back_everything(
     repository.close()
 
 
+def test_abort_sqlite_operational_error_rolls_back_everything(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, application, selection_adapter, turn_adapter = build_ready_application(
+        tmp_path
+    )
+    before = repository.load_active_session()
+    assert before is not None
+    counts_before = session_record_counts(repository, before.session_id)
+    original_save_session = repository.save_session
+
+    def save_then_fail(session: object) -> None:
+        original_save_session(session)  # type: ignore[arg-type]
+        raise sqlite3.OperationalError("database is locked: SECRET_PATH")
+
+    monkeypatch.setattr(repository, "save_session", save_then_fail)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        application.abort_match(human_confirmed=True)
+
+    after = repository.load_active_session()
+    assert after is not None
+    assert after.session_id == before.session_id
+    assert after.match_id == before.match_id
+    assert after.state is before.state
+    assert after.active_slot == before.active_slot
+    assert after.battle_revision == before.battle_revision
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert repository.count_sessions() == 1
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+    assert repository.count_actions(before.session_id) == 0
+    repository.close()
+
+
+@pytest.mark.parametrize(
+    "sqlite_error",
+    (
+        sqlite3.OperationalError("database is locked: SECRET_PATH"),
+        sqlite3.DatabaseError("malformed database: SECRET_PATH"),
+    ),
+)
+def test_abort_controller_sanitizes_sqlite_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sqlite_error: sqlite3.Error,
+) -> None:
+    repository, application, selection_adapter, turn_adapter = build_ready_application(
+        tmp_path
+    )
+    before = repository.load_active_session()
+    assert before is not None
+    counts_before = session_record_counts(repository, before.session_id)
+    controller = MatchFlowController(
+        application,
+        repository,
+        selection_adapter,
+        turn_adapter,
+    )
+
+    def fail_abort(*, human_confirmed: bool) -> None:
+        assert human_confirmed is True
+        raise sqlite_error
+
+    monkeypatch.setattr(application, "abort_match", fail_abort)
+    view = controller.abort_match(human_confirmed=True)
+
+    assert view.error_message == (
+        "stale対戦の終了に失敗しました。canonical stateは変更されていません。"
+    )
+    assert "SECRET_PATH" not in view.error_message
+    assert "database" not in view.error_message
+    after = repository.load_active_session()
+    assert after == before
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+    repository.close()
+
+
 def test_abort_after_restart_is_fail_safe_and_sanitized(tmp_path: Path) -> None:
     repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
     session = repository.load_active_session()
@@ -293,6 +374,67 @@ def test_ui_abort_is_human_confirmed_cancel_safe_and_not_automatic(tmp_path: Pat
     assert not window.advice_group.isVisible()
     assert selection_adapter.network_call_count == 0
     assert turn_adapter.network_call_count == 0
+    window.close()
+    repository.close()
+
+
+def test_ui_abort_sqlite_failure_is_sanitized_and_rolled_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(
+        tmp_path
+    )
+    before = repository.load_active_session()
+    assert before is not None
+    counts_before = session_record_counts(repository, before.session_id)
+    original_save_session = repository.save_session
+    controller = MatchFlowController(
+        application,
+        repository,
+        selection_adapter,
+        turn_adapter,
+    )
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    def save_then_fail(session: object) -> None:
+        original_save_session(session)  # type: ignore[arg-type]
+        raise sqlite3.OperationalError(
+            f"database is locked: SECRET_PATH {repository.database_path} "
+            "UPDATE battle_sessions"
+        )
+
+    monkeypatch.setattr(repository, "save_session", save_then_fail)
+    with patch.object(
+        QMessageBox,
+        "exec",
+        return_value=QMessageBox.StandardButton.Yes,
+    ):
+        window.abort_match_button.click()
+        qapp.processEvents()
+
+    expected = "stale対戦の終了に失敗しました。canonical stateは変更されていません。"
+    assert window.error_label.text() == expected
+    assert all(
+        forbidden not in window.error_label.text()
+        for forbidden in (
+            "database is locked",
+            "SECRET_PATH",
+            "UPDATE battle_sessions",
+            str(repository.database_path),
+        )
+    )
+    after = repository.load_active_session()
+    assert after == before
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert repository.count_sessions() == 1
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+    assert repository.count_actions(before.session_id) == 0
     window.close()
     repository.close()
 

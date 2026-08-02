@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 
 from maple_next.application.match_service import MatchApplication
@@ -157,7 +158,7 @@ class MatchFlowController(TurnAdviceIntegrationController):
             self._match_application.abort_match(human_confirmed=human_confirmed)
         except DomainError as error:
             self._error_message = _match_message(error)
-        except RuntimeError:
+        except (RuntimeError, sqlite3.Error):
             self._error_message = (
                 "stale対戦の終了に失敗しました。canonical stateは変更されていません。"
             )

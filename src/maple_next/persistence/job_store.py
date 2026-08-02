@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 
 from maple_next.domain.enums import BattleState, JobStatus, JobType, ResultDisposition
 from maple_next.persistence.base import StoreBase
 from maple_next.workers.contracts.models import JobEnvelope, ResultEnvelope
+
+# Fixed canonical value stored in the NOT NULL async_job_results.payload_json
+# column. Raw/untrusted provider payloads must never be persisted there.
+CANONICAL_EMPTY_PAYLOAD_JSON = "{}"
 
 
 class JobStoreMixin(StoreBase):
@@ -152,6 +155,15 @@ class JobStoreMixin(StoreBase):
         disposition: ResultDisposition,
         reason: str,
     ) -> None:
+        """Record a fixed, sanitized audit row for a provider result.
+
+        Never persists ``result.payload``: raw/untrusted provider bodies must
+        not reach ``async_job_results``. ``payload_json`` is schema-required
+        (``NOT NULL``) so a fixed canonical empty object is stored instead of
+        any provider-derived content; ``reason`` must already be one of the
+        caller's fixed sanitized codes, never dynamic exception text.
+        """
+
         self.connection.execute(
             """
             INSERT INTO async_job_results (
@@ -163,7 +175,7 @@ class JobStoreMixin(StoreBase):
                 result.job_id,
                 disposition.value,
                 reason,
-                json.dumps(result.payload, ensure_ascii=False, sort_keys=True),
+                CANONICAL_EMPTY_PAYLOAD_JSON,
                 self._now(),
             ),
         )

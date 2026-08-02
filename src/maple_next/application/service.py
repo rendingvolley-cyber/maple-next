@@ -416,9 +416,9 @@ class BattleApplication:
                     raise ValueError("selection outside reviewed team")
                 backline_values = tuple(name for name in typed_three if name != lead)
                 backline = (backline_values[0], backline_values[1])
-            except (KeyError, IndexError, TypeError, ValueError) as exc:
+            except (KeyError, IndexError, TypeError, ValueError):
                 self.repository.audit_result(
-                    result, ResultDisposition.INVALID_REJECTED, f"INVALID_PAYLOAD:{exc}"
+                    result, ResultDisposition.INVALID_REJECTED, "INVALID_PAYLOAD"
                 )
                 self.repository.update_job_status(job.job_id, JobStatus.FAILED)
                 return ResultDisposition.INVALID_REJECTED
@@ -899,9 +899,9 @@ class BattleApplication:
                     model=model,
                     warnings=warnings,
                 )
-            except (KeyError, TypeError, ValueError, TurnAdviceSchemaError) as exc:
+            except (KeyError, TypeError, ValueError, TurnAdviceSchemaError):
                 self.repository.audit_result(
-                    result, ResultDisposition.INVALID_REJECTED, f"INVALID_PAYLOAD:{exc}"
+                    result, ResultDisposition.INVALID_REJECTED, "INVALID_PAYLOAD"
                 )
                 self.repository.update_job_status(job.job_id, JobStatus.FAILED)
                 return ResultDisposition.INVALID_REJECTED

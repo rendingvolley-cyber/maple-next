@@ -301,4 +301,19 @@ def migrate(connection: sqlite3.Connection) -> None:
         "action_order",
         "TEXT NOT NULL DEFAULT 'UNKNOWN'",
     )
+    _sanitize_async_job_result_payloads(connection)
     connection.commit()
+
+
+def _sanitize_async_job_result_payloads(connection: sqlite3.Connection) -> None:
+    """Scrub any historical raw provider payload from async_job_results.
+
+    Older runtime databases may still hold raw ``ResultEnvelope.payload``
+    content written before ``JobStore.audit_result`` was changed to persist
+    only a fixed canonical value. This runs on every startup migration and
+    is idempotent: rows already at the canonical value are left untouched.
+    """
+
+    connection.execute(
+        "UPDATE async_job_results SET payload_json = '{}' WHERE payload_json != '{}'"
+    )

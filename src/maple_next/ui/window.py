@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QImage, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -43,6 +45,7 @@ from maple_next.ocr.contracts import (
 )
 from maple_next.ocr.service import OcrCandidateService, UnavailableOcrCandidateBackend
 from maple_next.ui.controller import OperatorView, SelectionFlowController, TurnFactsView
+from maple_next.ui.team_import import TeamImportError, read_team_import
 from maple_next.ui.trusted_input import TrustedSendButton
 
 #: Poll interval for capture status / OCR candidate refresh. Display-only:
@@ -155,7 +158,6 @@ class MapleMainWindow(QMainWindow):
         self._capture_timer.timeout.connect(self._poll_capture_status)
 
         self._build_ui()
-        self._restore_last_used_self_team_preset()
         self.render_view()
 
         if auto_start_capture:
@@ -611,11 +613,14 @@ class MapleMainWindow(QMainWindow):
         self.use_self_team_preset_button.clicked.connect(self._on_use_self_team_preset)
         self.update_self_team_preset_button.clicked.connect(self._on_update_self_team_preset)
         self.delete_self_team_preset_button.clicked.connect(self._on_delete_self_team_preset)
+        self.import_self_team_button = QPushButton("構築をインポート")
+        self.import_self_team_button.clicked.connect(self._on_import_self_team)
         for button in (
             self.save_self_team_preset_button,
             self.use_self_team_preset_button,
             self.update_self_team_preset_button,
             self.delete_self_team_preset_button,
+            self.import_self_team_button,
         ):
             button_layout.addWidget(button)
         layout.addRow(buttons)
@@ -643,14 +648,6 @@ class MapleMainWindow(QMainWindow):
     def _selected_self_team_preset_id(self) -> str | None:
         value = self.self_team_preset_box.currentData()
         return value if isinstance(value, str) and value else None
-
-    def _restore_last_used_self_team_preset(self) -> None:
-        preset = self._controller.last_used_self_team_preset()
-        if preset is None:
-            return
-        self._copy_self_team_to_inputs(preset.self_team)
-        self._refresh_self_team_presets(preset.preset_id)
-        self.self_team_preset_name.setText(preset.name)
 
     def _copy_self_team_to_inputs(self, team: Sequence[str]) -> None:
         for field, value in zip(self.self_team_inputs, team, strict=True):
@@ -714,6 +711,31 @@ class MapleMainWindow(QMainWindow):
         self._refresh_self_team_presets()
         self.self_team_preset_name.clear()
         self.render_view(view)
+
+    def _on_import_self_team(self, _checked: bool = False) -> None:
+        """Import only after a human activates the button; never on startup."""
+
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "構築をインポート",
+            "",
+            "Maple JSON (*.json);;UTF-8 text (*.txt)",
+        )
+        if not path:
+            return
+        try:
+            imported = read_team_import(Path(path))
+        except TeamImportError as error:
+            self.error_label.setText(f"構築をインポートできません: {error}")
+            self.error_label.setVisible(True)
+            return
+
+        self._copy_self_team_to_inputs(imported.pokemon)
+        if imported.name is not None:
+            self.self_team_preset_name.setText(imported.name)
+        self.error_label.setText("")
+        self.error_label.setVisible(False)
+        self.render_view()
 
     def _build_mock_advice_group(self) -> None:
         self.mock_group = QGroupBox("開発用 MOCK Selection Advice — ネットワーク送信なし")
@@ -1001,6 +1023,7 @@ class MapleMainWindow(QMainWindow):
             field.setEnabled(self_team_editable)
         preset_selected = self._selected_self_team_preset_id() is not None
         self.save_self_team_preset_button.setEnabled(self_team_editable)
+        self.import_self_team_button.setEnabled(self_team_editable)
         self.use_self_team_preset_button.setEnabled(self_team_editable and preset_selected)
         self.update_self_team_preset_button.setEnabled(self_team_editable and preset_selected)
         self.delete_self_team_preset_button.setEnabled(self_team_editable and preset_selected)

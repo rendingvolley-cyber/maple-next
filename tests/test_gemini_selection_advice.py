@@ -212,6 +212,90 @@ def test_valid_gemini_result_is_applied_and_marked_gemini_source(tmp_path: Path)
     repository.close()
 
 
+def test_primary_success_atomically_persists_dispatched_model(tmp_path: Path) -> None:
+    qapp = qt_application()
+    transport = FakeSelectionAdviceTransport(
+        responses=[
+            SanitizedProviderResult(
+                payload={"selected_three": list(GEMINI_THREE), "lead": "Meowscarada"},
+                source_type=GEMINI_SOURCE_TYPE,
+                model="provider-body-cannot-select-model",
+            )
+        ]
+    )
+    repository, _application, controller = build_controller(
+        tmp_path,
+        transport,
+        load_config=lambda: SelectionProviderConfig(api_key="test-key"),
+    )
+    ready_selection_open(controller)
+
+    send_and_wait(qapp, controller)
+
+    session = repository.load_active_session()
+    assert session is not None
+    assert session.current_selection_advice_id is not None
+    job = repository.latest_job_by_type(session.session_id, JobType.SELECTION_ADVICE)
+    assert job is not None
+    assert job.status is JobStatus.SUCCEEDED
+    assert repository.selection_provider_attempt_audits(job.job_id) == [
+        (1, DEFAULT_SELECTION_PRIMARY_MODEL, "SUCCEEDED", "")
+    ]
+    stored = repository.get_selection_advice(session.current_selection_advice_id)
+    assert stored["model"] == DEFAULT_SELECTION_PRIMARY_MODEL
+    repository.close()
+
+
+def test_model_persistence_failure_rolls_back_entire_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qt_application()
+    transport = FakeSelectionAdviceTransport(
+        responses=[
+            SanitizedProviderResult(
+                payload={"selected_three": list(GEMINI_THREE), "lead": "Meowscarada"},
+                source_type=GEMINI_SOURCE_TYPE,
+                model="provider-body-cannot-select-model",
+            )
+        ]
+    )
+    repository, _application, controller = build_controller(
+        tmp_path,
+        transport,
+        load_config=lambda: SelectionProviderConfig(api_key="test-key"),
+    )
+    ready_selection_open(controller)
+    before = repository.load_active_session()
+    assert before is not None
+    original_append = repository.append_selection_advice
+
+    def append_then_fail(*args: object, **kwargs: object) -> None:
+        assert kwargs["model"] == DEFAULT_SELECTION_PRIMARY_MODEL
+        original_append(*args, **kwargs)  # type: ignore[arg-type]
+        raise RuntimeError("INJECTED_MODEL_PERSISTENCE_FAILURE")
+
+    monkeypatch.setattr(repository, "append_selection_advice", append_then_fail)
+
+    with pytest.raises(RuntimeError, match="INJECTED_MODEL_PERSISTENCE_FAILURE"):
+        controller.send_selection_advice_to_gemini(on_result=lambda _view: None)
+
+    after = repository.load_active_session()
+    assert after is not None
+    assert after.state is BattleState.SELECTION_OPEN
+    assert after.current_selection_advice_id is None
+    assert after.battle_revision == before.battle_revision
+    job = repository.latest_job_by_type(after.session_id, JobType.SELECTION_ADVICE)
+    assert job is not None
+    assert job.status is JobStatus.IN_FLIGHT
+    advice_count = repository.connection.execute(
+        "SELECT COUNT(*) FROM selection_advices WHERE job_id = ?", (job.job_id,)
+    ).fetchone()[0]
+    assert advice_count == 0
+    assert repository.result_audits(job.job_id) == []
+    repository.close()
+
+
 # --- 12. duplicate / outside-team / lead-mismatch / malformed -> INVALID_REJECTED ---
 
 

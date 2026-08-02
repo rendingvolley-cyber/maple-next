@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Protocol
 from uuid import uuid4
 
@@ -203,6 +204,7 @@ def _default_envelope_factory(
         request_payload_hash=job.request_payload_hash,
         payload=result.payload,
         source_type=result.source_type,
+        model=result.model,
     )
 
 
@@ -311,18 +313,15 @@ class GeminiSelectionAdviceAdapter:
             )
             self.last_model = sanitized_result.model
             self.last_source_type = sanitized_result.source_type
-            envelope = self._envelope_factory(job, sanitized_result)
+            envelope = replace(
+                self._envelope_factory(job, sanitized_result),
+                model=sanitized_result.model,
+            )
             disposition = application.apply_selection_advice_result(envelope)
             self.last_disposition = disposition
-            if disposition is ResultDisposition.APPLIED:
-                with application.repository.transaction():
-                    application.repository.set_selection_advice_model(
-                        envelope.result_id,
-                        sanitized_result.model,
-                    )
-            elif disposition is ResultDisposition.STALE_REJECTED:
+            if disposition is ResultDisposition.STALE_REJECTED:
                 application.fail_selection_advice_job(job.job_id, "GEMINI_RESULT_STALE")
-            else:
+            elif disposition is not ResultDisposition.APPLIED:
                 application.fail_selection_advice_job(job.job_id, "GEMINI_RESULT_INVALID")
             on_applied(disposition)
 

@@ -432,6 +432,7 @@ class BattleApplication:
                 lead,
                 backline,
                 source_type=result.source_type,
+                model=result.model,
             )
             session.current_selection_advice_id = advice_id
             session.state = BattleState.SELECTION_ADVICE_READY

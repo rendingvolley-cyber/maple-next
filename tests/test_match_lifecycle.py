@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from maple_next.application.match_service import (
     MATCH_EXPORT_SCHEMA_VERSION,
@@ -71,6 +73,228 @@ def build_ready_application(
         human_confirmed=True,
     )
     return repository, application, selection_adapter, turn_adapter
+
+
+def session_record_counts(repository: SQLiteRepository, session_id: str) -> dict[str, int]:
+    tables = (
+        "reviewed_selection_facts",
+        "selection_advices",
+        "applied_selections",
+        "battle_turns",
+        "reviewed_turn_facts",
+        "turn_advices",
+        "recorded_actions",
+        "async_jobs",
+        "gemini_selection_attempt_ledger",
+        "turn_advice_attempt_ledger",
+        "match_outcomes",
+        "match_exports",
+    )
+    counts = {
+        table: int(
+            repository.connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()[0]
+        )
+        for table in tables
+    }
+    job_ids = tuple(
+        row[0]
+        for row in repository.connection.execute(
+            "SELECT job_id FROM async_jobs WHERE session_id = ?",
+            (session_id,),
+        )
+    )
+    placeholders = ",".join("?" for _ in job_ids) or "NULL"
+    counts["async_job_results"] = int(
+        repository.connection.execute(
+            f"SELECT COUNT(*) FROM async_job_results WHERE job_id IN ({placeholders})",
+            job_ids,
+        ).fetchone()[0]
+    )
+    counts["provider_attempt_audits"] = int(
+        repository.connection.execute(
+            f"SELECT COUNT(*) FROM provider_attempt_audits WHERE job_id IN ({placeholders})",
+            job_ids,
+        ).fetchone()[0]
+    )
+    return counts
+
+
+def test_human_abort_preserves_history_and_releases_active_slot(tmp_path: Path) -> None:
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    application.start_turn_capture()
+    confirm_turn(application)
+    turn_result = turn_adapter.submit(
+        application,
+        action_type=ActionType.MOVE,
+        action_name="Protect",
+        opponent_prediction="Earthquake",
+        rationale="No transport is used by this mock fixture.",
+    )
+    assert turn_result.disposition is ResultDisposition.APPLIED
+    before = repository.load_active_session()
+    assert before is not None
+    assert before.state is BattleState.TURN_REVIEWED
+    counts_before = session_record_counts(repository, before.session_id)
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+
+    with pytest.raises(DomainError, match="HUMAN_MATCH_ABORT_CONFIRMATION_REQUIRED"):
+        application.abort_match(human_confirmed=False)
+
+    archived = application.abort_match(human_confirmed=True)
+
+    assert archived.session_id == before.session_id
+    assert archived.match_id == before.match_id
+    assert archived.generation == before.generation
+    assert archived.state is BattleState.ABORTED
+    assert archived.active_slot is None
+    assert repository.load_active_session() is None
+    stored = repository.connection.execute(
+        "SELECT state, active_slot, battle_revision FROM battle_sessions WHERE session_id = ?",
+        (before.session_id,),
+    ).fetchone()
+    assert tuple(stored) == ("ABORTED", None, before.battle_revision + 1)
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert repository.count_sessions() == 1
+    with pytest.raises(DomainError, match="NO_ACTIVE_MATCH"):
+        application.abort_match(human_confirmed=True)
+    assert session_record_counts(repository, before.session_id) == counts_before
+    repository.close()
+
+
+def test_abort_transaction_failure_rolls_back_everything(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, application, _, _ = build_ready_application(tmp_path)
+    before = repository.load_active_session()
+    assert before is not None
+    original_save_session = repository.save_session
+
+    def save_then_fail(session: object) -> None:
+        original_save_session(session)  # type: ignore[arg-type]
+        raise RuntimeError("simulated abort persistence failure")
+
+    monkeypatch.setattr(repository, "save_session", save_then_fail)
+    with pytest.raises(RuntimeError, match="simulated abort persistence failure"):
+        application.abort_match(human_confirmed=True)
+
+    after = repository.load_active_session()
+    assert after is not None
+    assert after.session_id == before.session_id
+    assert after.match_id == before.match_id
+    assert after.state is BattleState.BATTLE_READY
+    assert after.active_slot == 1
+    assert after.battle_revision == before.battle_revision
+    repository.close()
+
+
+def test_abort_after_restart_is_fail_safe_and_sanitized(tmp_path: Path) -> None:
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    session = repository.load_active_session()
+    assert session is not None
+    application.abort_match(human_confirmed=True)
+    database_path = repository.database_path
+    export_directory = application.export_directory
+    repository.close()
+
+    reopened = SQLiteRepository(database_path)
+    restarted = MatchApplication(reopened, export_directory)
+    restarted.recover_after_restart()
+    controller = MatchFlowController(
+        restarted,
+        reopened,
+        selection_adapter,
+        turn_adapter,
+    )
+    view = controller.refresh()
+    assert view.projection.application_mode == "NO_ACTIVE_MATCH"
+    assert view.session_state is None
+    failed = controller.abort_match(human_confirmed=True)
+    assert failed.error_message == "現在、終了対象の対戦はありません。"
+    archived = reopened.connection.execute(
+        "SELECT state, active_slot FROM battle_sessions WHERE session_id = ?",
+        (session.session_id,),
+    ).fetchone()
+    assert tuple(archived) == ("ABORTED", None)
+    reopened.close()
+
+
+def test_ui_abort_is_human_confirmed_cancel_safe_and_not_automatic(tmp_path: Path) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    application.start_turn_capture()
+    confirm_turn(application)
+    turn_result = turn_adapter.submit(
+        application,
+        action_type=ActionType.MOVE,
+        action_name="Protect",
+        opponent_prediction="Earthquake",
+        rationale="UI abort safety fixture.",
+    )
+    assert turn_result.disposition is ResultDisposition.APPLIED
+    controller = MatchFlowController(
+        application,
+        repository,
+        selection_adapter,
+        turn_adapter,
+    )
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+    abort_button = window.abort_match_button
+    assert "終了" in abort_button.text()
+    assert "選出" in abort_button.text()
+    assert window.match_recovery_group.isVisible()
+
+    with patch.object(application, "abort_match", wraps=application.abort_match) as abort_spy:
+        window.render_view()
+        controller.refresh()
+        QTest.qWait(650)
+        qapp.processEvents()
+        assert abort_spy.call_count == 0
+
+        dialog = window._build_abort_confirmation_dialog()
+        assert dialog.standardButton(dialog.defaultButton()) == QMessageBox.StandardButton.Cancel
+        assert dialog.standardButton(dialog.escapeButton()) == QMessageBox.StandardButton.Cancel
+        dialog.deleteLater()
+
+        with patch.object(
+            QMessageBox,
+            "exec",
+            return_value=QMessageBox.StandardButton.Cancel,
+        ):
+            abort_button.click()
+            qapp.processEvents()
+        assert abort_spy.call_count == 0
+        still_active = repository.load_active_session()
+        assert still_active is not None
+        assert still_active.state is BattleState.TURN_REVIEWED
+
+        with patch.object(
+            QMessageBox,
+            "exec",
+            return_value=QMessageBox.StandardButton.Yes,
+        ):
+            abort_button.click()
+            qapp.processEvents()
+        assert abort_spy.call_count == 1
+
+    view = controller.refresh()
+    assert view.projection.application_mode == "NO_ACTIVE_MATCH"
+    assert not window.match_recovery_group.isVisible()
+    assert window.import_self_team_button.isVisible()
+    assert window.import_self_team_button.isEnabled()
+    assert not window.mock_group.isVisible()
+    assert not window.advice_group.isVisible()
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+    window.close()
+    repository.close()
 
 
 def confirm_turn(

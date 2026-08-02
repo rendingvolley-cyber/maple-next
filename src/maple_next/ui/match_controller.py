@@ -28,6 +28,9 @@ class MatchOperatorView(OperatorView):
 
 
 _MATCH_ERROR_MESSAGES = {
+    "HUMAN_MATCH_ABORT_CONFIRMATION_REQUIRED": "stale対戦を終了するには確認が必要です。",
+    "MATCH_ABORT_NOT_ALLOWED_IN_CURRENT_STATE": "現在の状態ではstale対戦を終了できません。",
+    "NO_ACTIVE_MATCH": "現在、終了対象の対戦はありません。",
     "HUMAN_MATCH_OUTCOME_CONFIRMATION_REQUIRED": "WIN / LOSE確定前に確認チェックを入れてください。",
     "MATCH_OUTCOME_ALREADY_SET": "この対戦の勝敗は既に確定しており変更できません。",
     "MATCH_END_NOT_ALLOWED_IN_CURRENT_STATE": (
@@ -145,6 +148,19 @@ class MatchFlowController(TurnAdviceIntegrationController):
             self._error_message = _match_message(error)
         except RuntimeError:
             self._error_message = "勝敗の保存に失敗しました。canonical stateは変更されていません。"
+        else:
+            self._error_message = None
+        return self.refresh()
+
+    def abort_match(self, *, human_confirmed: bool) -> MatchOperatorView:
+        try:
+            self._match_application.abort_match(human_confirmed=human_confirmed)
+        except DomainError as error:
+            self._error_message = _match_message(error)
+        except RuntimeError:
+            self._error_message = (
+                "stale対戦の終了に失敗しました。canonical stateは変更されていません。"
+            )
         else:
             self._error_message = None
         return self.refresh()

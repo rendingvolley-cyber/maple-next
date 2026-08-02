@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QLabel,
+    QMessageBox,
     QPushButton,
 )
 
@@ -31,6 +32,7 @@ class MatchFlowWindow(TurnAdviceIntegrationWindow):
         self._build_match_end_group()
         self._build_match_summary_group()
         self._build_match_export_group()
+        self._build_match_recovery_group()
         self._match_widgets_ready = True
         self.render_view()
 
@@ -94,6 +96,17 @@ class MatchFlowWindow(TurnAdviceIntegrationWindow):
         layout.addRow(self.new_match_after_export_button)
         self._insert_before_stretch(self.match_export_group)
 
+    def _build_match_recovery_group(self) -> None:
+        self.match_recovery_group = QGroupBox("stale対戦の復旧")
+        layout = QFormLayout(self.match_recovery_group)
+        self.abort_match_button = QPushButton("古い対戦を終了して選出へ戻る")
+        self.abort_match_button.clicked.connect(self._on_abort_match)
+        layout.addRow(
+            QLabel("人間の明示操作でのみ終了します。履歴は保持されます。")
+        )
+        layout.addRow(self.abort_match_button)
+        self._insert_before_stretch(self.match_recovery_group)
+
     def render_view(self, view: OperatorView | None = None) -> None:
         current = view if view is not None else self._match_controller.refresh()
         super().render_view(current)
@@ -132,6 +145,10 @@ class MatchFlowWindow(TurnAdviceIntegrationWindow):
         self.export_schema_label.setText(current.export_schema_version or "—")
         self.new_match_after_export_button.setEnabled(exported)
 
+        recoverable = state not in {None, "MATCH_ENDED", "MATCH_EXPORTED"}
+        self.match_recovery_group.setVisible(recoverable)
+        self.abort_match_button.setEnabled(recoverable)
+
         if state == "MATCH_ENDED":
             self.primary_cta_label.setText("SAVE MATCH JSON")
             self.guidance_label.setText(
@@ -159,6 +176,30 @@ class MatchFlowWindow(TurnAdviceIntegrationWindow):
         view = self._match_controller.end_match(
             self.outcome_box.currentText(),
             human_confirmed=self.outcome_confirm_checkbox.isChecked(),
+        )
+        self.render_view(view)
+
+    def _build_abort_confirmation_dialog(self) -> QMessageBox:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("古い対戦の復旧")
+        dialog.setText("現在の対戦を終了して、選出画面へ戻りますか？")
+        dialog.setInformativeText(
+            "session / matchの履歴は保持されます。provider送信、APPLY、turn記録は行いません。"
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        dialog.setEscapeButton(QMessageBox.StandardButton.Cancel)
+        return dialog
+
+    def _on_abort_match(self, _checked: bool = False) -> None:
+        dialog = self._build_abort_confirmation_dialog()
+        if dialog.exec() != QMessageBox.StandardButton.Yes:
+            return
+        view = self._match_controller.abort_match(
+            human_confirmed=True,
         )
         self.render_view(view)
 

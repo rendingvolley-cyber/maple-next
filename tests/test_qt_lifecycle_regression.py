@@ -23,7 +23,6 @@ import time
 from pathlib import Path
 from typing import cast
 
-from conftest import close_and_delete_top_level_widgets
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
@@ -36,6 +35,7 @@ from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
 from maple_next.ui.window import MapleMainWindow
 from maple_next.workers.selection_advice_worker import SelectionAdviceDispatch
+from tests.conftest import close_and_delete_top_level_widgets
 
 SELF_TEAM = ("Meowscarada", "Gholdengo", "Dragonite", "Dondozo", "Flutter Mane", "Urshifu")
 OPPONENT_TEAM = ("Garchomp", "Gholdengo", "Dragonite", "Flutter Mane", "Garganacl", "Iron Bundle")

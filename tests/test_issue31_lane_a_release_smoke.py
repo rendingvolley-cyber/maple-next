@@ -84,7 +84,9 @@ def test_env_var_wins_over_localappdata_and_userprofile() -> None:
 def test_localappdata_fallback_used_when_no_cli_or_env() -> None:
     env = {"LOCALAPPDATA": "C:\\Users\\op\\AppData\\Local", "USERPROFILE": "C:\\Users\\op"}
     resolved = resolve_runtime_root(None, env=env)
-    assert resolved == Path("C:\\Users\\op\\AppData\\Local\\MapleNext\\Battle1")
+    assert canonicalize_windows_path(resolved) == (
+        "C:\\Users\\op\\AppData\\Local\\MapleNext\\Battle1"
+    )
 
 
 def test_userprofile_fallback_used_when_localappdata_missing() -> None:
@@ -97,7 +99,9 @@ def test_runtime_root_resolution_handles_paths_with_spaces() -> None:
     env = {"LOCALAPPDATA": "C:\\Users\\Op Erator\\AppData\\Local"}
     resolved = resolve_runtime_root(None, env=env)
     assert "Op Erator" in str(resolved)
-    assert resolved == Path("C:\\Users\\Op Erator\\AppData\\Local\\MapleNext\\Battle1")
+    assert canonicalize_windows_path(resolved) == (
+        "C:\\Users\\Op Erator\\AppData\\Local\\MapleNext\\Battle1"
+    )
 
     cli_resolved = resolve_runtime_root("C:\\Program Files\\Maple Runtime", env={})
     assert cli_resolved == Path("C:\\Program Files\\Maple Runtime")

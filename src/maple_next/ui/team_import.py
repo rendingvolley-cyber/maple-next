@@ -50,6 +50,8 @@ def parse_team_import(text: str) -> ImportedTeam:
 
     try:
         payload = json.loads(text)
+    except RecursionError as exc:
+        raise TeamImportError("JSONのネストが深すぎます。") from exc
     except json.JSONDecodeError as exc:
         if text.lstrip().startswith(("{", "[")):
             raise TeamImportError("JSONを解析できません。") from exc

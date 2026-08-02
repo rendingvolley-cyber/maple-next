@@ -135,6 +135,55 @@ def test_import_error_preserves_existing_inputs_and_shows_sanitized_error(
         repository.close()
 
 
+def test_deep_json_import_preserves_inputs_and_has_no_activity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, controller, window = _build(tmp_path)
+    import_path = tmp_path / "deep.json"
+    import_path.write_text("[" * 2000 + "]" * 2000, encoding="utf-8")
+    for field, value in zip(window.self_team_inputs, TEAM_ALPHA, strict=True):
+        field.setText(value)
+    window.self_team_preset_name.setText("入力中の構築")
+    monkeypatch.setattr(
+        "maple_next.ui.window.QFileDialog.getOpenFileName",
+        lambda *args, **kwargs: (str(import_path), ""),
+    )
+
+    def raise_recursion_error(_text: str) -> object:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr("maple_next.ui.team_import.json.loads", raise_recursion_error)
+
+    def fail_if_capture_or_ocr_runs(*_args, **_kwargs):
+        raise AssertionError("import error must not start capture or OCR")
+
+    monkeypatch.setattr(
+        "maple_next.capture.service.CaptureService.start", fail_if_capture_or_ocr_runs
+    )
+    monkeypatch.setattr(
+        "maple_next.ocr.service.OcrCandidateService.request_candidates",
+        fail_if_capture_or_ocr_runs,
+    )
+    try:
+        window.import_self_team_button.click()
+
+        assert tuple(field.text() for field in window.self_team_inputs) == TEAM_ALPHA
+        assert window.self_team_preset_name.text() == "入力中の構築"
+        assert window.error_label.isVisible()
+        error = window.error_label.text()
+        assert "ネスト" in error
+        assert "RecursionError" not in error
+        assert "maximum recursion" not in error
+        assert str(import_path) not in error
+        assert controller.list_self_team_presets() == ()
+        assert repository.load_active_session() is None
+        assert controller.network_call_count == 0
+        _assert_zero_activity(repository)
+    finally:
+        window.close()
+        repository.close()
+
+
 def test_import_preserves_existing_preset_and_allows_manual_edit_and_new_save(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

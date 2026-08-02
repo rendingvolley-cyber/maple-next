@@ -153,6 +153,11 @@ class FramePacket:
     source_width: int | None = None
     source_height: int | None = None
     canonical_resize_count: int = 0
+    #: (x, y, width, height) of the actual scaled source content inside the
+    #: 1280x720 canonical canvas. Any area outside this rect is letterbox or
+    #: pillarbox padding, not source content, and OCR/consumers must not treat
+    #: it as captured pixels. None until a packet has been canonicalized.
+    content_rect: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)

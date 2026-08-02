@@ -25,6 +25,14 @@ def read_team_import(path: str | Path) -> ImportedTeam:
     """Read one human-selected UTF-8 file without any automatic discovery."""
 
     source = Path(path)
+    if not source.exists():
+        raise TeamImportError("ファイルが見つかりません。")
+    if source.is_symlink():
+        raise TeamImportError("シンボリックリンクは読み込めません。")
+    if not source.is_file():
+        raise TeamImportError("通常ファイルのみ読み込めます。")
+    if source.suffix.lower() not in {".json", ".txt"}:
+        raise TeamImportError("対応していないファイル形式です。")
     try:
         if source.stat().st_size > MAX_TEAM_IMPORT_BYTES:
             raise TeamImportError("構築ファイルが大きすぎます。")

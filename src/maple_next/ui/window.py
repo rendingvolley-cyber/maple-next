@@ -719,7 +719,7 @@ class MapleMainWindow(QMainWindow):
             self,
             "構築をインポート",
             "",
-            "Maple JSON / UTF-8 text (*.json *.txt);;All files (*)",
+            "Maple JSON (*.json);;UTF-8 text (*.txt)",
         )
         if not path:
             return

@@ -114,8 +114,8 @@ def test_import_error_preserves_existing_inputs_and_shows_sanitized_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repository, controller, window = _build(tmp_path)
-    import_path = tmp_path / "invalid.json"
-    import_path.write_text('{"schema_version":"maple-team.v2"}', encoding="utf-8")
+    import_path = tmp_path / "invalid.exe"
+    import_path.write_text("\n".join(TEAM_ALPHA), encoding="utf-8")
     for field, value in zip(window.self_team_inputs, TEAM_ALPHA, strict=True):
         field.setText(value)
     monkeypatch.setattr(

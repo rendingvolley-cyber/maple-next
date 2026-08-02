@@ -19,7 +19,6 @@ from maple_next.providers.transport import (
     ProviderConfigError,
     SanitizedProviderResult,
     _sanitized_http_error_reason,
-    load_provider_config_from_env,
 )
 from maple_next.providers.transport import (
     ProviderTransportError as ProviderTransportError,
@@ -32,6 +31,11 @@ from maple_next.providers.turn_request import (
 GEMINI_TURN_SOURCE_TYPE = "GEMINI"
 FAKE_TURN_ADVICE_SOURCE_TYPE = GEMINI_TURN_SOURCE_TYPE
 TURN_PROVIDER_AUTHORIZATION_ENV = "MAPLE_NEXT_GEMINI_TURN_AUTHORIZED"
+TURN_PROVIDER_MODEL_ENV = "MAPLE_NEXT_GEMINI_TURN_MODEL"
+DEFAULT_TURN_MODEL = "gemini-3.5-flash-lite"
+_API_KEY_ENV = "MAPLE_NEXT_GEMINI_API_KEY"
+_TIMEOUT_ENV = "MAPLE_NEXT_GEMINI_TIMEOUT_SECONDS"
+_DEFAULT_TIMEOUT_SECONDS = 30.0
 
 
 def load_authorized_turn_provider_config_from_env() -> ProviderConfig:
@@ -43,7 +47,16 @@ def load_authorized_turn_provider_config_from_env() -> ProviderConfig:
 
     if os.environ.get(TURN_PROVIDER_AUTHORIZATION_ENV, "").strip() != "1":
         raise ProviderConfigError("GEMINI_TURN_NOT_AUTHORIZED")
-    return load_provider_config_from_env()
+    api_key = os.environ.get(_API_KEY_ENV, "").strip()
+    if not api_key:
+        raise ProviderConfigError("GEMINI_API_KEY_MISSING")
+    model = os.environ.get(TURN_PROVIDER_MODEL_ENV, "").strip() or DEFAULT_TURN_MODEL
+    raw_timeout = os.environ.get(_TIMEOUT_ENV, "").strip()
+    try:
+        timeout_seconds = float(raw_timeout) if raw_timeout else _DEFAULT_TIMEOUT_SECONDS
+    except ValueError as exc:
+        raise ProviderConfigError("GEMINI_TIMEOUT_INVALID") from exc
+    return ProviderConfig(api_key=api_key, model=model, timeout_seconds=timeout_seconds)
 
 
 class TurnProviderTransport(Protocol):

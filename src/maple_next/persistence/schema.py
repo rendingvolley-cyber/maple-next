@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -219,7 +219,21 @@ def migrate(connection: sqlite3.Connection) -> None:
             )
         );
 
-        UPDATE schema_meta SET schema_version = 9 WHERE singleton_id = 1;
+        CREATE TABLE IF NOT EXISTS provider_attempt_audits (
+            audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            lane TEXT NOT NULL,
+            attempt_ordinal INTEGER NOT NULL CHECK (attempt_ordinal IN (1, 2)),
+            model TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK (outcome IN ('STARTED', 'SUCCEEDED', 'FAILED')),
+            reason TEXT NOT NULL DEFAULT '',
+            started_at_utc TEXT NOT NULL,
+            completed_at_utc TEXT NULL,
+            UNIQUE(job_id, lane, attempt_ordinal),
+            FOREIGN KEY(job_id) REFERENCES async_jobs(job_id)
+        );
+
+        UPDATE schema_meta SET schema_version = 10 WHERE singleton_id = 1;
         """
     )
     _ensure_column(

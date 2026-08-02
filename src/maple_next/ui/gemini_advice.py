@@ -1,8 +1,9 @@
 """Production Selection Advice adapter: human-only explicit Gemini send.
 
 Distinct from :class:`maple_next.ui.dev_advice.MockSelectionAdviceAdapter`.
-This adapter never auto-applies a Selection to the game, never retries, and
-never falls back to a Maple-invented selection. Network I/O happens on a
+This adapter never auto-applies a Selection to the game and never falls back
+to a Maple-invented selection. One narrowly classified quota/rate/capacity
+failure may dispatch the configured fallback model exactly once. Network I/O happens on a
 worker thread (:mod:`maple_next.workers.selection_advice_worker`); this
 adapter only orchestrates the existing UI-thread application contract before
 and after that off-thread call.
@@ -19,9 +20,11 @@ from maple_next.application.service import BattleApplication, DomainError
 from maple_next.domain.enums import ResultDisposition
 from maple_next.providers.selection_request import SelectionAdviceRequest
 from maple_next.providers.transport import (
+    DEFAULT_SELECTION_FALLBACK_MODEL,
     ProviderConfig,
     ProviderConfigError,
     SanitizedProviderResult,
+    SelectionProviderConfig,
     SelectionProviderTransport,
 )
 from maple_next.workers.contracts.models import JobEnvelope, ResultEnvelope
@@ -56,6 +59,7 @@ _EXACT_FAILURE_CODES = frozenset(
     {
         "GEMINI_API_KEY_MISSING",
         "GEMINI_MODEL_MISSING",
+        "GEMINI_SELECTION_MODELS_NOT_DISTINCT",
         "GEMINI_TIMEOUT_INVALID",
         "GEMINI_TIMEOUT",
         "GEMINI_RESPONSE_ENVELOPE_MALFORMED",
@@ -73,10 +77,22 @@ _HTTP_FAILURE = re.compile(
 )
 _NETWORK_FAILURE = re.compile(r"^GEMINI_NETWORK_ERROR(?::[A-Za-z0-9._-]{1,64})?$")
 _DISPLAY_TOKEN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_FALLBACK_REASONS = frozenset(
+    {
+        "RATE_LIMIT_EXCEEDED",
+        "QUOTA_EXCEEDED",
+        "RESOURCE_EXHAUSTED",
+        "CAPACITY_EXHAUSTED",
+        "MODEL_CAPACITY_EXHAUSTED",
+    }
+)
 
 _FAILURE_MESSAGES = {
     "GEMINI_API_KEY_MISSING": "Gemini APIキーが設定されていないため送信できません。",
     "GEMINI_MODEL_MISSING": "Geminiのmodel設定が空です。",
+    "GEMINI_SELECTION_MODELS_NOT_DISTINCT": (
+        "Gemini Selectionのprimary/fallback modelは別々に設定してください。"
+    ),
     "GEMINI_TIMEOUT_INVALID": "Geminiのtimeout設定が不正です。",
     "GEMINI_TIMEOUT": "Gemini APIへの送信がtimeoutしました。",
     "GEMINI_RESPONSE_ENVELOPE_MALFORMED": "Gemini APIの応答形式が不正でした。",
@@ -106,6 +122,22 @@ def sanitize_gemini_failure(reason: object) -> str:
     if reason.startswith("GEMINI_NETWORK_ERROR"):
         return "GEMINI_NETWORK_ERROR"
     return "GEMINI_FAILURE_UNCLASSIFIED"
+
+
+def is_selection_fallback_eligible(reason: object) -> bool:
+    """Narrowly classify positively identified quota/rate/capacity exhaustion."""
+
+    sanitized = sanitize_gemini_failure(reason)
+    if not sanitized.startswith("GEMINI_HTTP_ERROR:"):
+        return False
+    fields = sanitized.split("|")
+    if fields[0] == "GEMINI_HTTP_ERROR:429":
+        return True
+    classifications = dict(field.split("=", 1) for field in fields[1:] if "=" in field)
+    return (
+        classifications.get("STATUS") == "RESOURCE_EXHAUSTED"
+        or classifications.get("REASON") in _FALLBACK_REASONS
+    )
 
 
 def describe_gemini_failure(reason: str) -> str:
@@ -180,7 +212,7 @@ class GeminiSelectionAdviceAdapter:
     def __init__(
         self,
         transport: SelectionProviderTransport,
-        load_config: Callable[[], ProviderConfig],
+        load_config: Callable[[], SelectionProviderConfig | ProviderConfig],
         *,
         dispatch_factory: _DispatchFactory = SelectionAdviceDispatch,
         envelope_factory: _EnvelopeFactory = _default_envelope_factory,
@@ -221,12 +253,23 @@ class GeminiSelectionAdviceAdapter:
         self.last_disposition = None
         self.last_failure_reason = None
         try:
-            config = self._load_config()
+            loaded_config = self._load_config()
         except ProviderConfigError as exc:
             reason = sanitize_gemini_failure(str(exc))
             self.last_failure_reason = reason
             on_failed(reason)
             return
+
+        if isinstance(loaded_config, SelectionProviderConfig):
+            primary_config = loaded_config.primary()
+            fallback_config = loaded_config.fallback()
+        else:
+            primary_config = loaded_config
+            fallback_config = ProviderConfig(
+                api_key=loaded_config.api_key,
+                model=DEFAULT_SELECTION_FALLBACK_MODEL,
+                timeout_seconds=loaded_config.timeout_seconds,
+            )
 
         try:
             job = application.reserve_gemini_selection_attempt(f"gemini-ui-{uuid4()}")
@@ -249,12 +292,22 @@ class GeminiSelectionAdviceAdapter:
             on_failed("GEMINI_DISPATCH_BLOCKED")
             return
 
-        def handle_succeeded(result: SanitizedProviderResult) -> None:
+        def handle_succeeded(
+            result: SanitizedProviderResult,
+            *,
+            config: ProviderConfig,
+            attempt_ordinal: int,
+        ) -> None:
             self._in_flight = False
+            application.repository.finish_selection_provider_attempt(
+                job_id=job.job_id,
+                attempt_ordinal=attempt_ordinal,
+                outcome="SUCCEEDED",
+            )
             sanitized_result = SanitizedProviderResult(
                 payload=_allowlisted_selection_payload(result.payload, request.self_team),
                 source_type=_safe_display_token(result.source_type),
-                model=_safe_display_token(result.model),
+                model=_safe_display_token(config.model),
             )
             self.last_model = sanitized_result.model
             self.last_source_type = sanitized_result.source_type
@@ -273,22 +326,48 @@ class GeminiSelectionAdviceAdapter:
                 application.fail_selection_advice_job(job.job_id, "GEMINI_RESULT_INVALID")
             on_applied(disposition)
 
-        def handle_failed(reason: str) -> None:
-            self._in_flight = False
+        def handle_failed(
+            reason: str,
+            *,
+            config: ProviderConfig,
+            attempt_ordinal: int,
+        ) -> None:
             sanitized = sanitize_gemini_failure(reason)
+            application.repository.finish_selection_provider_attempt(
+                job_id=job.job_id,
+                attempt_ordinal=attempt_ordinal,
+                outcome="FAILED",
+                reason=sanitized,
+            )
+            if attempt_ordinal == 1 and is_selection_fallback_eligible(sanitized):
+                dispatch_attempt(fallback_config, attempt_ordinal=2)
+                return
+            self._in_flight = False
             self.last_failure_reason = sanitized
             application.fail_selection_advice_job(job.job_id, sanitized)
             on_failed(sanitized)
 
-        self.network_call_count += 1
-        self.dispatch_count += 1
-        self._in_flight = True
-        dispatch = self._dispatch_factory(
-            self._transport,
-            request,
-            config,
-            on_succeeded=handle_succeeded,
-            on_failed=handle_failed,
-        )
-        self._active_dispatch = dispatch
-        dispatch.start()
+        def dispatch_attempt(config: ProviderConfig, *, attempt_ordinal: int) -> None:
+            application.repository.start_selection_provider_attempt(
+                job_id=job.job_id,
+                attempt_ordinal=attempt_ordinal,
+                model=_safe_display_token(config.model),
+            )
+            self.network_call_count += 1
+            self.dispatch_count += 1
+            self._in_flight = True
+            dispatch = self._dispatch_factory(
+                self._transport,
+                request,
+                config,
+                on_succeeded=lambda result: handle_succeeded(
+                    result, config=config, attempt_ordinal=attempt_ordinal
+                ),
+                on_failed=lambda reason: handle_failed(
+                    reason, config=config, attempt_ordinal=attempt_ordinal
+                ),
+            )
+            self._active_dispatch = dispatch
+            dispatch.start()
+
+        dispatch_attempt(primary_config, attempt_ordinal=1)

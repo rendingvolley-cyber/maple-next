@@ -13,17 +13,24 @@ from maple_next.domain.enums import BattleState, JobStatus, JobType, ResultDispo
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers.selection_request import request_payload_hash
 from maple_next.providers.transport import (
+    DEFAULT_SELECTION_FALLBACK_MODEL,
+    DEFAULT_SELECTION_PRIMARY_MODEL,
     GEMINI_SOURCE_TYPE,
     FakeSelectionAdviceTransport,
     ProviderConfig,
     ProviderConfigError,
     ProviderTransportError,
     SanitizedProviderResult,
+    SelectionProviderConfig,
     load_provider_config_from_env,
+    load_selection_provider_config_from_env,
 )
 from maple_next.ui.controller import SelectionFlowController
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
-from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
+from maple_next.ui.gemini_advice import (
+    GeminiSelectionAdviceAdapter,
+    is_selection_fallback_eligible,
+)
 
 SELF_TEAM = ("Meowscarada", "Gholdengo", "Dragonite", "Dondozo", "Flutter Mane", "Urshifu")
 OPPONENT_TEAM = ("Garchomp", "Gholdengo", "Dragonite", "Flutter Mane", "Garganacl", "Iron Bundle")
@@ -377,6 +384,112 @@ def test_load_provider_config_from_env_requires_api_key(monkeypatch: pytest.Monk
     monkeypatch.delenv("MAPLE_NEXT_GEMINI_API_KEY", raising=False)
     with pytest.raises(ProviderConfigError):
         load_provider_config_from_env()
+
+
+def test_selection_config_has_exact_lane_specific_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_MODEL", "must-not-route-either-lane")
+    monkeypatch.delenv("MAPLE_NEXT_GEMINI_SELECTION_PRIMARY_MODEL", raising=False)
+    monkeypatch.delenv("MAPLE_NEXT_GEMINI_SELECTION_FALLBACK_MODEL", raising=False)
+
+    config = load_selection_provider_config_from_env()
+
+    assert config.primary_model == DEFAULT_SELECTION_PRIMARY_MODEL
+    assert config.fallback_model == DEFAULT_SELECTION_FALLBACK_MODEL
+
+
+@pytest.mark.parametrize(
+    ("reason", "eligible"),
+    [
+        ("GEMINI_HTTP_ERROR:429", True),
+        ("GEMINI_HTTP_ERROR:429|STATUS=RESOURCE_EXHAUSTED", True),
+        ("GEMINI_HTTP_ERROR:503|REASON=MODEL_CAPACITY_EXHAUSTED", True),
+        ("GEMINI_HTTP_ERROR:503|STATUS=UNAVAILABLE", False),
+        ("GEMINI_HTTP_ERROR:503|DOMAIN=RESOURCE_EXHAUSTED", False),
+        ("GEMINI_HTTP_ERROR:500", False),
+        ("GEMINI_NETWORK_ERROR", False),
+        ("GEMINI_TIMEOUT", False),
+        ("GEMINI_RESPONSE_ENVELOPE_MALFORMED", False),
+        ("GEMINI_FAILURE_UNCLASSIFIED", False),
+    ],
+)
+def test_selection_fallback_classifier_is_narrow(reason: str, eligible: bool) -> None:
+    assert is_selection_fallback_eligible(reason) is eligible
+
+
+def test_selection_eligible_failure_uses_one_bounded_fallback_and_audits_both(
+    tmp_path: Path,
+) -> None:
+    qapp = qt_application()
+    transport = FakeSelectionAdviceTransport(
+        responses=[
+            ProviderTransportError("GEMINI_HTTP_ERROR:429|STATUS=RESOURCE_EXHAUSTED"),
+            SanitizedProviderResult(
+                payload={"selected_three": list(GEMINI_THREE), "lead": "Meowscarada"},
+                source_type=GEMINI_SOURCE_TYPE,
+                model="provider-body-cannot-select-model",
+            ),
+        ]
+    )
+    routing = SelectionProviderConfig(api_key="test-key")
+    repository, _application, controller = build_controller(
+        tmp_path, transport, load_config=lambda: routing
+    )
+    ready_selection_open(controller)
+
+    send_and_wait(qapp, controller)
+
+    assert [config.model for _request, config in transport.calls] == [
+        DEFAULT_SELECTION_PRIMARY_MODEL,
+        DEFAULT_SELECTION_FALLBACK_MODEL,
+    ]
+    session = repository.load_active_session()
+    assert session is not None
+    job = repository.latest_job_by_type(session.session_id, JobType.SELECTION_ADVICE)
+    assert job is not None
+    assert repository.selection_provider_attempt_audits(job.job_id) == [
+        (
+            1,
+            DEFAULT_SELECTION_PRIMARY_MODEL,
+            "FAILED",
+            "GEMINI_HTTP_ERROR:429|STATUS=RESOURCE_EXHAUSTED",
+        ),
+        (2, DEFAULT_SELECTION_FALLBACK_MODEL, "SUCCEEDED", ""),
+    ]
+    stored = repository.get_selection_advice(cast(str, session.current_selection_advice_id))
+    assert stored["model"] == DEFAULT_SELECTION_FALLBACK_MODEL
+    repository.close()
+
+
+def test_selection_second_fallback_failure_stops_at_exactly_two_attempts(
+    tmp_path: Path,
+) -> None:
+    qapp = qt_application()
+    transport = FakeSelectionAdviceTransport(
+        responses=[
+            ProviderTransportError("GEMINI_HTTP_ERROR:429"),
+            ProviderTransportError("GEMINI_HTTP_ERROR:429"),
+        ]
+    )
+    repository, _application, controller = build_controller(
+        tmp_path,
+        transport,
+        load_config=lambda: SelectionProviderConfig(api_key="test-key"),
+    )
+    ready_selection_open(controller)
+
+    send_and_wait(qapp, controller)
+
+    assert transport.call_count == 2
+    session = repository.load_active_session()
+    assert session is not None
+    job = repository.latest_job_by_type(session.session_id, JobType.SELECTION_ADVICE)
+    assert job is not None
+    assert len(repository.selection_provider_attempt_audits(job.job_id)) == 2
+    assert job.status is JobStatus.FAILED
+    repository.close()
 
 
 # --- 16. API key / auth header / raw response never leak to UI/DB/log -------

@@ -53,6 +53,31 @@ or set `MAPLE_NEXT_RUNTIME_ROOT` before launching.
   enter board facts by hand and keep playing. Do not wait for UGREEN before continuing a match.
 - **Do not use OBS.** It is not part of this app's capture path.
 
+## Gemini model routing
+
+Production defaults are lane-specific and exact:
+
+| Lane | Primary | Eligible fallback |
+| --- | --- | --- |
+| Selection | `gemini-3.6-flash` | `gemini-3.5-flash` |
+| Turn Advice | `gemini-3.5-flash-lite` | none |
+
+Selection falls back at most once, within the same trusted human activation, and only after
+a positively classified rate-limit, quota, or model-capacity exhaustion response. It never
+falls back for authentication, malformed request/response, schema or binding rejection,
+network failure, timeout, stale result, or a generic provider error. Both provider attempts
+are recorded in the local durable audit with ordinal, model, outcome, and sanitized reason.
+
+Lane-specific overrides, if field authorization requires them, are:
+
+- `MAPLE_NEXT_GEMINI_SELECTION_PRIMARY_MODEL`
+- `MAPLE_NEXT_GEMINI_SELECTION_FALLBACK_MODEL`
+- `MAPLE_NEXT_GEMINI_TURN_MODEL`
+
+`MAPLE_NEXT_GEMINI_MODEL` is intentionally ignored and cannot silently route both lanes.
+All three production defaults use Gemini 3.x-compatible request bodies: strict JSON schema
+output without `temperature`, `top_p`, `top_k`, `candidate_count`, or prefilled model turns.
+
 ## Gemini Turn Advice authorization
 
 - The production Turn provider is fail-closed by default. An API key by itself does not
@@ -65,7 +90,8 @@ or set `MAPLE_NEXT_RUNTIME_ROOT` before launching.
   the launcher process environment. Never paste the API key into this runbook, a command
   transcript, a screenshot, or a GitHub comment.
 - Even when authorized, only a trusted human activation of **SEND TURN TO GEMINI** sends one
-  request. There is no retry, resend, fallback model, or automatic game action.
+  request to `gemini-3.5-flash-lite` (or its lane-specific override). There is no retry,
+  resend, fallback model, or automatic game action.
 
 ## Ending the app
 

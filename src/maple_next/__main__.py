@@ -15,7 +15,7 @@ from maple_next.application.match_service import MatchApplication
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers.transport import (
     GeminiSelectionAdviceTransport,
-    load_provider_config_from_env,
+    load_selection_provider_config_from_env,
 )
 from maple_next.providers.turn_transport import (
     GeminiTurnAdviceTransport,
@@ -75,7 +75,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             MockSelectionAdviceAdapter(),
             gemini_adapter=GeminiSelectionAdviceAdapter(
                 GeminiSelectionAdviceTransport(),
-                load_provider_config_from_env,
+                load_selection_provider_config_from_env,
             ),
             turn_gemini_adapter=build_turn_gemini_adapter(),
         )

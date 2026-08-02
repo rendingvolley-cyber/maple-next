@@ -425,7 +425,7 @@ class SelectionFlowController:
     ) -> OperatorView:
         """Human-only explicit send. Must only be invoked from a trusted gate.
 
-        Creates exactly one immutable job, dispatches exactly one transport
+        Creates exactly one immutable job and dispatches its bounded provider policy
         call off the UI thread, and never auto-applies or auto-retries. The
         provider result — success or failure — arrives later via
         ``on_result`` once the strict binding contract has been applied (or

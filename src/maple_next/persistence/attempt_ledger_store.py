@@ -17,9 +17,77 @@ from maple_next.persistence.base import StoreBase
 
 GEMINI_SELECTION_PRODUCTION_LANE = "GEMINI_SELECTION_PRODUCTION"
 TURN_ADVICE_LANE = "TURN_ADVICE"
+SELECTION_PROVIDER_ATTEMPT_LANE = "GEMINI_SELECTION_PROVIDER"
 
 
 class AttemptLedgerStoreMixin(StoreBase):
+    def start_selection_provider_attempt(
+        self, *, job_id: str, attempt_ordinal: int, model: str
+    ) -> None:
+        """Persist sanitized evidence before one Selection provider call starts."""
+
+        self.connection.execute(
+            """
+            INSERT INTO provider_attempt_audits (
+                job_id, lane, attempt_ordinal, model, outcome, reason,
+                started_at_utc, completed_at_utc
+            ) VALUES (?, ?, ?, ?, 'STARTED', '', ?, NULL)
+            """,
+            (job_id, SELECTION_PROVIDER_ATTEMPT_LANE, attempt_ordinal, model, self._now()),
+        )
+        self.connection.commit()
+
+    def finish_selection_provider_attempt(
+        self, *, job_id: str, attempt_ordinal: int, outcome: str, reason: str = ""
+    ) -> None:
+        """Finish one attempt using only allowlisted outcome/reason metadata."""
+
+        if outcome not in {"SUCCEEDED", "FAILED"}:
+            raise ValueError("invalid provider attempt outcome")
+        cursor = self.connection.execute(
+            """
+            UPDATE provider_attempt_audits
+            SET outcome = ?, reason = ?, completed_at_utc = ?
+            WHERE job_id = ? AND lane = ? AND attempt_ordinal = ?
+              AND outcome = 'STARTED'
+            """,
+            (
+                outcome,
+                reason,
+                self._now(),
+                job_id,
+                SELECTION_PROVIDER_ATTEMPT_LANE,
+                attempt_ordinal,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("PROVIDER_ATTEMPT_AUDIT_NOT_STARTED")
+        self.connection.commit()
+
+    def selection_provider_attempt_audits(
+        self, job_id: str
+    ) -> list[tuple[int, str, str, str]]:
+        """Return ordered, credential-free Selection attempt evidence."""
+
+        rows = self.connection.execute(
+            """
+            SELECT attempt_ordinal, model, outcome, reason
+            FROM provider_attempt_audits
+            WHERE job_id = ? AND lane = ?
+            ORDER BY attempt_ordinal
+            """,
+            (job_id, SELECTION_PROVIDER_ATTEMPT_LANE),
+        ).fetchall()
+        return [
+            (
+                int(row["attempt_ordinal"]),
+                str(row["model"]),
+                str(row["outcome"]),
+                str(row["reason"]),
+            )
+            for row in rows
+        ]
+
     def reserve_gemini_selection_attempt(
         self,
         *,

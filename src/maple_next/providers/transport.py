@@ -24,10 +24,12 @@ from maple_next.providers.selection_request import (
 #: own production boundary in ``turn_transport.py``.
 GEMINI_SOURCE_TYPE = "GEMINI"
 
-_DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_SELECTION_PRIMARY_MODEL = "gemini-3.6-flash"
+DEFAULT_SELECTION_FALLBACK_MODEL = "gemini-3.5-flash"
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 _API_KEY_ENV = "MAPLE_NEXT_GEMINI_API_KEY"
-_MODEL_ENV = "MAPLE_NEXT_GEMINI_MODEL"
+_SELECTION_PRIMARY_MODEL_ENV = "MAPLE_NEXT_GEMINI_SELECTION_PRIMARY_MODEL"
+_SELECTION_FALLBACK_MODEL_ENV = "MAPLE_NEXT_GEMINI_SELECTION_FALLBACK_MODEL"
 _TIMEOUT_ENV = "MAPLE_NEXT_GEMINI_TIMEOUT_SECONDS"
 _HTTP_ERROR_BODY_MAX_BYTES = 16_384
 _ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo"
@@ -53,7 +55,7 @@ class ProviderConfig:
     """Runtime-injected provider configuration. Never part of the domain."""
 
     api_key: str
-    model: str = _DEFAULT_MODEL
+    model: str = DEFAULT_SELECTION_PRIMARY_MODEL
     timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
@@ -65,8 +67,35 @@ class ProviderConfig:
             raise ProviderConfigError("GEMINI_TIMEOUT_INVALID")
 
 
-def load_provider_config_from_env() -> ProviderConfig:
-    """Read API key / model / timeout from the runtime environment only.
+@dataclass(frozen=True, slots=True)
+class SelectionProviderConfig:
+    """Lane-specific Selection primary/fallback policy and shared credentials."""
+
+    api_key: str
+    primary_model: str = DEFAULT_SELECTION_PRIMARY_MODEL
+    fallback_model: str = DEFAULT_SELECTION_FALLBACK_MODEL
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS
+
+    def __post_init__(self) -> None:
+        ProviderConfig(
+            api_key=self.api_key,
+            model=self.primary_model,
+            timeout_seconds=self.timeout_seconds,
+        )
+        if not self.fallback_model.strip():
+            raise ProviderConfigError("GEMINI_MODEL_MISSING")
+        if self.primary_model == self.fallback_model:
+            raise ProviderConfigError("GEMINI_SELECTION_MODELS_NOT_DISTINCT")
+
+    def primary(self) -> ProviderConfig:
+        return ProviderConfig(self.api_key, self.primary_model, self.timeout_seconds)
+
+    def fallback(self) -> ProviderConfig:
+        return ProviderConfig(self.api_key, self.fallback_model, self.timeout_seconds)
+
+
+def load_selection_provider_config_from_env() -> SelectionProviderConfig:
+    """Read Selection-only model policy from the runtime environment.
 
     Raises :class:`ProviderConfigError` when the API key is unset so callers
     can fail closed with zero network calls and a corrective Japanese message.
@@ -75,13 +104,31 @@ def load_provider_config_from_env() -> ProviderConfig:
     api_key = os.environ.get(_API_KEY_ENV, "").strip()
     if not api_key:
         raise ProviderConfigError("GEMINI_API_KEY_MISSING")
-    model = os.environ.get(_MODEL_ENV, "").strip() or _DEFAULT_MODEL
+    primary_model = (
+        os.environ.get(_SELECTION_PRIMARY_MODEL_ENV, "").strip()
+        or DEFAULT_SELECTION_PRIMARY_MODEL
+    )
+    fallback_model = (
+        os.environ.get(_SELECTION_FALLBACK_MODEL_ENV, "").strip()
+        or DEFAULT_SELECTION_FALLBACK_MODEL
+    )
     raw_timeout = os.environ.get(_TIMEOUT_ENV, "").strip()
     try:
         timeout_seconds = float(raw_timeout) if raw_timeout else _DEFAULT_TIMEOUT_SECONDS
     except ValueError as exc:
         raise ProviderConfigError("GEMINI_TIMEOUT_INVALID") from exc
-    return ProviderConfig(api_key=api_key, model=model, timeout_seconds=timeout_seconds)
+    return SelectionProviderConfig(
+        api_key=api_key,
+        primary_model=primary_model,
+        fallback_model=fallback_model,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def load_provider_config_from_env() -> ProviderConfig:
+    """Backward-compatible Selection-primary loader for existing callers/tests."""
+
+    return load_selection_provider_config_from_env().primary()
 
 
 @dataclass(frozen=True, slots=True)

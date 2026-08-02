@@ -23,8 +23,10 @@ from maple_next.providers.turn_request import (
     build_provider_request_body,
 )
 from maple_next.providers.turn_transport import (
+    DEFAULT_TURN_MODEL,
     GEMINI_TURN_SOURCE_TYPE,
     TURN_PROVIDER_AUTHORIZATION_ENV,
+    TURN_PROVIDER_MODEL_ENV,
     GeminiTurnAdviceTransport,
     load_authorized_turn_provider_config_from_env,
 )
@@ -79,12 +81,23 @@ def test_authorization_is_separate_from_api_key_and_fails_closed(
 def test_authorized_config_loads_only_after_exact_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(TURN_PROVIDER_AUTHORIZATION_ENV, "1")
     monkeypatch.setenv("MAPLE_NEXT_GEMINI_API_KEY", "test-key")
-    monkeypatch.setenv("MAPLE_NEXT_GEMINI_MODEL", "test-model")
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_MODEL", "must-not-route-turn")
+    monkeypatch.delenv(TURN_PROVIDER_MODEL_ENV, raising=False)
 
     config = load_authorized_turn_provider_config_from_env()
 
     assert config.api_key == "test-key"
-    assert config.model == "test-model"
+    assert config.model == DEFAULT_TURN_MODEL
+
+
+def test_turn_model_override_is_lane_specific(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(TURN_PROVIDER_AUTHORIZATION_ENV, "1")
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv(TURN_PROVIDER_MODEL_ENV, "turn-only-test-model")
+
+    config = load_authorized_turn_provider_config_from_env()
+
+    assert config.model == "turn-only-test-model"
 
 
 def test_official_adapter_is_production_and_unauthorized_send_stops_before_job(

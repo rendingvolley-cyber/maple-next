@@ -13,7 +13,11 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
-from maple_next.capture.contracts import FramePacket
+from maple_next.capture.contracts import (
+    CANONICAL_FRAME_HEIGHT,
+    CANONICAL_FRAME_WIDTH,
+    FramePacket,
+)
 from maple_next.domain.enums import HpBucket
 
 #: Fixed candidate source tag. Never rename to "accepted"/"canonical" - OCR
@@ -42,6 +46,7 @@ class OcrBundleStatus(StrEnum):
     OCR_FAILED = "OCR_FAILED"
     FRAME_UNAVAILABLE = "FRAME_UNAVAILABLE"
     FRAME_STALE = "FRAME_STALE"
+    FRAME_NOT_CANONICAL = "FRAME_NOT_CANONICAL"
 
 
 class OcrErrorCode(StrEnum):
@@ -69,6 +74,9 @@ OCR_STATUS_MESSAGES: dict[str, str] = {
     ),
     OcrBundleStatus.FRAME_STALE: (
         "最新フレームが古いためOCR候補を使用しません。手動入力で続行できます。"
+    ),
+    OcrBundleStatus.FRAME_NOT_CANONICAL: (
+        "OCR用フレームが1280x720ではありません。手動入力で継続できます。"
     ),
 }
 
@@ -133,6 +141,41 @@ class OcrCandidateContext:
 
     self_active_candidates: tuple[str, ...] = ()
     opponent_active_candidates: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalOcrRoi:
+    """Future OCR ROI in the canonical 1280x720 integer coordinate space."""
+
+    x: int
+    y: int
+    width: int
+    height: int
+
+    def __post_init__(self) -> None:
+        if self.x < 0 or self.y < 0 or self.width <= 0 or self.height <= 0:
+            raise ValueError("OCR ROI must be a positive rectangle")
+        if self.x + self.width > CANONICAL_FRAME_WIDTH:
+            raise ValueError("OCR ROI exceeds canonical width")
+        if self.y + self.height > CANONICAL_FRAME_HEIGHT:
+            raise ValueError("OCR ROI exceeds canonical height")
+
+    @classmethod
+    def from_normalized(
+        cls, *, x: float, y: float, width: float, height: float
+    ) -> CanonicalOcrRoi:
+        """Normalize a 0..1 rectangle once into the canonical coordinate space."""
+
+        if any(value < 0.0 or value > 1.0 for value in (x, y, width, height)):
+            raise ValueError("normalized OCR ROI values must be between 0 and 1")
+        if x + width > 1.0 or y + height > 1.0:
+            raise ValueError("normalized OCR ROI exceeds frame bounds")
+        return cls(
+            x=round(x * CANONICAL_FRAME_WIDTH),
+            y=round(y * CANONICAL_FRAME_HEIGHT),
+            width=round(width * CANONICAL_FRAME_WIDTH),
+            height=round(height * CANONICAL_FRAME_HEIGHT),
+        )
 
 
 def hp_bucket_values() -> tuple[str, ...]:

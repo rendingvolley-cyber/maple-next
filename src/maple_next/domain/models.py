@@ -67,6 +67,17 @@ class SelectionFacts:
 
 
 @dataclass(frozen=True, slots=True)
+class SelfTeamPreset:
+    """Named reusable six-member team, separate from immutable match facts."""
+
+    preset_id: str
+    name: str
+    self_team: tuple[str, str, str, str, str, str]
+    created_at_utc: str
+    updated_at_utc: str
+
+
+@dataclass(frozen=True, slots=True)
 class AppliedSelectionSnapshot:
     applied_selection_id: str
     selected_three: tuple[str, str, str]

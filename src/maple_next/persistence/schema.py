@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -233,7 +233,24 @@ def migrate(connection: sqlite3.Connection) -> None:
             FOREIGN KEY(job_id) REFERENCES async_jobs(job_id)
         );
 
-        UPDATE schema_meta SET schema_version = 10 WHERE singleton_id = 1;
+        CREATE TABLE IF NOT EXISTS self_team_presets (
+            preset_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL UNIQUE,
+            self_team_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS operator_preferences (
+            singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+            last_used_self_team_preset_id TEXT NULL,
+            FOREIGN KEY(last_used_self_team_preset_id)
+                REFERENCES self_team_presets(preset_id) ON DELETE SET NULL
+        );
+        INSERT OR IGNORE INTO operator_preferences(singleton_id) VALUES (1);
+
+        UPDATE schema_meta SET schema_version = 11 WHERE singleton_id = 1;
         """
     )
     _ensure_column(

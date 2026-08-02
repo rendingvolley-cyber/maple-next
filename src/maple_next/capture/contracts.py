@@ -31,6 +31,11 @@ CAPTURE_DEVICE_ENV_VAR = "MAPLE_NEXT_CAPTURE_DEVICE"
 #: the OS-reported video input descriptions.
 DEFAULT_DEVICE_SELECTOR = "UGREEN"
 
+#: Single canonical pixel coordinate space shared by preview and future OCR.
+CANONICAL_FRAME_WIDTH = 1280
+CANONICAL_FRAME_HEIGHT = 720
+CANONICAL_FRAME_ASPECT_RATIO = (16, 9)
+
 
 class CaptureStatusCode(StrEnum):
     STOPPED = "STOPPED"
@@ -131,7 +136,12 @@ class CaptureStatus:
 
 @dataclass(frozen=True, slots=True)
 class FramePacket:
-    """A single captured frame, detached/copied so it survives backend reuse."""
+    """A canonical working frame shared unchanged by preview and future OCR.
+
+    ``width``/``height`` describe the 1280x720 working image. Source dimensions
+    remain metadata only; consumers must use the canonical pixel coordinate
+    space and must not create their own resized working copies.
+    """
 
     frame_id: str
     source: str
@@ -140,6 +150,9 @@ class FramePacket:
     width: int
     height: int
     image: Any = None
+    source_width: int | None = None
+    source_height: int | None = None
+    canonical_resize_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)

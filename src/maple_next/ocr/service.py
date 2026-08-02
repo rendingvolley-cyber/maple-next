@@ -14,7 +14,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from maple_next.capture.contracts import CaptureStatus, FramePacket
+from maple_next.capture.contracts import (
+    CANONICAL_FRAME_HEIGHT,
+    CANONICAL_FRAME_WIDTH,
+    CaptureStatus,
+    FramePacket,
+)
 from maple_next.ocr.contracts import (
     LOW_CONFIDENCE_THRESHOLD,
     OcrBundleStatus,
@@ -59,6 +64,15 @@ class OcrCandidateService:
         if not fresh:
             return self._bundle(
                 OcrBundleStatus.FRAME_STALE,
+                frame_id=frame.frame_id,
+                frame_captured_at_utc=frame.captured_at_utc,
+                frame_age_ms=frame_age_ms,
+                candidates=(),
+                error_code=None,
+            )
+        if frame.width != CANONICAL_FRAME_WIDTH or frame.height != CANONICAL_FRAME_HEIGHT:
+            return self._bundle(
+                OcrBundleStatus.FRAME_NOT_CANONICAL,
                 frame_id=frame.frame_id,
                 frame_captured_at_utc=frame.captured_at_utc,
                 frame_age_ms=frame_age_ms,

@@ -19,6 +19,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from maple_next.capture.canonical import canonicalize_frame_packet
 from maple_next.capture.contracts import (
     CAPTURE_DEVICE_ENV_VAR,
     DEFAULT_DEVICE_SELECTOR,
@@ -94,6 +95,8 @@ class CaptureService(QObject):
         self._monotonic_clock = monotonic_clock
         self._wall_clock = wall_clock
         self._status = self._stopped_status()
+        self._canonical_frame: FramePacket | None = None
+        self._source_frame_id: str | None = None
 
     # -- public UI-facing interface -------------------------------------------------
 
@@ -141,6 +144,8 @@ class CaptureService(QObject):
     def stop(self) -> CaptureStatus:
         with contextlib.suppress(Exception):  # stop() must be safe to call always
             self._backend.stop()
+        self._canonical_frame = None
+        self._source_frame_id = None
         status = self._stopped_status()
         self._set_status(status)
         return status
@@ -160,7 +165,7 @@ class CaptureService(QObject):
         if not self._backend.is_running():
             return self._status, None
         try:
-            frame = self._backend.get_latest_frame()
+            source_frame = self._backend.get_latest_frame()
         except Exception:  # noqa: BLE001
             status = self._build_status(
                 CaptureStatusCode.CAPTURE_ERROR,
@@ -169,7 +174,8 @@ class CaptureService(QObject):
             )
             self._set_status(status)
             return status, None
-        status = self._status_from_frame(frame)
+        frame = self._canonicalize_once(source_frame)
+        status = self._status_from_frame(frame or source_frame)
         self._set_status(status)
         return status, frame
 
@@ -180,10 +186,20 @@ class CaptureService(QObject):
     # -- internals --------------------------------------------------------------
 
     def _on_frame(self, frame: FramePacket) -> None:
-        status = self._status_from_frame(frame)
+        canonical = self._canonicalize_once(frame)
+        status = self._status_from_frame(canonical or frame)
         self._set_status(status)
-        if _QT_CORE_AVAILABLE:
-            self.frame_ready.emit(frame)
+        if _QT_CORE_AVAILABLE and canonical is not None:
+            self.frame_ready.emit(canonical)
+
+    def _canonicalize_once(self, frame: FramePacket | None) -> FramePacket | None:
+        if frame is None:
+            return None
+        if frame.frame_id == self._source_frame_id:
+            return self._canonical_frame
+        self._source_frame_id = frame.frame_id
+        self._canonical_frame = canonicalize_frame_packet(frame)
+        return self._canonical_frame
 
     def _status_from_frame(self, frame: FramePacket | None) -> CaptureStatus:
         if frame is None:

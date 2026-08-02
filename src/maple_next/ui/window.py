@@ -151,11 +151,9 @@ class MapleMainWindow(QMainWindow):
         self._capture_timer = QTimer(self)
         self._capture_timer.setInterval(_CAPTURE_POLL_INTERVAL_MS)
         self._capture_timer.timeout.connect(self._poll_capture_status)
-        frame_ready = getattr(self._capture_service, "frame_ready", None)
-        if frame_ready is not None:
-            frame_ready.connect(self._on_frame_ready)
 
         self._build_ui()
+        self._restore_last_used_self_team_preset()
         self.render_view()
 
         if auto_start_capture:
@@ -264,6 +262,7 @@ class MapleMainWindow(QMainWindow):
         self.header_tabs.addTab(battle_scroll, "バトルレコード")
 
         self._build_selection_facts_group()
+        self._build_self_team_presets_group()
         self._build_mock_advice_group()
         self._build_gemini_send_group()
         self._build_advice_display_group()
@@ -402,12 +401,6 @@ class MapleMainWindow(QMainWindow):
         self._latest_ocr_bundle = bundle
         self._render_ocr_candidates(bundle)
 
-    def _on_frame_ready(self, _frame: object) -> None:
-        """Render the callback's newest snapshot without waiting for the poll timer."""
-
-        status, frame = self._capture_service.latest_snapshot()
-        self._render_capture_status(status, frame)
-
     def _render_capture_status(
         self, status: CaptureStatus, frame: FramePacket | None = None
     ) -> None:
@@ -435,12 +428,12 @@ class MapleMainWindow(QMainWindow):
 
     @staticmethod
     def _detached_qimage(image: object) -> QImage | None:
-        """Return a validated QImage detached from a producer-owned buffer."""
+        """Validate the already-detached canonical image without another copy."""
 
         if isinstance(image, QImage):
-            detached = image.copy()
+            detached = image
         elif isinstance(image, QPixmap):
-            detached = image.toImage().copy()
+            detached = image.toImage()
         else:
             return None
         if detached.isNull() or detached.width() <= 0 or detached.height() <= 0:
@@ -459,11 +452,19 @@ class MapleMainWindow(QMainWindow):
         target_size = self.capture_preview_label.size()
         if target_size.width() <= 0 or target_size.height() <= 0:
             target_size = self.capture_preview_label.sizeHint()
-        scaled = self._capture_preview_pixmap.scaled(
-            target_size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        ).copy()
+        source_size = self._capture_preview_pixmap.size()
+        target_contains_source = (
+            target_size.width() >= source_size.width()
+            and target_size.height() >= source_size.height()
+        )
+        if target_contains_source:
+            scaled = self._capture_preview_pixmap
+        else:
+            scaled = self._capture_preview_pixmap.scaled(
+                target_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
         if scaled.isNull():
             return False
         self.capture_preview_label.setText("")
@@ -477,11 +478,12 @@ class MapleMainWindow(QMainWindow):
         """Render pixels only when fresh metadata and the same frame are valid."""
 
         if not status.fresh or not isinstance(frame, FramePacket):
-            placeholder = (
-                _PREVIEW_STALE_LABEL
-                if not status.fresh and status.status == CaptureStatusCode.FRAME_STALE
-                else _PREVIEW_UNAVAILABLE_LABEL
-            )
+            if not status.fresh and status.status == CaptureStatusCode.FRAME_STALE:
+                placeholder = _PREVIEW_STALE_LABEL
+            elif status.status == CaptureStatusCode.AVAILABLE:
+                placeholder = _PREVIEW_INVALID_LABEL
+            else:
+                placeholder = _PREVIEW_UNAVAILABLE_LABEL
             self._clear_capture_preview(placeholder=placeholder)
             return False
 
@@ -492,7 +494,7 @@ class MapleMainWindow(QMainWindow):
         if detached is None:
             self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
             return False
-        pixmap = QPixmap.fromImage(detached).copy()
+        pixmap = QPixmap.fromImage(detached)
         if pixmap.isNull():
             self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
             return False
@@ -568,6 +570,132 @@ class MapleMainWindow(QMainWindow):
         self.confirm_facts_button.clicked.connect(self._on_confirm_facts)
         layout.addWidget(self.confirm_facts_button, 7, 0, 1, 2)
         self._selection_layout.addWidget(self.selection_facts_group)
+
+    def _build_self_team_presets_group(self) -> None:
+        self.self_team_presets_group = QGroupBox("自分の構築プリセット")
+        layout = QFormLayout(self.self_team_presets_group)
+        self.self_team_preset_box = QComboBox()
+        self.self_team_preset_box.currentIndexChanged.connect(
+            self._on_self_team_preset_selected
+        )
+        self.self_team_preset_name = QLineEdit()
+        self.self_team_preset_name.setPlaceholderText("構築名")
+        layout.addRow("一覧", self.self_team_preset_box)
+        layout.addRow("構築名", self.self_team_preset_name)
+
+        buttons = QWidget()
+        button_layout = QHBoxLayout(buttons)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        self.save_self_team_preset_button = QPushButton("新規保存")
+        self.use_self_team_preset_button = QPushButton("この構築を使用")
+        self.update_self_team_preset_button = QPushButton("更新")
+        self.delete_self_team_preset_button = QPushButton("削除")
+        self.save_self_team_preset_button.clicked.connect(self._on_save_self_team_preset)
+        self.use_self_team_preset_button.clicked.connect(self._on_use_self_team_preset)
+        self.update_self_team_preset_button.clicked.connect(self._on_update_self_team_preset)
+        self.delete_self_team_preset_button.clicked.connect(self._on_delete_self_team_preset)
+        for button in (
+            self.save_self_team_preset_button,
+            self.use_self_team_preset_button,
+            self.update_self_team_preset_button,
+            self.delete_self_team_preset_button,
+        ):
+            button_layout.addWidget(button)
+        layout.addRow(buttons)
+        helper = QLabel(
+            "使用後は今回限りの手動修正ができます。6体確認時に試合用snapshotを保存します。"
+        )
+        helper.setWordWrap(True)
+        layout.addRow(helper)
+        self._selection_layout.addWidget(self.self_team_presets_group)
+        self._refresh_self_team_presets()
+
+    def _refresh_self_team_presets(self, selected_id: str | None = None) -> None:
+        self.self_team_preset_box.blockSignals(True)
+        self.self_team_preset_box.clear()
+        self.self_team_preset_box.addItem("選択してください", None)
+        selected_index = 0
+        for preset in self._controller.list_self_team_presets():
+            self.self_team_preset_box.addItem(preset.name, preset.preset_id)
+            if preset.preset_id == selected_id:
+                selected_index = self.self_team_preset_box.count() - 1
+        self.self_team_preset_box.setCurrentIndex(selected_index)
+        self.self_team_preset_box.blockSignals(False)
+        self._update_self_team_preset_buttons()
+
+    def _selected_self_team_preset_id(self) -> str | None:
+        value = self.self_team_preset_box.currentData()
+        return value if isinstance(value, str) and value else None
+
+    def _restore_last_used_self_team_preset(self) -> None:
+        preset = self._controller.last_used_self_team_preset()
+        if preset is None:
+            return
+        self._copy_self_team_to_inputs(preset.self_team)
+        self._refresh_self_team_presets(preset.preset_id)
+        self.self_team_preset_name.setText(preset.name)
+
+    def _copy_self_team_to_inputs(self, team: Sequence[str]) -> None:
+        for field, value in zip(self.self_team_inputs, team, strict=True):
+            field.setText(value)
+
+    def _on_self_team_preset_selected(self, _index: int) -> None:
+        preset_id = self._selected_self_team_preset_id()
+        preset = next(
+            (
+                item
+                for item in self._controller.list_self_team_presets()
+                if item.preset_id == preset_id
+            ),
+            None,
+        )
+        self.self_team_preset_name.setText(preset.name if preset is not None else "")
+        self._update_self_team_preset_buttons()
+
+    def _update_self_team_preset_buttons(self) -> None:
+        selected = self._selected_self_team_preset_id() is not None
+        self.use_self_team_preset_button.setEnabled(selected)
+        self.update_self_team_preset_button.setEnabled(selected)
+        self.delete_self_team_preset_button.setEnabled(selected)
+
+    def _on_save_self_team_preset(self, _checked: bool = False) -> None:
+        view = self._controller.save_self_team_preset(
+            self.self_team_preset_name.text(),
+            [field.text() for field in self.self_team_inputs],
+        )
+        self._refresh_self_team_presets()
+        self.render_view(view)
+
+    def _on_use_self_team_preset(self, _checked: bool = False) -> None:
+        preset_id = self._selected_self_team_preset_id()
+        if preset_id is None:
+            return
+        preset = self._controller.use_self_team_preset(preset_id)
+        if preset is not None:
+            self._copy_self_team_to_inputs(preset.self_team)
+            self.self_team_preset_name.setText(preset.name)
+        self.render_view(self._controller.refresh())
+
+    def _on_update_self_team_preset(self, _checked: bool = False) -> None:
+        preset_id = self._selected_self_team_preset_id()
+        if preset_id is None:
+            return
+        view = self._controller.update_self_team_preset(
+            preset_id,
+            self.self_team_preset_name.text(),
+            [field.text() for field in self.self_team_inputs],
+        )
+        self._refresh_self_team_presets(preset_id)
+        self.render_view(view)
+
+    def _on_delete_self_team_preset(self, _checked: bool = False) -> None:
+        preset_id = self._selected_self_team_preset_id()
+        if preset_id is None:
+            return
+        view = self._controller.delete_self_team_preset(preset_id)
+        self._refresh_self_team_presets()
+        self.self_team_preset_name.clear()
+        self.render_view(view)
 
     def _build_mock_advice_group(self) -> None:
         self.mock_group = QGroupBox("開発用 MOCK Selection Advice — ネットワーク送信なし")
@@ -821,6 +949,7 @@ class MapleMainWindow(QMainWindow):
         self.new_match_button.setEnabled(projection.primary_cta_enabled)
         selection_open = projection.session_state == "SELECTION_OPEN"
         self.selection_facts_group.setVisible(selection_open)
+        self.self_team_presets_group.setVisible(selection_open)
 
         battle_record_states = {
             "BATTLE_READY",
@@ -843,6 +972,13 @@ class MapleMainWindow(QMainWindow):
         self.confirm_facts_button.setEnabled(facts_editable)
         for field in (*self.self_team_inputs, *self.opponent_team_inputs):
             field.setEnabled(facts_editable)
+        self.save_self_team_preset_button.setEnabled(facts_editable)
+        self.use_self_team_preset_button.setEnabled(
+            facts_editable and self._selected_self_team_preset_id() is not None
+        )
+        self.update_self_team_preset_button.setEnabled(
+            facts_editable and self._selected_self_team_preset_id() is not None
+        )
 
         if current.self_team and current.self_team != self._loaded_team:
             self._loaded_team = current.self_team

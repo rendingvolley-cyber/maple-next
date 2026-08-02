@@ -236,6 +236,10 @@ def test_injected_non_black_frame_is_drawn_with_matching_identity(tmp_path: Path
     assert window._capture_preview_frame_id == frame.frame_id  # noqa: SLF001
     status, snapshot_frame = window._capture_service.latest_snapshot()  # noqa: SLF001
     assert status.frame_id == snapshot_frame.frame_id == window._capture_preview_frame_id  # noqa: SLF001
+    assert window._latest_ocr_bundle is not None  # noqa: SLF001
+    assert window._latest_ocr_bundle.frame_id == window._capture_preview_frame_id  # noqa: SLF001
+    assert snapshot_frame.width == 1280 and snapshot_frame.height == 720
+    assert snapshot_frame.canonical_resize_count == 1
     assert "preview表示中" in window.capture_status_label.text()
 
     window.close()

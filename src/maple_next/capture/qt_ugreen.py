@@ -13,6 +13,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
+from typing import TypeVar
 
 from maple_next.capture.contracts import DeviceOpenResult, FramePacket
 
@@ -40,6 +41,22 @@ def select_ugreen_device(descriptions: Sequence[str], selector: str) -> int | No
     for index, description in enumerate(descriptions):
         if needle in description.lower():
             return index
+    return None
+
+
+_CameraFormatT = TypeVar("_CameraFormatT")
+
+
+def select_exact_720p_format(formats: Sequence[_CameraFormatT]) -> _CameraFormatT | None:
+    """Return the first device format whose declared resolution is 1280x720."""
+
+    for camera_format in formats:
+        try:
+            resolution = camera_format.resolution()  # type: ignore[attr-defined]
+            if resolution.width() == 1280 and resolution.height() == 720:
+                return camera_format
+        except Exception:  # noqa: BLE001 - malformed driver format is ignored
+            continue
     return None
 
 
@@ -95,6 +112,10 @@ class QtMultimediaUgreenBackend:
 
             self._owner = QObject()
             camera = QCamera(chosen, self._owner)
+            with contextlib.suppress(Exception):
+                exact_format = select_exact_720p_format(chosen.videoFormats())
+                if exact_format is not None:
+                    camera.setCameraFormat(exact_format)
             capture_session = QMediaCaptureSession(self._owner)
             video_sink = QVideoSink(self._owner)
             capture_session.setCamera(camera)

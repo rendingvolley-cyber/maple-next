@@ -36,6 +36,7 @@ from maple_next.capture.contracts import (
 from maple_next.capture.qt_ugreen import QtMultimediaUgreenBackend
 from maple_next.capture.service import CaptureService
 from maple_next.domain.enums import ActionOrder, ActionType, HpBucket
+from maple_next.domain.team_build import ChampionsTeamBuild
 from maple_next.ocr.contracts import (
     OcrCandidate,
     OcrCandidateBackend,
@@ -45,7 +46,13 @@ from maple_next.ocr.contracts import (
 )
 from maple_next.ocr.service import OcrCandidateService, UnavailableOcrCandidateBackend
 from maple_next.ui.controller import OperatorView, SelectionFlowController, TurnFactsView
-from maple_next.ui.team_import import TeamImportError, read_team_import
+from maple_next.ui.team_build_editor import ChampionsTeamBuildEditor
+from maple_next.ui.team_import import (
+    ImportedTeam,
+    TeamImportError,
+    read_team_import,
+    write_team_export,
+)
 from maple_next.ui.trusted_input import TrustedSendButton
 
 #: Poll interval for capture status / OCR candidate refresh. Display-only:
@@ -137,6 +144,12 @@ class MapleMainWindow(QMainWindow):
         super().__init__()
         self._controller = controller
         self._loaded_team: tuple[str, ...] = ()
+        self._staged_self_team_build: ChampionsTeamBuild | None = None
+        self._suspend_team_name_binding = False
+        self._suspend_move_prefill = False
+        self._move_user_edited = [False, False, False, False]
+        self._auto_prefilled_moves: list[str | None] = [None, None, None, None]
+        self._last_rendered_session_state: str | None = None
         self._loaded_applied_three: tuple[str, ...] = ()
         self._loaded_turn_number: int | None = None
         self._loaded_turn_facts_id: str | None = None
@@ -612,6 +625,13 @@ class MapleMainWindow(QMainWindow):
             self_input.setPlaceholderText(f"自分 {index + 1}体目")
             self.self_team_inputs.append(self_input)
             layout.addWidget(self_input, index + 1, 0)
+            self_input.textChanged.connect(self._on_self_team_name_changed)
+        self.edit_self_team_build_button = QPushButton("Edit detailed team")
+        self.edit_self_team_build_button.clicked.connect(self._on_edit_self_team_build)
+        layout.addWidget(self.edit_self_team_build_button, 7, 0)
+        self.team_build_status_label = QLabel("NAMES_ONLY")
+        self.team_build_status_label.setWordWrap(True)
+        layout.addWidget(self.team_build_status_label, 8, 0)
         self._selection_layout.addWidget(self.self_team_group)
 
     def _build_opponent_facts_group(self) -> None:
@@ -656,12 +676,15 @@ class MapleMainWindow(QMainWindow):
         self.delete_self_team_preset_button.clicked.connect(self._on_delete_self_team_preset)
         self.import_self_team_button = QPushButton("構築をインポート")
         self.import_self_team_button.clicked.connect(self._on_import_self_team)
+        self.export_self_team_button = QPushButton("Export team JSON")
+        self.export_self_team_button.clicked.connect(self._on_export_self_team)
         for button in (
             self.save_self_team_preset_button,
             self.use_self_team_preset_button,
             self.update_self_team_preset_button,
             self.delete_self_team_preset_button,
             self.import_self_team_button,
+            self.export_self_team_button,
         ):
             button_layout.addWidget(button)
         layout.addRow(buttons)
@@ -693,8 +716,13 @@ class MapleMainWindow(QMainWindow):
         return value if isinstance(value, str) and value else None
 
     def _copy_self_team_to_inputs(self, team: Sequence[str]) -> None:
-        for field, value in zip(self.self_team_inputs, team, strict=True):
-            field.setText(value)
+        previous = self._suspend_team_name_binding
+        self._suspend_team_name_binding = True
+        try:
+            for field, value in zip(self.self_team_inputs, team, strict=True):
+                field.setText(value)
+        finally:
+            self._suspend_team_name_binding = previous
 
     def _on_self_team_preset_selected(self, _index: int) -> None:
         if not self._mutation_slots_allowed():
@@ -724,6 +752,7 @@ class MapleMainWindow(QMainWindow):
         view = self._controller.save_self_team_preset(
             self.self_team_preset_name.text(),
             [field.text() for field in self.self_team_inputs],
+            self._staged_self_team_build,
         )
         self._refresh_self_team_presets()
         self.render_view(view)
@@ -738,6 +767,8 @@ class MapleMainWindow(QMainWindow):
         if preset is not None:
             self._copy_self_team_to_inputs(preset.self_team)
             self.self_team_preset_name.setText(preset.name)
+            self._staged_self_team_build = preset.team_build
+            self.team_build_status_label.setText(preset.status)
         self.render_view(self._controller.refresh())
 
     def _on_update_self_team_preset(self, _checked: bool = False) -> None:
@@ -750,6 +781,7 @@ class MapleMainWindow(QMainWindow):
             preset_id,
             self.self_team_preset_name.text(),
             [field.text() for field in self.self_team_inputs],
+            self._staged_self_team_build,
         )
         self._refresh_self_team_presets(preset_id)
         self.render_view(view)
@@ -763,7 +795,76 @@ class MapleMainWindow(QMainWindow):
         view = self._controller.delete_self_team_preset(preset_id)
         self._refresh_self_team_presets()
         self.self_team_preset_name.clear()
+        self._staged_self_team_build = None
+        self._controller.stage_self_team_build(None)
+        self.team_build_status_label.setText("NAMES_ONLY")
         self.render_view(view)
+
+    def _on_self_team_name_changed(self, _text: str = "") -> None:
+        if self._suspend_team_name_binding:
+            return
+        if self._staged_self_team_build is None:
+            return
+        names = tuple(field.text().strip() for field in self.self_team_inputs)
+        if names != self._staged_self_team_build.pokemon_names:
+            self._staged_self_team_build = None
+            self._controller.stage_self_team_build(None)
+            self.team_build_status_label.setText("NAMES_ONLY")
+
+    def _on_edit_self_team_build(self, _checked: bool = False) -> None:
+        # Keep the guard first: fallback rendering cannot even open a dialog.
+        if not self._mutation_slots_allowed():
+            return
+        names = tuple(field.text().strip() for field in self.self_team_inputs)
+        initial = self._staged_self_team_build
+        if initial is not None and initial.pokemon_names != names:
+            initial = None
+        editor = ChampionsTeamBuildEditor(
+            initial_build=initial,
+            pokemon_names=names if initial is None else None,
+            persistence_reads_allowed=True,
+            parent=self,
+        )
+        if editor.exec() == editor.DialogCode.Accepted and editor.staged_build is not None:
+            self._staged_self_team_build = editor.staged_build
+            self._controller.stage_self_team_build(editor.staged_build)
+            self.team_build_status_label.setText("DETAILED")
+            self.render_view()
+
+    def _on_export_self_team(self, _checked: bool = False) -> None:
+        # Export is always a human-selected file action; it is never called by
+        # render_view or startup restoration.
+        if not self._mutation_slots_allowed():
+            return
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export team JSON",
+            "",
+            "Maple JSON (*.json)",
+        )
+        if not path:
+            return
+        names = tuple(field.text().strip() for field in self.self_team_inputs)
+        try:
+            if len(names) != 6 or any(not name for name in names) or len(set(names)) != 6:
+                raise TeamImportError("six unique team names are required")
+            build = self._staged_self_team_build
+            imported = ImportedTeam(
+                pokemon=(names[0], names[1], names[2], names[3], names[4], names[5]),
+                name=self.self_team_preset_name.text().strip() or None,
+                team_build=build if build is not None and build.pokemon_names == names else None,
+            )
+            write_team_export(
+                path,
+                imported,
+                repository_root=Path(__file__).resolve().parents[3],
+            )
+        except (TeamImportError, ValueError) as error:
+            self.error_label.setText(f"team export failed: {error}")
+            self.error_label.setVisible(True)
+            return
+        self.error_label.clear()
+        self.error_label.setVisible(False)
 
     def _on_import_self_team(self, _checked: bool = False) -> None:
         """Import only after a human activates the button; never on startup."""
@@ -785,7 +886,14 @@ class MapleMainWindow(QMainWindow):
             self.error_label.setVisible(True)
             return
 
-        self._copy_self_team_to_inputs(imported.pokemon)
+        self._suspend_team_name_binding = True
+        try:
+            self._copy_self_team_to_inputs(imported.pokemon)
+        finally:
+            self._suspend_team_name_binding = False
+        self._staged_self_team_build = imported.team_build
+        self._controller.stage_self_team_build(imported.team_build)
+        self.team_build_status_label.setText(imported.status)
         if imported.name is not None:
             self.self_team_preset_name.setText(imported.name)
         self.error_label.setText("")
@@ -879,6 +987,7 @@ class MapleMainWindow(QMainWindow):
         self.turn_facts_group = QGroupBox("Turn facts — 人間が確認・修正")
         layout = QFormLayout(self.turn_facts_group)
         self.self_active_box = QComboBox()
+        self.self_active_box.currentTextChanged.connect(self._on_turn_active_changed)
         self.opponent_active_input = QLineEdit()
         self.opponent_active_input.setPlaceholderText("相手のactive")
         self.self_hp_box = QComboBox()
@@ -896,6 +1005,9 @@ class MapleMainWindow(QMainWindow):
             field = QLineEdit()
             field.setPlaceholderText(f"合法move {index + 1}")
             self.move_inputs.append(field)
+            field.textChanged.connect(
+                lambda _text, move_index=index: self._on_move_text_changed(move_index)
+            )
             layout.addRow(f"合法move {index + 1}", field)
 
         switch_widget = QWidget()
@@ -1029,6 +1141,7 @@ class MapleMainWindow(QMainWindow):
         if not self._persistence_reads_allowed:
             self._capture_timer.stop()
         projection = current.projection
+        self._last_rendered_session_state = projection.session_state
         self.application_mode_label.setText(projection.application_mode)
         self.session_state_label.setText(projection.session_state or "—")
         self.provider_status_label.setText(projection.provider_status)
@@ -1088,6 +1201,8 @@ class MapleMainWindow(QMainWindow):
         self.self_team_preset_name.setEnabled(preset_controls_enabled)
         self.save_self_team_preset_button.setEnabled(preset_controls_enabled)
         self.import_self_team_button.setEnabled(preset_controls_enabled)
+        self.export_self_team_button.setEnabled(preset_controls_enabled)
+        self.edit_self_team_build_button.setEnabled(preset_controls_enabled)
         self.use_self_team_preset_button.setEnabled(
             preset_controls_enabled and preset_selected
         )
@@ -1098,11 +1213,21 @@ class MapleMainWindow(QMainWindow):
             preset_controls_enabled and preset_selected
         )
 
+        if current.self_team_build is not None:
+            self._staged_self_team_build = current.self_team_build
+        elif projection.current_reviewed_selection_id is not None:
+            self._staged_self_team_build = None
+        self.team_build_status_label.setText(current.self_team_build_status)
+
         if current.self_team and current.self_team != self._loaded_team:
             self._loaded_team = current.self_team
             self._populate_team_controls(current.self_team)
-            for field, value in zip(self.self_team_inputs, current.self_team, strict=True):
-                field.setText(value)
+            self._suspend_team_name_binding = True
+            try:
+                for field, value in zip(self.self_team_inputs, current.self_team, strict=True):
+                    field.setText(value)
+            finally:
+                self._suspend_team_name_binding = False
             for field, value in zip(
                 self.opponent_team_inputs, current.opponent_team, strict=True
             ):
@@ -1238,6 +1363,8 @@ class MapleMainWindow(QMainWindow):
             self.update_self_team_preset_button,
             self.delete_self_team_preset_button,
             self.import_self_team_button,
+            self.export_self_team_button,
+            self.edit_self_team_build_button,
             self.mock_submit_button,
             self.gemini_send_button,
             self.apply_button,
@@ -1272,42 +1399,95 @@ class MapleMainWindow(QMainWindow):
         self.apply_confirm_checkbox.setChecked(False)
         self._update_mock_lead_options()
 
+    def _on_move_text_changed(self, index: int) -> None:
+        if not self._suspend_move_prefill:
+            self._move_user_edited[index] = True
+
+    def _on_turn_active_changed(self, _text: str = "") -> None:
+        if self._suspend_move_prefill:
+            return
+        self._prefill_legal_moves_for_active()
+
+    def _prefill_legal_moves_for_active(self) -> None:
+        """Fill only untouched draft move fields from a confirmed build."""
+
+        if self._last_rendered_session_state != "TURN_CAPTURE_PENDING":
+            return
+        build = self._staged_self_team_build
+        active = self.self_active_box.currentText().strip()
+        if build is None or not active or active == _PLACEHOLDER:
+            return
+        try:
+            member = build.member_by_name(active)
+        except KeyError:
+            return
+        self._suspend_move_prefill = True
+        try:
+            for index, field in enumerate(self.move_inputs):
+                old_auto = self._auto_prefilled_moves[index]
+                untouched = not self._move_user_edited[index] and (
+                    old_auto is None or field.text() == old_auto
+                )
+                if not untouched:
+                    continue
+                value = member.moves[index] if index < len(member.moves) else ""
+                field.setText(value)
+                self._auto_prefilled_moves[index] = value
+        finally:
+            self._suspend_move_prefill = False
+
     def _populate_turn_selection_controls(self, selected_three: Sequence[str]) -> None:
-        self.self_active_box.clear()
-        self.self_active_box.addItem(_PLACEHOLDER)
-        self.self_active_box.addItems(list(selected_three))
+        self._suspend_move_prefill = True
+        try:
+            self.self_active_box.clear()
+            self.self_active_box.addItem(_PLACEHOLDER)
+            self.self_active_box.addItems(list(selected_three))
+        finally:
+            self._suspend_move_prefill = False
         for checkbox, name in zip(self.switch_checkboxes, selected_three, strict=True):
             checkbox.setText(name)
             checkbox.setChecked(False)
             checkbox.setVisible(True)
 
     def _clear_turn_inputs(self) -> None:
-        self.self_active_box.setCurrentIndex(0)
-        self.opponent_active_input.clear()
-        self.self_hp_box.setCurrentIndex(0)
-        self.opponent_hp_box.setCurrentIndex(0)
-        for field in self.move_inputs:
-            field.clear()
-        for checkbox in self.switch_checkboxes:
-            checkbox.setChecked(False)
-        self.turn_note_input.clear()
-        self.turn_facts_confirm_checkbox.setChecked(False)
-        self.mock_turn_action_type_box.setCurrentIndex(0)
-        self.mock_turn_prediction_input.clear()
-        self.mock_turn_rationale_input.clear()
-        self.mock_turn_warnings_input.clear()
+        self._suspend_move_prefill = True
+        self._move_user_edited = [False, False, False, False]
+        self._auto_prefilled_moves = [None, None, None, None]
+        try:
+            self.self_active_box.setCurrentIndex(0)
+            self.opponent_active_input.clear()
+            self.self_hp_box.setCurrentIndex(0)
+            self.opponent_hp_box.setCurrentIndex(0)
+            for field in self.move_inputs:
+                field.clear()
+            for checkbox in self.switch_checkboxes:
+                checkbox.setChecked(False)
+            self.turn_note_input.clear()
+            self.turn_facts_confirm_checkbox.setChecked(False)
+            self.mock_turn_action_type_box.setCurrentIndex(0)
+            self.mock_turn_prediction_input.clear()
+            self.mock_turn_rationale_input.clear()
+            self.mock_turn_warnings_input.clear()
+        finally:
+            self._suspend_move_prefill = False
 
     def _load_turn_facts(self, facts: TurnFactsView) -> None:
-        self.self_active_box.setCurrentText(facts.self_active)
-        self.opponent_active_input.setText(facts.opponent_active)
-        self.self_hp_box.setCurrentText(facts.self_hp)
-        self.opponent_hp_box.setCurrentText(facts.opponent_hp)
-        for index, field in enumerate(self.move_inputs):
-            field.setText(facts.legal_moves[index] if index < len(facts.legal_moves) else "")
-        for checkbox in self.switch_checkboxes:
-            checkbox.setChecked(checkbox.text() in facts.legal_switches)
-        self.turn_note_input.setText(facts.human_note)
-        self.turn_facts_confirm_checkbox.setChecked(False)
+        self._suspend_move_prefill = True
+        self._move_user_edited = [True, True, True, True]
+        self._auto_prefilled_moves = [None, None, None, None]
+        try:
+            self.self_active_box.setCurrentText(facts.self_active)
+            self.opponent_active_input.setText(facts.opponent_active)
+            self.self_hp_box.setCurrentText(facts.self_hp)
+            self.opponent_hp_box.setCurrentText(facts.opponent_hp)
+            for index, field in enumerate(self.move_inputs):
+                field.setText(facts.legal_moves[index] if index < len(facts.legal_moves) else "")
+            for checkbox in self.switch_checkboxes:
+                checkbox.setChecked(checkbox.text() in facts.legal_switches)
+            self.turn_note_input.setText(facts.human_note)
+            self.turn_facts_confirm_checkbox.setChecked(False)
+        finally:
+            self._suspend_move_prefill = False
 
     def _set_turn_facts_editable(self, enabled: bool) -> None:
         self._turn_facts_editable = enabled
@@ -1404,7 +1584,15 @@ class MapleMainWindow(QMainWindow):
             return
         self_entries = [field.text() for field in self.self_team_inputs]
         opponent_entries = [field.text() for field in self.opponent_team_inputs]
-        view = self._controller.confirm_selection_facts(self_entries, opponent_entries)
+        build = self._staged_self_team_build
+        names = tuple(value.strip() for value in self_entries)
+        if build is None or build.pokemon_names != names:
+            build = None
+        view = self._controller.confirm_selection_facts(
+            self_entries,
+            opponent_entries,
+            self_team_build=build,
+        )
         self.render_view(view)
 
     def _on_submit_mock(self, _checked: bool = False) -> None:

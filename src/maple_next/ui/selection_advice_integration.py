@@ -225,7 +225,19 @@ class SelectionAdviceIntegrationWindow(ExplicitTurnNumberWindow):
         if not self._selection_integration_ready:
             return
 
-        status = self._selection_gemini_controller.selection_advice_status()
+        if current.persistence_reads_allowed:
+            status = self._selection_gemini_controller.selection_advice_status()
+        else:
+            status = SelectionAdviceStatusView(
+                status="UNAVAILABLE",
+                source_type="—",
+                model="—",
+                binding_status="NOT_CHECKED",
+                legality_status="NOT_CHECKED",
+                sanitized_failure="",
+                advice_id=None,
+                can_apply=False,
+            )
         selection_scope = (
             current.projection.current_reviewed_selection_id is not None
             and current.session_state in {"SELECTION_OPEN", "SELECTION_ADVICE_READY"}
@@ -234,7 +246,8 @@ class SelectionAdviceIntegrationWindow(ExplicitTurnNumberWindow):
             self._selection_gemini_controller.gemini_send_available and selection_scope
         )
         self.gemini_send_button.setEnabled(
-            current.primary_cta == "REQUEST_SELECTION_ADVICE"
+            current.persistence_reads_allowed
+            and current.primary_cta == "REQUEST_SELECTION_ADVICE"
             and current.projection.provider_send_enabled
             and status.status not in {"PENDING", "SUCCESS"}
             and not self._selection_gemini_controller.gemini_selection_attempt_consumed()
@@ -271,6 +284,9 @@ class SelectionAdviceIntegrationWindow(ExplicitTurnNumberWindow):
         super()._update_actual_controls(_value)
         if not self._selection_integration_ready:
             return
+        if not getattr(self, "_persistence_reads_allowed", True):
+            self.apply_button.setEnabled(False)
+            return
         status = self._selection_gemini_controller.selection_advice_status()
         lock_to_gemini = status.source_type == GEMINI_SOURCE_TYPE and status.can_apply
         for checkbox in self.actual_checkboxes:
@@ -282,6 +298,8 @@ class SelectionAdviceIntegrationWindow(ExplicitTurnNumberWindow):
             )
 
     def _on_apply(self, _checked: bool = False) -> None:
+        if not self._persistence_reads_allowed:
+            return
         status = self._selection_gemini_controller.selection_advice_status()
         if status.source_type == GEMINI_SOURCE_TYPE:
             view = self._selection_gemini_controller.apply_current_gemini_advice(

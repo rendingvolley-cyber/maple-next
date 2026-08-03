@@ -82,6 +82,10 @@ class OperatorView:
     turn_facts: TurnFactsView | None = None
     turn_advice: TurnAdviceView | None = None
     action_history: tuple[RecordedActionView, ...] = ()
+    persistence_reads_allowed: bool = True
+    """Explicit renderer contract: False means this view was built without a
+    durable DB read and must not trigger any further DB-backed read while
+    rendering (status gates, repository lookups, controller refresh)."""
 
     @property
     def application_mode(self) -> str:

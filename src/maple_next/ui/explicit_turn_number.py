@@ -101,6 +101,8 @@ class ExplicitTurnNumberWindow(MapleMainWindow):
             self.turn_number_input.setEnabled(enabled)
 
     def _on_confirm_turn_facts(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         turn_number_input = self.turn_number_input
         if turn_number_input is None:
             raise RuntimeError("Turn number input is not initialized")

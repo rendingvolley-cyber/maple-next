@@ -141,6 +141,10 @@ class MapleMainWindow(QMainWindow):
         self._loaded_turn_number: int | None = None
         self._loaded_turn_facts_id: str | None = None
         self._current_turn_facts: TurnFactsView | None = None
+        self._persistence_reads_allowed = True
+        self._capture_polling_requested = auto_start_capture
+        self._capture_service_started = False
+        self._capture_lifecycle_initialized = False
 
         # -- Lane B (issue #31): UGREEN capture + OCR candidates -----------------
         # capture_service/ocr_service are display/candidate-only: nothing here
@@ -162,6 +166,7 @@ class MapleMainWindow(QMainWindow):
 
         if auto_start_capture:
             self._start_capture()
+        self._capture_lifecycle_initialized = True
 
     def _start_capture(self) -> None:
         """Human has opened the Battle Record screen; begin passive capture.
@@ -170,24 +175,55 @@ class MapleMainWindow(QMainWindow):
         sanitized status string, and ``manual_entry_allowed`` stays True.
         """
 
-        self._capture_service.start()
-        self._poll_capture_status()
-        self._capture_timer.start()
+        self._capture_polling_requested = True
+        if not self._persistence_reads_allowed:
+            self._capture_timer.stop()
+            return
+        self._resume_capture_polling()
+
+    def _resume_capture_polling(self) -> None:
+        """Resume a previously requested capture poll after a safe render."""
+
+        if not self._persistence_reads_allowed or not self._capture_polling_requested:
+            self._capture_timer.stop()
+            return
+        if not self._capture_service_started:
+            self._capture_service.start()
+            self._capture_service_started = True
+        if not self._capture_timer.isActive():
+            self._poll_capture_status()
+            self._capture_timer.start()
+
+    def _mutation_slots_allowed(self) -> bool:
+        """Fail-closed contract for every mutation-reaching private slot.
+
+        Must be the first statement in every handler that can reach the
+        controller, repository, a provider, capture, the filesystem, or a
+        dialog -- called directly (private slot invocation) or via a
+        button click, since ``persistence_reads_allowed=False`` means
+        canonical state cannot be confirmed either way.
+        """
+
+        return self._persistence_reads_allowed
 
     def _on_reconnect_capture(self, _checked: bool = False) -> None:
         """Perform exactly one human-requested capture reacquisition attempt."""
 
+        if not self._mutation_slots_allowed():
+            return
+        self._capture_polling_requested = True
         self._capture_timer.stop()
         self._capture_service.stop()
-        self._capture_service.start()
-        self._poll_capture_status()
-        self._capture_timer.start()
+        self._capture_service_started = False
+        self._resume_capture_polling()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
         """Clean shutdown: stop capture and release the device on app exit."""
 
         self._capture_timer.stop()
         self._capture_service.stop()
+        self._capture_service_started = False
+        self._capture_polling_requested = False
         super().closeEvent(event)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt override
@@ -392,6 +428,9 @@ class MapleMainWindow(QMainWindow):
     def _poll_capture_status(self) -> None:
         """Timer-driven, display-only refresh. Never a Turn Advice trigger."""
 
+        if not self._persistence_reads_allowed:
+            return
+
         status, frame = self._capture_service.latest_snapshot()
         self._render_capture_status(status, frame)
 
@@ -540,6 +579,8 @@ class MapleMainWindow(QMainWindow):
         edits after adoption always win.
         """
 
+        if not self._mutation_slots_allowed():
+            return
         if self._latest_ocr_bundle is None:
             return
         candidates = [c for c in self._latest_ocr_bundle.candidates if c.field_key == field_key]
@@ -633,6 +674,8 @@ class MapleMainWindow(QMainWindow):
         self._refresh_self_team_presets()
 
     def _refresh_self_team_presets(self, selected_id: str | None = None) -> None:
+        if not self._mutation_slots_allowed():
+            return
         self.self_team_preset_box.blockSignals(True)
         self.self_team_preset_box.clear()
         self.self_team_preset_box.addItem("選択してください", None)
@@ -654,6 +697,8 @@ class MapleMainWindow(QMainWindow):
             field.setText(value)
 
     def _on_self_team_preset_selected(self, _index: int) -> None:
+        if not self._mutation_slots_allowed():
+            return
         preset_id = self._selected_self_team_preset_id()
         preset = next(
             (
@@ -674,6 +719,8 @@ class MapleMainWindow(QMainWindow):
         self.delete_self_team_preset_button.setEnabled(selected)
 
     def _on_save_self_team_preset(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         view = self._controller.save_self_team_preset(
             self.self_team_preset_name.text(),
             [field.text() for field in self.self_team_inputs],
@@ -682,6 +729,8 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_use_self_team_preset(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         preset_id = self._selected_self_team_preset_id()
         if preset_id is None:
             return
@@ -692,6 +741,8 @@ class MapleMainWindow(QMainWindow):
         self.render_view(self._controller.refresh())
 
     def _on_update_self_team_preset(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         preset_id = self._selected_self_team_preset_id()
         if preset_id is None:
             return
@@ -704,6 +755,8 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_delete_self_team_preset(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         preset_id = self._selected_self_team_preset_id()
         if preset_id is None:
             return
@@ -715,6 +768,8 @@ class MapleMainWindow(QMainWindow):
     def _on_import_self_team(self, _checked: bool = False) -> None:
         """Import only after a human activates the button; never on startup."""
 
+        if not self._mutation_slots_allowed():
+            return
         path, _selected_filter = QFileDialog.getOpenFileName(
             self,
             "構築をインポート",
@@ -970,6 +1025,9 @@ class MapleMainWindow(QMainWindow):
 
     def render_view(self, view: OperatorView | None = None) -> None:
         current = view if view is not None else self._controller.refresh()
+        self._persistence_reads_allowed = current.persistence_reads_allowed
+        if not self._persistence_reads_allowed:
+            self._capture_timer.stop()
         projection = current.projection
         self.application_mode_label.setText(projection.application_mode)
         self.session_state_label.setText(projection.session_state or "—")
@@ -1022,11 +1080,23 @@ class MapleMainWindow(QMainWindow):
         for field in self.self_team_inputs:
             field.setEnabled(self_team_editable)
         preset_selected = self._selected_self_team_preset_id() is not None
-        self.save_self_team_preset_button.setEnabled(self_team_editable)
-        self.import_self_team_button.setEnabled(self_team_editable)
-        self.use_self_team_preset_button.setEnabled(self_team_editable and preset_selected)
-        self.update_self_team_preset_button.setEnabled(self_team_editable and preset_selected)
-        self.delete_self_team_preset_button.setEnabled(self_team_editable and preset_selected)
+        preset_controls_enabled = (
+            current.persistence_reads_allowed
+            and self_team_editable
+        )
+        self.self_team_preset_box.setEnabled(preset_controls_enabled)
+        self.self_team_preset_name.setEnabled(preset_controls_enabled)
+        self.save_self_team_preset_button.setEnabled(preset_controls_enabled)
+        self.import_self_team_button.setEnabled(preset_controls_enabled)
+        self.use_self_team_preset_button.setEnabled(
+            preset_controls_enabled and preset_selected
+        )
+        self.update_self_team_preset_button.setEnabled(
+            preset_controls_enabled and preset_selected
+        )
+        self.delete_self_team_preset_button.setEnabled(
+            preset_controls_enabled and preset_selected
+        )
 
         if current.self_team and current.self_team != self._loaded_team:
             self._loaded_team = current.self_team
@@ -1044,7 +1114,8 @@ class MapleMainWindow(QMainWindow):
             and projection.primary_cta == "REQUEST_SELECTION_ADVICE"
         )
         self.gemini_send_button.setEnabled(
-            projection.primary_cta == "REQUEST_SELECTION_ADVICE"
+            current.persistence_reads_allowed
+            and projection.primary_cta == "REQUEST_SELECTION_ADVICE"
             and projection.provider_send_enabled
             and not self._controller.gemini_selection_attempt_consumed()
         )
@@ -1144,6 +1215,44 @@ class MapleMainWindow(QMainWindow):
         self._update_turn_fact_button()
         self._update_mock_turn_action_options()
         self._update_actual_action_button()
+
+        if not current.persistence_reads_allowed:
+            self._disable_mutation_controls()
+        elif self._capture_lifecycle_initialized:
+            self._resume_capture_polling()
+
+    def _disable_mutation_controls(self) -> None:
+        """Fail-closed: force-disable every mutation control this class owns.
+
+        Called whenever the rendered view was built without a durable DB
+        read (cached safe fallback or no-cache PERSISTENCE_UNAVAILABLE), so
+        no programmatic or human click can reach a domain/provider call
+        while canonical state cannot be confirmed.
+        """
+
+        for button in (
+            self.new_match_button,
+            self.confirm_facts_button,
+            self.save_self_team_preset_button,
+            self.use_self_team_preset_button,
+            self.update_self_team_preset_button,
+            self.delete_self_team_preset_button,
+            self.import_self_team_button,
+            self.mock_submit_button,
+            self.gemini_send_button,
+            self.apply_button,
+            self.start_turn_button,
+            self.confirm_turn_facts_button,
+            self.mock_turn_submit_button,
+            self.record_action_button,
+            self.next_turn_button,
+            self.reconnect_capture_button,
+        ):
+            button.setEnabled(False)
+        self.self_team_preset_box.setEnabled(False)
+        self.self_team_preset_name.setEnabled(False)
+        for button in self._ocr_adopt_buttons.values():
+            button.setEnabled(False)
 
     def _populate_team_controls(self, team: Sequence[str]) -> None:
         for box in self.mock_selection_boxes:
@@ -1286,15 +1395,21 @@ class MapleMainWindow(QMainWindow):
         )
 
     def _on_new_match(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         self.render_view(self._controller.new_match())
 
     def _on_confirm_facts(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         self_entries = [field.text() for field in self.self_team_inputs]
         opponent_entries = [field.text() for field in self.opponent_team_inputs]
         view = self._controller.confirm_selection_facts(self_entries, opponent_entries)
         self.render_view(view)
 
     def _on_submit_mock(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         selected = self._selected_combo_values(self.mock_selection_boxes)
         view = self._controller.submit_mock_advice(
             selected, self.mock_lead_box.currentText()
@@ -1302,10 +1417,14 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_trusted_send_to_gemini(self) -> None:
+        if not self._mutation_slots_allowed():
+            return
         view = self._controller.send_selection_advice_to_gemini(on_result=self.render_view)
         self.render_view(view)
 
     def _on_apply(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         view = self._controller.apply_selection(
             self._checked_actual_names(),
             self.actual_lead_box.currentText(),
@@ -1314,9 +1433,13 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_start_turn(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         self.render_view(self._controller.start_turn_capture())
 
     def _on_confirm_turn_facts(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         moves = [field.text().strip() for field in self.move_inputs if field.text().strip()]
         switches = [
             checkbox.text() for checkbox in self.switch_checkboxes if checkbox.isChecked()
@@ -1334,6 +1457,8 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_submit_mock_turn(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         warnings = tuple(
             part.strip()
             for part in self.mock_turn_warnings_input.text().split(";")
@@ -1349,6 +1474,8 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_record_action(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         opponent_type = self.opponent_action_type_box.currentText()
         if opponent_type == _PLACEHOLDER:
             opponent_type = ""
@@ -1363,6 +1490,8 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_next_turn(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         self.render_view(self._controller.next_turn())
 
     def _checked_actual_names(self) -> list[str]:

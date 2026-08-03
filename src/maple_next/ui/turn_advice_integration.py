@@ -271,7 +271,8 @@ class TurnAdviceIntegrationWindow(SelectionAdviceIntegrationWindow):
             available and current.projection.primary_cta == "REQUEST_TURN_ADVICE"
         )
         self.turn_gemini_send_button.setEnabled(
-            current.projection.primary_cta == "REQUEST_TURN_ADVICE"
+            current.persistence_reads_allowed
+            and current.projection.primary_cta == "REQUEST_TURN_ADVICE"
             and status.status != "PENDING"
         )
         self.turn_gemini_status_label.setText(status.status)
@@ -279,6 +280,8 @@ class TurnAdviceIntegrationWindow(SelectionAdviceIntegrationWindow):
         self.turn_gemini_failure_label.setVisible(bool(status.sanitized_failure))
 
     def _on_trusted_send_turn_to_gemini(self) -> None:
+        if not self._persistence_reads_allowed:
+            return
         warnings = tuple(
             part.strip()
             for part in self.mock_turn_warnings_input.text().split(";")

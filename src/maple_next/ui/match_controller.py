@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import sqlite3
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 from maple_next.application.match_service import MatchApplication
+from maple_next.application.projection import DomainProjection
 from maple_next.application.service import DomainError
 from maple_next.domain.enums import MatchOutcome
 from maple_next.persistence.sqlite import SQLiteRepository
@@ -28,6 +31,9 @@ class MatchOperatorView(OperatorView):
 
 
 _MATCH_ERROR_MESSAGES = {
+    "HUMAN_MATCH_ABORT_CONFIRMATION_REQUIRED": "stale対戦を終了するには確認が必要です。",
+    "MATCH_ABORT_NOT_ALLOWED_IN_CURRENT_STATE": "現在の状態ではstale対戦を終了できません。",
+    "NO_ACTIVE_MATCH": "現在、終了対象の対戦はありません。",
     "HUMAN_MATCH_OUTCOME_CONFIRMATION_REQUIRED": "WIN / LOSE確定前に確認チェックを入れてください。",
     "MATCH_OUTCOME_ALREADY_SET": "この対戦の勝敗は既に確定しており変更できません。",
     "MATCH_END_NOT_ALLOWED_IN_CURRENT_STATE": (
@@ -57,6 +63,26 @@ _MATCH_ERROR_MESSAGES = {
     "EXPECTED_MATCH_EXPORTED": "MATCH JSONの保存成功後にNEW MATCHを実行してください。",
 }
 
+_ABORT_FAILURE_MESSAGE = (
+    "stale対戦の終了に失敗しました。canonical stateは変更されていません。"
+)
+_PERSISTENT_ABORT_FAILURE_MESSAGE = (
+    "stale対戦の終了に失敗しました。データベースを読み込めないため、"
+    "直前の安全な画面を維持しています。"
+)
+_END_MATCH_FAILURE_MESSAGE = (
+    "勝敗の保存に失敗しました。canonical stateは変更されていません。"
+)
+_SAVE_MATCH_JSON_FAILURE_MESSAGE = (
+    "MATCH JSONの保存に失敗しました。MATCH_ENDEDを維持しています。"
+)
+_NEW_MATCH_AFTER_EXPORT_FAILURE_MESSAGE = (
+    "NEW MATCHの作成に失敗しました。前試合は変更されていません。"
+)
+_PERSISTENCE_RESULT_UNKNOWN_MESSAGE = (
+    "操作結果をデータベースから確認できません。復旧するまで操作を停止しています。"
+)
+
 
 def _match_message(error: DomainError) -> str:
     code = str(error)
@@ -84,6 +110,7 @@ class MatchFlowController(TurnAdviceIntegrationController):
             turn_gemini_adapter,
         )
         self._match_application = application
+        self._last_safe_match_view: MatchOperatorView | None = None
 
     def refresh(self) -> MatchOperatorView:
         base = super().refresh()
@@ -109,7 +136,7 @@ class MatchFlowController(TurnAdviceIntegrationController):
                 export_path = export.export_path
                 export_sha256 = export.sha256
                 export_schema_version = export.schema_version
-        return MatchOperatorView(
+        view = MatchOperatorView(
             projection=base.projection,
             error_message=base.error_message,
             self_team=base.self_team,
@@ -128,9 +155,11 @@ class MatchFlowController(TurnAdviceIntegrationController):
             export_sha256=export_sha256,
             export_schema_version=export_schema_version,
         )
+        self._last_safe_match_view = view
+        return view
 
     def end_match(self, outcome: str, *, human_confirmed: bool) -> MatchOperatorView:
-        try:
+        def command() -> None:
             try:
                 typed_outcome = MatchOutcome(outcome.strip())
             except ValueError as exc:
@@ -139,34 +168,131 @@ class MatchFlowController(TurnAdviceIntegrationController):
                 typed_outcome,
                 human_confirmed=human_confirmed,
             )
+
+        return self._run_match_persistence_command(
+            command, failure_message=_END_MATCH_FAILURE_MESSAGE
+        )
+
+    def abort_match(self, *, human_confirmed: bool) -> MatchOperatorView:
+        fallback_view = self._last_safe_match_view
+        abort_failed = False
+        try:
+            self._match_application.abort_match(human_confirmed=human_confirmed)
+        except DomainError as error:
+            self._error_message = _match_message(error)
+        except (RuntimeError, sqlite3.Error):
+            abort_failed = True
+            self._error_message = _ABORT_FAILURE_MESSAGE
+        else:
+            self._error_message = None
+        try:
+            return self.refresh()
+        except sqlite3.Error:
+            if not abort_failed:
+                return self._persistence_unavailable_view(
+                    _PERSISTENCE_RESULT_UNKNOWN_MESSAGE
+                )
+            self._error_message = _PERSISTENT_ABORT_FAILURE_MESSAGE
+            if fallback_view is not None:
+                return replace(
+                    fallback_view,
+                    error_message=_PERSISTENT_ABORT_FAILURE_MESSAGE,
+                    persistence_reads_allowed=False,
+                )
+            return self._persistence_unavailable_view()
+
+    def _persistence_unavailable_view(
+        self, message: str = _PERSISTENT_ABORT_FAILURE_MESSAGE
+    ) -> MatchOperatorView:
+        return MatchOperatorView(
+            projection=DomainProjection(
+                application_mode="PERSISTENCE_UNAVAILABLE",
+                primary_cta="PERSISTENCE_UNAVAILABLE",
+                primary_cta_enabled=False,
+                secondary_actions=(),
+                message="PERSISTENCE_UNAVAILABLE",
+                provider_status="UNAVAILABLE",
+                provider_send_enabled=False,
+                session_state="PERSISTENCE_UNAVAILABLE",
+                battle_revision=None,
+                metadata_revision=None,
+                session_id=None,
+                match_id=None,
+                generation=None,
+                current_reviewed_selection_id=None,
+                current_selection_advice_id=None,
+                current_applied_selection_id=None,
+            ),
+            error_message=message,
+            self_team=(),
+            opponent_team=(),
+            advice=None,
+            applied_selection=None,
+            persistence_reads_allowed=False,
+        )
+
+    def _run_match_persistence_command(
+        self,
+        command: Callable[[], object],
+        *,
+        failure_message: str,
+    ) -> MatchOperatorView:
+        """Run one match-lifecycle write with a symmetric SQLite boundary.
+
+        Mirrors ``abort_match``'s fail-closed contract for every sibling
+        mutation (end/export/new-match): a command exception (validation,
+        domain, or persistence) never leaves canonical state changed, so a
+        subsequent read failure may safely fall back to the last cached safe
+        view. A command that *returns normally* may have already committed,
+        so if the immediately following refresh then fails, the outcome is
+        genuinely unknown and must never be represented by a stale pre-
+        command view -- it falls closed to a no-cache PERSISTENCE_UNAVAILABLE
+        view instead.
+        """
+
+        fallback_view = self._last_safe_match_view
+        command_failed = False
+        try:
+            command()
         except OperatorInputError as error:
+            command_failed = True
             self._error_message = str(error)
         except DomainError as error:
+            command_failed = True
             self._error_message = _match_message(error)
-        except RuntimeError:
-            self._error_message = "勝敗の保存に失敗しました。canonical stateは変更されていません。"
+        except (RuntimeError, sqlite3.Error):
+            command_failed = True
+            self._error_message = failure_message
         else:
             self._error_message = None
-        return self.refresh()
+        try:
+            return self.refresh()
+        except sqlite3.Error:
+            if not command_failed:
+                return self._persistence_unavailable_view(
+                    _PERSISTENCE_RESULT_UNKNOWN_MESSAGE
+                )
+            self._error_message = failure_message
+            if fallback_view is not None:
+                return replace(
+                    fallback_view,
+                    error_message=failure_message,
+                    persistence_reads_allowed=False,
+                )
+            return self._persistence_unavailable_view(failure_message)
 
     def save_match_json(self) -> MatchOperatorView:
-        try:
+        def command() -> None:
             self._match_application.export_match()
-        except DomainError as error:
-            self._error_message = _match_message(error)
-        except RuntimeError:
-            self._error_message = "MATCH JSONの保存に失敗しました。MATCH_ENDEDを維持しています。"
-        else:
-            self._error_message = None
-        return self.refresh()
+
+        return self._run_match_persistence_command(
+            command, failure_message=_SAVE_MATCH_JSON_FAILURE_MESSAGE
+        )
 
     def new_match_after_export(self) -> MatchOperatorView:
-        try:
+        def command() -> None:
             self._match_application.new_match_after_export()
-        except DomainError as error:
-            self._error_message = _match_message(error)
-        except RuntimeError:
-            self._error_message = "NEW MATCHの作成に失敗しました。前試合は変更されていません。"
-        else:
-            self._error_message = None
-        return self.refresh()
+
+        return self._run_match_persistence_command(
+            command, failure_message=_NEW_MATCH_AFTER_EXPORT_FAILURE_MESSAGE
+        )

@@ -141,6 +141,31 @@ class BattleApplication:
             self.repository.insert_session(session)
         return session
 
+    def abort_match(self, *, human_confirmed: bool) -> BattleSession:
+        """Preserve an abandoned match while releasing the active slot.
+
+        This is the explicit recovery path for a stale active session. It
+        changes only the session lifecycle fields; all canonical selection,
+        advice, turn, and audit records remain available for provenance.
+        """
+
+        if not human_confirmed:
+            raise DomainError("HUMAN_MATCH_ABORT_CONFIRMATION_REQUIRED")
+
+        with self.repository.transaction():
+            session = self._require_active_session()
+            if session.state in {
+                BattleState.MATCH_ENDED,
+                BattleState.MATCH_EXPORTED,
+                BattleState.ABORTED,
+            }:
+                raise DomainError("MATCH_ABORT_NOT_ALLOWED_IN_CURRENT_STATE")
+            session.state = BattleState.ABORTED
+            session.active_slot = None
+            session.bump_battle()
+            self.repository.save_session(session)
+        return session
+
     def confirm_selection_facts(
         self,
         self_team: tuple[str, ...],

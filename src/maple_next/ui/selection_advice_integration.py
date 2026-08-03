@@ -298,6 +298,8 @@ class SelectionAdviceIntegrationWindow(ExplicitTurnNumberWindow):
             )
 
     def _on_apply(self, _checked: bool = False) -> None:
+        if not self._persistence_reads_allowed:
+            return
         status = self._selection_gemini_controller.selection_advice_status()
         if status.source_type == GEMINI_SOURCE_TYPE:
             view = self._selection_gemini_controller.apply_current_gemini_advice(

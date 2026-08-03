@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -23,6 +24,7 @@ from maple_next.domain.enums import (
     MatchOutcome,
     ResultDisposition,
 )
+from maple_next.ocr.contracts import OcrFieldKey
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
 from maple_next.ui.match_controller import MatchFlowController
@@ -2140,4 +2142,425 @@ def test_new_match_success_with_refresh_failure_fails_closed_not_stale(
     recovered = controller.refresh()
     assert recovered.session_state == "SELECTION_OPEN"
     assert recovered.persistence_reads_allowed is True
+    repository.close()
+
+
+# --- Issue #31 (05 REWORK / LunaMAX High): direct private-slot invocation ---
+#
+# The independent re-verification called ``window._on_new_match()`` directly
+# (bypassing ``button.click()``) against a PERSISTENCE_UNAVAILABLE render and
+# observed the tmp SQLite session count go from 1 to 2 -- proving the fail-
+# closed contract only covered "cannot click the button", not "cannot reach
+# a mutation through any UI entry point while canonical state is unknown".
+# Every private slot that can reach the controller/repository/provider/
+# capture/filesystem/dialog now checks ``self._persistence_reads_allowed``
+# (via ``_mutation_slots_allowed()`` in the base class) as its first
+# statement. The tests below reproduce the exact probe and then generalize
+# it into a full slot-matrix regression, both no-cache and cached-fallback.
+
+_ALL_MUTATION_CONTROLLER_METHODS = (
+    "new_match",
+    "confirm_selection_facts",
+    "submit_mock_advice",
+    "send_selection_advice_to_gemini",
+    "apply_selection",
+    "apply_current_gemini_advice",
+    "start_turn_capture",
+    "confirm_turn_facts",
+    "submit_mock_turn_advice",
+    "record_actual_action",
+    "next_turn",
+    "save_self_team_preset",
+    "use_self_team_preset",
+    "update_self_team_preset",
+    "delete_self_team_preset",
+    "send_turn_advice_to_gemini",
+    "selection_advice_status",
+    "end_match",
+    "abort_match",
+    "save_match_json",
+    "new_match_after_export",
+)
+
+
+def _patch_all_controller_methods(
+    stack: ExitStack, controller: MatchFlowController
+) -> dict[str, Mock]:
+    spies: dict[str, Mock] = {}
+    for name in _ALL_MUTATION_CONTROLLER_METHODS:
+        spy = Mock(side_effect=AssertionError(f"{name} must not be called"))
+        stack.enter_context(patch.object(controller, name, spy))
+        spies[name] = spy
+    return spies
+
+
+def _invoke_every_direct_mutation_slot(
+    window: MatchFlowWindow, qapp: QApplication
+) -> None:
+    """Directly call every mutation-reaching private slot with safe dummy
+    arguments -- the same style of call the LunaMAX probe used, not a
+    ``button.click()``."""
+
+    window.mock_selection_boxes[0].setCurrentText("Meowscarada")
+    window._on_new_match()
+    window._on_confirm_facts()
+    window._on_submit_mock()
+    window._on_trusted_send_to_gemini()
+    window.actual_checkboxes[0].setChecked(True)
+    window.apply_confirm_checkbox.setChecked(True)
+    window._on_apply()
+    window._on_start_turn()
+    window.turn_facts_confirm_checkbox.setChecked(True)
+    window._on_confirm_turn_facts()
+    window._on_submit_mock_turn()
+    window.actual_action_confirm_checkbox.setChecked(True)
+    window._on_record_action()
+    window._on_next_turn()
+    window.self_team_preset_name.setText("dummy preset")
+    window._on_save_self_team_preset()
+    window._on_use_self_team_preset()
+    window._on_update_self_team_preset()
+    window._on_delete_self_team_preset()
+    window._on_import_self_team()
+    window._on_reconnect_capture()
+    window._on_adopt_ocr_candidate(OcrFieldKey.SELF_ACTIVE.value)
+    window._on_trusted_send_turn_to_gemini()
+    window.outcome_box.setCurrentText(MatchOutcome.WIN.value)
+    window.outcome_confirm_checkbox.setChecked(True)
+    window._on_end_match()
+    window._on_abort_match()
+    window._on_save_match()
+    window._on_new_match_after_export()
+    qapp.processEvents()
+
+
+def test_direct_on_new_match_slot_no_cache_zero_mutation_luna_max_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Section 7: the exact LunaMAX probe. Before: session count = 1. Direct
+    call: ``window._on_new_match()``. After: session count must still = 1."""
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    before = repository.load_active_session()
+    assert before is not None
+    counts_before = session_record_counts(repository, before.session_id)
+    assert repository.count_sessions() == 1
+
+    original_load_active_session = repository.load_active_session
+    controller._last_safe_match_view = None
+
+    def fail_refresh_read() -> object:
+        raise sqlite3.DatabaseError("persistent refresh failure: SECRET_PATH SELECT")
+
+    monkeypatch.setattr(repository, "load_active_session", fail_refresh_read)
+    fallback_view = controller.abort_match(human_confirmed=True)
+    assert fallback_view.application_mode == "PERSISTENCE_UNAVAILABLE"
+    assert fallback_view.persistence_reads_allowed is False
+    window.render_view(fallback_view)
+    qapp.processEvents()
+
+    with patch.object(
+        controller, "new_match", wraps=controller.new_match
+    ) as new_match_spy:
+        window._on_new_match()
+        qapp.processEvents()
+        assert new_match_spy.call_count == 0
+
+    monkeypatch.setattr(repository, "load_active_session", original_load_active_session)
+    after = repository.load_active_session()
+    assert after == before
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert repository.count_sessions() == 1
+    window.close()
+    repository.close()
+
+
+def test_direct_slot_matrix_zero_mutation_no_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Section 8: every mutation-reaching private slot, called directly
+    (not via button.click()) against a no-cache PERSISTENCE_UNAVAILABLE
+    render, must reach zero controller/DB/provider/filesystem/dialog
+    mutation."""
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    record_one_turn(application, turn_adapter)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    before = repository.load_active_session()
+    assert before is not None
+    counts_before = session_record_counts(repository, before.session_id)
+    sessions_before = repository.count_sessions()
+
+    original_load_active_session = repository.load_active_session
+    controller._last_safe_match_view = None
+
+    def fail_refresh_read() -> object:
+        raise sqlite3.DatabaseError("persistent refresh failure: SECRET_PATH SELECT")
+
+    monkeypatch.setattr(repository, "load_active_session", fail_refresh_read)
+    fallback_view = controller.abort_match(human_confirmed=True)
+    assert fallback_view.application_mode == "PERSISTENCE_UNAVAILABLE"
+    assert fallback_view.persistence_reads_allowed is False
+
+    window.render_view(fallback_view)
+    qapp.processEvents()
+
+    with (
+        ExitStack() as stack,
+        patch(
+            "maple_next.ui.window.QFileDialog.getOpenFileName",
+            return_value=("", ""),
+        ) as file_dialog_spy,
+        patch(
+            "maple_next.ui.match_window.QMessageBox.exec",
+            side_effect=AssertionError("dialog must not be shown"),
+        ),
+    ):
+        spies = _patch_all_controller_methods(stack, controller)
+        capture_start_spy = stack.enter_context(
+            patch.object(window._capture_service, "start")
+        )
+        capture_stop_spy = stack.enter_context(
+            patch.object(window._capture_service, "stop")
+        )
+        _invoke_every_direct_mutation_slot(window, qapp)
+        for name, spy in spies.items():
+            assert spy.call_count == 0, name
+        assert file_dialog_spy.call_count == 0
+        assert capture_start_spy.call_count == 0
+        assert capture_stop_spy.call_count == 0
+        assert selection_adapter.network_call_count == 0
+        assert turn_adapter.network_call_count == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+    monkeypatch.setattr(repository, "load_active_session", original_load_active_session)
+    after = repository.load_active_session()
+    assert after == before
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert repository.count_sessions() == sessions_before
+    window.close()
+    repository.close()
+
+
+def test_direct_slot_matrix_zero_mutation_cached_fallback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Section 9: same matrix, but against a *cached* fallback view that
+    still carries an old, "operable-looking" projection (provider send
+    enabled, WIN/LOSE already selected+confirmed, ABORT_MATCH available)
+    -- exactly the shape of a real pre-failure safe view."""
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    record_one_turn(application, turn_adapter)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    safe_view = controller.refresh()
+    assert safe_view.session_state == "TURN_RECORDED"
+    window.render_view(safe_view)
+    qapp.processEvents()
+
+    # Populate widgets exactly like a human mid-operation would, while the
+    # view was still durable: WIN selected+confirmed, an APPLY-eligible
+    # selection ticked, turn facts confirmed, an action confirmed.
+    window.outcome_box.setCurrentText(MatchOutcome.WIN.value)
+    window.outcome_confirm_checkbox.setChecked(True)
+    window.apply_confirm_checkbox.setChecked(True)
+    window.turn_facts_confirm_checkbox.setChecked(True)
+    window.actual_action_confirm_checkbox.setChecked(True)
+    qapp.processEvents()
+    assert window.end_match_button.isEnabled()
+
+    before = repository.load_active_session()
+    assert before is not None
+    counts_before = session_record_counts(repository, before.session_id)
+    sessions_before = repository.count_sessions()
+
+    cached_projection = replace(
+        safe_view.projection,
+        provider_send_enabled=True,
+        secondary_actions=("ABORT_MATCH",),
+    )
+    fallback_view = replace(
+        safe_view,
+        projection=cached_projection,
+        error_message=(
+            "操作結果をデータベースから確認できません。復旧するまで操作を停止しています。"
+        ),
+        persistence_reads_allowed=False,
+    )
+    window.render_view(fallback_view)
+    qapp.processEvents()
+
+    assert window.outcome_box.currentText() == MatchOutcome.WIN.value
+    assert window.outcome_confirm_checkbox.isChecked() is True
+    assert not window.end_match_button.isEnabled()
+    assert not window.abort_match_button.isEnabled()
+
+    with (
+        ExitStack() as stack,
+        patch(
+            "maple_next.ui.window.QFileDialog.getOpenFileName",
+            return_value=("", ""),
+        ) as file_dialog_spy,
+        patch(
+            "maple_next.ui.match_window.QMessageBox.exec",
+            side_effect=AssertionError("dialog must not be shown"),
+        ),
+    ):
+        spies = _patch_all_controller_methods(stack, controller)
+        capture_start_spy = stack.enter_context(
+            patch.object(window._capture_service, "start")
+        )
+        capture_stop_spy = stack.enter_context(
+            patch.object(window._capture_service, "stop")
+        )
+        _invoke_every_direct_mutation_slot(window, qapp)
+        for name, spy in spies.items():
+            assert spy.call_count == 0, name
+        assert file_dialog_spy.call_count == 0
+        assert capture_start_spy.call_count == 0
+        assert capture_stop_spy.call_count == 0
+        assert selection_adapter.network_call_count == 0
+        assert turn_adapter.network_call_count == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+    after = repository.load_active_session()
+    assert after == before
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert repository.count_sessions() == sessions_before
+    window.close()
+    repository.close()
+
+
+def test_selection_apply_guard_skips_status_read_when_persistence_unavailable(
+    tmp_path: Path,
+) -> None:
+    """Section 3: ``SelectionAdviceIntegrationWindow._on_apply`` must not
+    even read ``selection_advice_status()`` while
+    ``persistence_reads_allowed`` is False -- that DB-backed read is itself
+    forbidden, not only the APPLY mutation it would gate."""
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    safe_view = controller.refresh()
+    window.render_view(safe_view)
+    fallback_view = replace(safe_view, persistence_reads_allowed=False)
+    window.render_view(fallback_view)
+    qapp.processEvents()
+
+    with (
+        patch.object(
+            controller, "selection_advice_status"
+        ) as status_spy,
+        patch.object(controller, "apply_current_gemini_advice") as apply_gemini_spy,
+        patch.object(controller, "apply_selection") as apply_spy,
+    ):
+        window._on_apply()
+        qapp.processEvents()
+        assert status_spy.call_count == 0
+        assert apply_gemini_spy.call_count == 0
+        assert apply_spy.call_count == 0
+
+    repository.close()
+
+
+def test_turn_gemini_send_guard_skips_dispatch_when_persistence_unavailable(
+    tmp_path: Path,
+) -> None:
+    """Section 4: ``TurnAdviceIntegrationWindow._on_trusted_send_turn_to_gemini``
+    must not build warnings or reach ``send_turn_advice_to_gemini`` (adapter
+    enqueue / transport send / retry / callback registration) while
+    ``persistence_reads_allowed`` is False."""
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    record_one_turn(application, turn_adapter)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    safe_view = controller.refresh()
+    window.render_view(safe_view)
+    fallback_view = replace(safe_view, persistence_reads_allowed=False)
+    window.render_view(fallback_view)
+    qapp.processEvents()
+
+    with patch.object(controller, "send_turn_advice_to_gemini") as send_spy:
+        window._on_trusted_send_turn_to_gemini()
+        qapp.processEvents()
+        assert send_spy.call_count == 0
+
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+    repository.close()
+
+
+def test_normal_view_mutation_slots_still_reach_controller(tmp_path: Path) -> None:
+    """Section 10 (guard-scoping check): the guard added above must not
+    fire on a normal, durable render -- ``persistence_reads_allowed=True``
+    must let the base NEW MATCH slot reach the controller exactly as
+    before this change."""
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    application.end_match(MatchOutcome.WIN, human_confirmed=True)
+    application.export_match()
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    safe_view = controller.refresh()
+    assert safe_view.session_state == "MATCH_EXPORTED"
+    window.render_view(safe_view)
+    qapp.processEvents()
+    assert window._persistence_reads_allowed is True
+
+    sessions_before = repository.count_sessions()
+    with patch.object(
+        controller, "new_match_after_export", wraps=controller.new_match_after_export
+    ) as new_match_spy:
+        window._on_new_match_after_export()
+        qapp.processEvents()
+        assert new_match_spy.call_count == 1
+
+    assert repository.count_sessions() == sessions_before + 1
+    window.close()
     repository.close()

@@ -175,9 +175,23 @@ class MapleMainWindow(QMainWindow):
         self._poll_capture_status()
         self._capture_timer.start()
 
+    def _mutation_slots_allowed(self) -> bool:
+        """Fail-closed contract for every mutation-reaching private slot.
+
+        Must be the first statement in every handler that can reach the
+        controller, repository, a provider, capture, the filesystem, or a
+        dialog -- called directly (private slot invocation) or via a
+        button click, since ``persistence_reads_allowed=False`` means
+        canonical state cannot be confirmed either way.
+        """
+
+        return self._persistence_reads_allowed
+
     def _on_reconnect_capture(self, _checked: bool = False) -> None:
         """Perform exactly one human-requested capture reacquisition attempt."""
 
+        if not self._mutation_slots_allowed():
+            return
         self._capture_timer.stop()
         self._capture_service.stop()
         self._capture_service.start()
@@ -541,6 +555,8 @@ class MapleMainWindow(QMainWindow):
         edits after adoption always win.
         """
 
+        if not self._mutation_slots_allowed():
+            return
         if self._latest_ocr_bundle is None:
             return
         candidates = [c for c in self._latest_ocr_bundle.candidates if c.field_key == field_key]
@@ -675,6 +691,8 @@ class MapleMainWindow(QMainWindow):
         self.delete_self_team_preset_button.setEnabled(selected)
 
     def _on_save_self_team_preset(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         view = self._controller.save_self_team_preset(
             self.self_team_preset_name.text(),
             [field.text() for field in self.self_team_inputs],
@@ -683,6 +701,8 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_use_self_team_preset(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         preset_id = self._selected_self_team_preset_id()
         if preset_id is None:
             return
@@ -693,6 +713,8 @@ class MapleMainWindow(QMainWindow):
         self.render_view(self._controller.refresh())
 
     def _on_update_self_team_preset(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         preset_id = self._selected_self_team_preset_id()
         if preset_id is None:
             return
@@ -705,6 +727,8 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_delete_self_team_preset(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         preset_id = self._selected_self_team_preset_id()
         if preset_id is None:
             return
@@ -716,6 +740,8 @@ class MapleMainWindow(QMainWindow):
     def _on_import_self_team(self, _checked: bool = False) -> None:
         """Import only after a human activates the button; never on startup."""
 
+        if not self._mutation_slots_allowed():
+            return
         path, _selected_filter = QFileDialog.getOpenFileName(
             self,
             "構築をインポート",
@@ -1323,15 +1349,21 @@ class MapleMainWindow(QMainWindow):
         )
 
     def _on_new_match(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         self.render_view(self._controller.new_match())
 
     def _on_confirm_facts(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         self_entries = [field.text() for field in self.self_team_inputs]
         opponent_entries = [field.text() for field in self.opponent_team_inputs]
         view = self._controller.confirm_selection_facts(self_entries, opponent_entries)
         self.render_view(view)
 
     def _on_submit_mock(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         selected = self._selected_combo_values(self.mock_selection_boxes)
         view = self._controller.submit_mock_advice(
             selected, self.mock_lead_box.currentText()
@@ -1339,10 +1371,14 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_trusted_send_to_gemini(self) -> None:
+        if not self._mutation_slots_allowed():
+            return
         view = self._controller.send_selection_advice_to_gemini(on_result=self.render_view)
         self.render_view(view)
 
     def _on_apply(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         view = self._controller.apply_selection(
             self._checked_actual_names(),
             self.actual_lead_box.currentText(),
@@ -1351,9 +1387,13 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_start_turn(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         self.render_view(self._controller.start_turn_capture())
 
     def _on_confirm_turn_facts(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         moves = [field.text().strip() for field in self.move_inputs if field.text().strip()]
         switches = [
             checkbox.text() for checkbox in self.switch_checkboxes if checkbox.isChecked()
@@ -1371,6 +1411,8 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_submit_mock_turn(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         warnings = tuple(
             part.strip()
             for part in self.mock_turn_warnings_input.text().split(";")
@@ -1386,6 +1428,8 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_record_action(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         opponent_type = self.opponent_action_type_box.currentText()
         if opponent_type == _PLACEHOLDER:
             opponent_type = ""
@@ -1400,6 +1444,8 @@ class MapleMainWindow(QMainWindow):
         self.render_view(view)
 
     def _on_next_turn(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
         self.render_view(self._controller.next_turn())
 
     def _checked_actual_names(self) -> list[str]:

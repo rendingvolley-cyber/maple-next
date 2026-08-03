@@ -187,6 +187,7 @@ class MatchFlowController(TurnAdviceIntegrationController):
                 return replace(
                     fallback_view,
                     error_message=_PERSISTENT_ABORT_FAILURE_MESSAGE,
+                    persistence_reads_allowed=False,
                 )
             return self._persistence_unavailable_view()
 
@@ -215,6 +216,7 @@ class MatchFlowController(TurnAdviceIntegrationController):
             opponent_team=(),
             advice=None,
             applied_selection=None,
+            persistence_reads_allowed=False,
         )
 
     def save_match_json(self) -> MatchOperatorView:

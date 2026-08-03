@@ -141,6 +141,7 @@ class MapleMainWindow(QMainWindow):
         self._loaded_turn_number: int | None = None
         self._loaded_turn_facts_id: str | None = None
         self._current_turn_facts: TurnFactsView | None = None
+        self._persistence_reads_allowed = True
 
         # -- Lane B (issue #31): UGREEN capture + OCR candidates -----------------
         # capture_service/ocr_service are display/candidate-only: nothing here
@@ -970,6 +971,7 @@ class MapleMainWindow(QMainWindow):
 
     def render_view(self, view: OperatorView | None = None) -> None:
         current = view if view is not None else self._controller.refresh()
+        self._persistence_reads_allowed = current.persistence_reads_allowed
         projection = current.projection
         self.application_mode_label.setText(projection.application_mode)
         self.session_state_label.setText(projection.session_state or "—")
@@ -1044,7 +1046,8 @@ class MapleMainWindow(QMainWindow):
             and projection.primary_cta == "REQUEST_SELECTION_ADVICE"
         )
         self.gemini_send_button.setEnabled(
-            projection.primary_cta == "REQUEST_SELECTION_ADVICE"
+            current.persistence_reads_allowed
+            and projection.primary_cta == "REQUEST_SELECTION_ADVICE"
             and projection.provider_send_enabled
             and not self._controller.gemini_selection_attempt_consumed()
         )
@@ -1144,6 +1147,40 @@ class MapleMainWindow(QMainWindow):
         self._update_turn_fact_button()
         self._update_mock_turn_action_options()
         self._update_actual_action_button()
+
+        if not current.persistence_reads_allowed:
+            self._disable_mutation_controls()
+
+    def _disable_mutation_controls(self) -> None:
+        """Fail-closed: force-disable every mutation control this class owns.
+
+        Called whenever the rendered view was built without a durable DB
+        read (cached safe fallback or no-cache PERSISTENCE_UNAVAILABLE), so
+        no programmatic or human click can reach a domain/provider call
+        while canonical state cannot be confirmed.
+        """
+
+        for button in (
+            self.new_match_button,
+            self.confirm_facts_button,
+            self.save_self_team_preset_button,
+            self.use_self_team_preset_button,
+            self.update_self_team_preset_button,
+            self.delete_self_team_preset_button,
+            self.import_self_team_button,
+            self.mock_submit_button,
+            self.gemini_send_button,
+            self.apply_button,
+            self.start_turn_button,
+            self.confirm_turn_facts_button,
+            self.mock_turn_submit_button,
+            self.record_action_button,
+            self.next_turn_button,
+            self.reconnect_capture_button,
+        ):
+            button.setEnabled(False)
+        for button in self._ocr_adopt_buttons.values():
+            button.setEnabled(False)
 
     def _populate_team_controls(self, team: Sequence[str]) -> None:
         for box in self.mock_selection_boxes:

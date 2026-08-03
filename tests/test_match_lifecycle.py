@@ -5,7 +5,7 @@ import os
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from PySide6.QtTest import QTest
@@ -74,6 +74,30 @@ def build_ready_application(
         lead="Dondozo",
         human_confirmed=True,
     )
+    return repository, application, selection_adapter, turn_adapter
+
+
+def build_selection_open_application(
+    tmp_path: Path,
+) -> tuple[
+    SQLiteRepository,
+    MatchApplication,
+    MockSelectionAdviceAdapter,
+    MockTurnAdviceAdapter,
+]:
+    """SELECTION_OPEN with facts confirmed but no advice yet.
+
+    REQUEST_SELECTION_ADVICE / provider_send_enabled=True in this state, so
+    it lets tests prove a Gemini send button that was genuinely enabled
+    before a persistent DB failure becomes fail-closed afterward.
+    """
+
+    repository = SQLiteRepository(tmp_path / "runtime" / "maple.db")
+    application = MatchApplication(repository, tmp_path / "user-data" / "exports")
+    selection_adapter = MockSelectionAdviceAdapter()
+    turn_adapter = MockTurnAdviceAdapter()
+    application.new_match()
+    application.confirm_selection_facts(SELF_TEAM, OPPONENT_TEAM)
     return repository, application, selection_adapter, turn_adapter
 
 
@@ -314,7 +338,10 @@ def test_abort_controller_preserves_last_safe_view_on_persistent_sqlite_failure(
         "stale対戦の終了に失敗しました。データベースを読み込めないため、"
         "直前の安全な画面を維持しています。"
     )
-    assert failed == replace(safe_view, error_message=expected)
+    assert failed == replace(
+        safe_view, error_message=expected, persistence_reads_allowed=False
+    )
+    assert failed.persistence_reads_allowed is False
     assert controller._last_safe_match_view == safe_view
     assert failed.projection == safe_view.projection
     assert failed.session_state == safe_view.session_state == before.state.value
@@ -1180,3 +1207,300 @@ def test_mock_adapters_remain_network_free(tmp_path: Path) -> None:
 
     assert selection_adapter.network_call_count == 0
     assert turn_adapter.network_call_count == 0
+
+
+_TRIPLE_FAILURE_FORBIDDEN_TOKENS = (
+    "Traceback",
+    "DatabaseError",
+    "OperationalError",
+    "database is locked",
+    "persistent refresh failure",
+    "renderer status read",
+    "SECRET_PATH",
+    "SELECT",
+    "UPDATE",
+)
+
+
+def test_ui_abort_triple_db_failure_renders_without_further_persistence_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Issue #31: fallback rendering must not perform a third DB read.
+
+    Reproduces the reported Qt slot path exactly:
+    ``_on_abort_match`` -> ``abort_match`` (transaction failure) ->
+    ``refresh`` (canonical read failure) -> cached fallback view render ->
+    (bug) ``gemini_selection_attempt_consumed`` -> a third DB read that used
+    to leak a raw ``sqlite3.DatabaseError`` into the Qt slot.
+    """
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    before = repository.load_active_session()
+    assert before is not None
+    counts_before = session_record_counts(repository, before.session_id)
+    old_session_label = window.session_state_label.text()
+    old_revision_label = window.battle_revision_label.text()
+    old_advice_label = window.advice_three_label.text()
+
+    original_save_session = repository.save_session
+    original_load_active_session = repository.load_active_session
+
+    def save_then_fail(session: object) -> None:
+        original_save_session(session)  # type: ignore[arg-type]
+        raise sqlite3.OperationalError(
+            "database is locked: SECRET_PATH UPDATE battle_sessions"
+        )
+
+    load_call_count = 0
+
+    def load_active_session_selective_failure() -> object:
+        nonlocal load_call_count
+        load_call_count += 1
+        if load_call_count == 2:
+            raise sqlite3.DatabaseError(
+                "persistent refresh failure: SECRET_PATH SELECT battle_sessions"
+            )
+        return original_load_active_session()
+
+    reserved_spy = Mock(
+        side_effect=sqlite3.DatabaseError(
+            "renderer status read: SECRET_PATH SELECT attempt_ledger"
+        )
+    )
+
+    monkeypatch.setattr(repository, "save_session", save_then_fail)
+    monkeypatch.setattr(repository, "load_active_session", load_active_session_selective_failure)
+    monkeypatch.setattr(repository, "gemini_selection_attempt_reserved", reserved_spy)
+
+    with patch.object(
+        QMessageBox, "exec", return_value=QMessageBox.StandardButton.Yes
+    ):
+        window._on_abort_match()
+        qapp.processEvents()
+
+    captured = capsys.readouterr()
+    for token in _TRIPLE_FAILURE_FORBIDDEN_TOKENS:
+        assert token not in captured.out, token
+        assert token not in captured.err, token
+        assert token not in window.error_label.text(), token
+
+    assert reserved_spy.call_count == 0
+    assert window.isVisible()
+    assert window.session_state_label.text() == old_session_label
+    assert window.battle_revision_label.text() == old_revision_label
+    assert window.advice_three_label.text() == old_advice_label
+    assert "NO_ACTIVE_MATCH" not in window.application_mode_label.text()
+    assert not window.import_self_team_button.isVisible()
+    assert window.match_recovery_group.isVisible()
+    assert not window.gemini_send_button.isEnabled()
+    assert not window.turn_gemini_send_button.isEnabled()
+
+    monkeypatch.setattr(repository, "load_active_session", original_load_active_session)
+    monkeypatch.setattr(repository, "gemini_selection_attempt_reserved", Mock(return_value=False))
+    after = repository.load_active_session()
+    assert after == before
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert repository.count_sessions() == 1
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+
+    recovered = controller.refresh()
+    window.render_view(recovered)
+    assert recovered.session_state == before.state.value
+    assert recovered.persistence_reads_allowed is True
+    window.close()
+    repository.close()
+
+
+def test_normal_render_keeps_durable_gate(tmp_path: Path) -> None:
+    """A normal (persistence_reads_allowed=True) render still reads the DB.
+
+    The Selection-integration renderer's status lookup
+    (``selection_advice_status`` -> ``application.projection`` ->
+    ``repository.load_active_session``) is the durable, restart-safe path
+    this fix must not weaken for ordinary rendering.
+    """
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+
+    view = controller.refresh()
+    assert view.persistence_reads_allowed is True
+
+    load_spy = Mock(wraps=repository.load_active_session)
+    with patch.object(repository, "load_active_session", load_spy):
+        window.render_view(view)
+
+    assert load_spy.call_count >= 1
+    window.close()
+    repository.close()
+
+
+def test_cached_fallback_forces_gemini_selection_send_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even a previously-send-enabled projection must fail closed once cached."""
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_selection_open_application(
+        tmp_path
+    )
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    safe_view = controller.refresh()
+    assert safe_view.primary_cta == "REQUEST_SELECTION_ADVICE"
+    assert safe_view.projection.provider_send_enabled is True
+    assert window.gemini_send_button.isEnabled()
+
+    team_group_visible_before = window.self_team_group.isVisible()
+
+    original_save_session = repository.save_session
+    original_load_active_session = repository.load_active_session
+
+    def save_then_fail(session: object) -> None:
+        original_save_session(session)  # type: ignore[arg-type]
+        raise sqlite3.OperationalError("database is locked: SECRET_PATH")
+
+    load_call_count = 0
+
+    def load_active_session_selective_failure() -> object:
+        nonlocal load_call_count
+        load_call_count += 1
+        if load_call_count == 2:
+            raise sqlite3.DatabaseError("persistent refresh failure: SECRET_PATH SELECT")
+        return original_load_active_session()
+
+    monkeypatch.setattr(repository, "save_session", save_then_fail)
+    monkeypatch.setattr(repository, "load_active_session", load_active_session_selective_failure)
+
+    view = controller.abort_match(human_confirmed=True)
+    assert view.persistence_reads_allowed is False
+    assert view.projection == safe_view.projection
+
+    window.render_view(view)
+
+    assert not window.gemini_send_button.isEnabled()
+    assert not window.turn_gemini_send_button.isEnabled()
+    assert window.self_team_group.isVisible() == team_group_visible_before
+
+    monkeypatch.setattr(repository, "load_active_session", original_load_active_session)
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+    window.close()
+    repository.close()
+
+
+def test_no_cache_persistence_unavailable_view_disables_all_mutation_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    before = repository.load_active_session()
+    assert before is not None
+    counts_before = session_record_counts(repository, before.session_id)
+    original_load_active_session = repository.load_active_session
+
+    # Simulate "no safe cache has ever been built" without racing construction.
+    controller._last_safe_match_view = None
+
+    def fail_abort(*, human_confirmed: bool) -> None:
+        assert human_confirmed is True
+        raise sqlite3.OperationalError("database is locked: SECRET_PATH")
+
+    def fail_refresh_read() -> object:
+        raise sqlite3.DatabaseError("persistent refresh failure: SECRET_PATH SELECT")
+
+    reserved_spy = Mock(
+        side_effect=sqlite3.DatabaseError("renderer status read: SECRET_PATH SELECT")
+    )
+    monkeypatch.setattr(application, "abort_match", fail_abort)
+    monkeypatch.setattr(repository, "load_active_session", fail_refresh_read)
+    monkeypatch.setattr(repository, "gemini_selection_attempt_reserved", reserved_spy)
+
+    view = controller.abort_match(human_confirmed=True)
+
+    assert view.application_mode == "PERSISTENCE_UNAVAILABLE"
+    assert view.persistence_reads_allowed is False
+    assert view.projection.session_id is None
+    assert view.projection.match_id is None
+    assert view.projection.generation is None
+    assert view.self_team == ()
+    assert view.opponent_team == ()
+    assert view.advice is None
+    assert view.applied_selection is None
+
+    window.render_view(view)
+    qapp.processEvents()
+
+    captured = capsys.readouterr()
+    for token in _TRIPLE_FAILURE_FORBIDDEN_TOKENS:
+        assert token not in captured.out, token
+        assert token not in captured.err, token
+    assert reserved_spy.call_count == 0
+
+    mutation_buttons = (
+        window.new_match_button,
+        window.confirm_facts_button,
+        window.save_self_team_preset_button,
+        window.use_self_team_preset_button,
+        window.update_self_team_preset_button,
+        window.delete_self_team_preset_button,
+        window.import_self_team_button,
+        window.mock_submit_button,
+        window.gemini_send_button,
+        window.apply_button,
+        window.start_turn_button,
+        window.confirm_turn_facts_button,
+        window.mock_turn_submit_button,
+        window.record_action_button,
+        window.next_turn_button,
+        window.reconnect_capture_button,
+        window.turn_gemini_send_button,
+        window.abort_match_button,
+        window.end_match_button,
+        window.save_match_button,
+        window.new_match_after_export_button,
+    )
+    for button in mutation_buttons:
+        assert not button.isEnabled(), button.text()
+
+    for button in mutation_buttons:
+        button.click()
+    qapp.processEvents()
+
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+    assert reserved_spy.call_count == 0
+
+    monkeypatch.setattr(repository, "load_active_session", original_load_active_session)
+    after = repository.load_active_session()
+    assert after == before
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert repository.count_sessions() == 1
+    window.close()
+    repository.close()

@@ -271,7 +271,8 @@ class TurnAdviceIntegrationWindow(SelectionAdviceIntegrationWindow):
             available and current.projection.primary_cta == "REQUEST_TURN_ADVICE"
         )
         self.turn_gemini_send_button.setEnabled(
-            current.projection.primary_cta == "REQUEST_TURN_ADVICE"
+            current.persistence_reads_allowed
+            and current.projection.primary_cta == "REQUEST_TURN_ADVICE"
             and status.status != "PENDING"
         )
         self.turn_gemini_status_label.setText(status.status)

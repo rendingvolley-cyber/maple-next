@@ -189,7 +189,9 @@ class MatchFlowController(TurnAdviceIntegrationController):
             return self.refresh()
         except sqlite3.Error:
             if not abort_failed:
-                raise
+                return self._persistence_unavailable_view(
+                    _PERSISTENCE_RESULT_UNKNOWN_MESSAGE
+                )
             self._error_message = _PERSISTENT_ABORT_FAILURE_MESSAGE
             if fallback_view is not None:
                 return replace(

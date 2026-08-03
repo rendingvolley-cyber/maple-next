@@ -27,7 +27,11 @@ from maple_next.domain.enums import (
 from maple_next.ocr.contracts import OcrFieldKey
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
-from maple_next.ui.match_controller import MatchFlowController, MatchOperatorView
+from maple_next.ui.match_controller import (
+    _PERSISTENCE_RESULT_UNKNOWN_MESSAGE,
+    MatchFlowController,
+    MatchOperatorView,
+)
 from maple_next.ui.match_window import MatchFlowWindow
 
 SELF_TEAM = (
@@ -377,6 +381,184 @@ def test_abort_controller_preserves_last_safe_view_on_persistent_sqlite_failure(
     assert selection_adapter.network_call_count == 0
     assert turn_adapter.network_call_count == 0
     repository.close()
+
+
+def test_abort_success_with_refresh_failure_fails_closed_not_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed abort followed by a failed refresh is result-unknown."""
+
+    repository, application, selection_adapter, turn_adapter = build_ready_application(
+        tmp_path
+    )
+    controller = MatchFlowController(
+        application,
+        repository,
+        selection_adapter,
+        turn_adapter,
+    )
+    safe_view = controller.refresh()
+    before = repository.load_active_session()
+    assert before is not None
+    counts_before = session_record_counts(repository, before.session_id)
+    sessions_before = repository.count_sessions()
+    original_refresh = controller.refresh
+    refresh_failed = True
+
+    def fail_first_refresh() -> MatchOperatorView:
+        nonlocal refresh_failed
+        if refresh_failed:
+            refresh_failed = False
+            raise sqlite3.OperationalError(
+                "database is locked: SECRET_PATH SELECT battle_sessions"
+            )
+        return original_refresh()
+
+    monkeypatch.setattr(controller, "refresh", fail_first_refresh)
+    view = controller.abort_match(human_confirmed=True)
+
+    assert view.application_mode == "PERSISTENCE_UNAVAILABLE"
+    assert view.persistence_reads_allowed is False
+    assert view.projection.session_id is None
+    assert view.projection.match_id is None
+    assert view.projection.generation is None
+    assert view.session_state == "PERSISTENCE_UNAVAILABLE"
+    assert view.projection.provider_send_enabled is False
+    assert view.projection.secondary_actions == ()
+    assert view.error_message == _PERSISTENCE_RESULT_UNKNOWN_MESSAGE
+    assert all(
+        forbidden not in (view.error_message or "")
+        for forbidden in (
+            "OperationalError",
+            "database is locked",
+            "SECRET_PATH",
+            "SELECT battle_sessions",
+            str(repository.database_path),
+        )
+    )
+
+    archived = repository.connection.execute(
+        "SELECT state, active_slot, battle_revision FROM battle_sessions WHERE session_id = ?",
+        (before.session_id,),
+    ).fetchone()
+    assert tuple(archived) == ("ABORTED", None, before.battle_revision + 1)
+    assert repository.load_active_session() is None
+    assert repository.count_sessions() == sessions_before
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+
+    recovered = controller.refresh()
+    assert recovered.session_state is None
+    assert recovered.persistence_reads_allowed is True
+    assert recovered.projection.session_id is None
+    assert recovered.projection.match_id is None
+    assert recovered.projection.generation is None
+    assert controller._last_safe_match_view == recovered
+    assert safe_view.projection.session_id == before.session_id
+    repository.close()
+
+
+def test_ui_abort_success_with_refresh_failure_fails_closed_without_leak(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The human abort slot must render the sanitized no-cache view."""
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(
+        tmp_path
+    )
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+
+    with patch("maple_next.ui.window.MapleMainWindow._start_capture"):
+        window = MatchFlowWindow(controller)
+    window.show()
+    window._capture_polling_requested = False  # noqa: SLF001 - keep UI probe capture-free
+    qapp.processEvents()
+    before = repository.load_active_session()
+    assert before is not None
+    old_session_label = window.session_state_label.text()
+    old_revision_label = window.battle_revision_label.text()
+    original_refresh = controller.refresh
+    refresh_failed = True
+
+    def fail_first_refresh() -> MatchOperatorView:
+        nonlocal refresh_failed
+        if refresh_failed:
+            refresh_failed = False
+            raise sqlite3.OperationalError(
+                "database is locked: SECRET_PATH SELECT battle_sessions"
+            )
+        return original_refresh()
+
+    monkeypatch.setattr(controller, "refresh", fail_first_refresh)
+    capture_spy = Mock(side_effect=AssertionError("capture must not be polled"))
+    ocr_spy = Mock(side_effect=AssertionError("OCR must not be requested"))
+    monkeypatch.setattr(window._capture_service, "latest_snapshot", capture_spy)
+    monkeypatch.setattr(
+        window._ocr_service,
+        "request_candidates_from_capture_status",
+        ocr_spy,
+    )
+
+    try:
+        with patch.object(
+            QMessageBox, "exec", return_value=QMessageBox.StandardButton.Yes
+        ):
+            window._on_abort_match()
+            qapp.processEvents()
+
+        captured = capsys.readouterr()
+        for forbidden in (
+            "Traceback",
+            "OperationalError",
+            "database is locked",
+            "SECRET_PATH",
+            "SELECT battle_sessions",
+            str(repository.database_path),
+        ):
+            assert forbidden not in captured.out
+            assert forbidden not in captured.err
+            assert forbidden not in window.error_label.text()
+
+        assert window.application_mode_label.text() == "PERSISTENCE_UNAVAILABLE"
+        assert window.session_state_label.text() != old_session_label
+        assert window.battle_revision_label.text() != old_revision_label
+        assert window.match_id_label.text() in {"—", "窶・"}
+        assert not window.confirm_facts_button.isEnabled()
+        assert not window.gemini_send_button.isEnabled()
+        assert not window.record_action_button.isEnabled()
+        assert not window.reconnect_capture_button.isEnabled()
+        assert not window.end_match_button.isEnabled()
+        assert not window.abort_match_button.isEnabled()
+        assert capture_spy.call_count == 0
+        assert ocr_spy.call_count == 0
+        assert selection_adapter.network_call_count == 0
+        assert turn_adapter.network_call_count == 0
+
+        archived = repository.connection.execute(
+            "SELECT state, active_slot, battle_revision FROM battle_sessions WHERE session_id = ?",
+            (before.session_id,),
+        ).fetchone()
+        assert tuple(archived) == ("ABORTED", None, before.battle_revision + 1)
+
+        recovered = controller.refresh()
+        assert recovered.session_state is None
+        assert recovered.persistence_reads_allowed is True
+        assert recovered.projection.session_id is None
+        assert recovered.projection.match_id is None
+        assert recovered.projection.generation is None
+        window.render_view(recovered)
+        qapp.processEvents()
+        assert window.application_mode_label.text() != "PERSISTENCE_UNAVAILABLE"
+        assert window.match_id_label.text() in {"—", "窶・"}
+    finally:
+        window.close()
+        repository.close()
 
 
 def test_abort_controller_without_safe_view_fails_closed(

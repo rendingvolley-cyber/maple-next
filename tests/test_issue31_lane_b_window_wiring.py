@@ -19,12 +19,15 @@ protocols. Zero network calls.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
@@ -35,9 +38,9 @@ from maple_next.capture.contracts import DeviceOpenResult, FramePacket
 from maple_next.domain.enums import HpBucket
 from maple_next.ocr.contracts import OcrCandidate, OcrCandidateContext
 from maple_next.persistence.sqlite import SQLiteRepository
-from maple_next.ui.controller import SelectionFlowController
+from maple_next.ui.controller import OperatorView, SelectionFlowController
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
-from maple_next.ui.window import MapleMainWindow
+from maple_next.ui.window import _CAPTURE_POLL_INTERVAL_MS, MapleMainWindow
 
 SELF_TEAM = ("Meowscarada", "Gholdengo", "Dragonite", "Dondozo", "Flutter Mane", "Urshifu")
 OPPONENT_TEAM = ("Garchomp", "Gholdengo", "Dragonite", "Flutter Mane", "Garganacl", "Iron Bundle")
@@ -59,6 +62,7 @@ class FakeCaptureBackend:
         self.start_calls = 0
         self.stop_calls = 0
         self.duplicate_start_calls = 0
+        self.latest_frame_calls = 0
 
     def start(self, selector: str, on_frame: object | None = None) -> DeviceOpenResult:
         self.start_calls += 1
@@ -74,6 +78,7 @@ class FakeCaptureBackend:
         self._running = False
 
     def get_latest_frame(self) -> FramePacket | None:
+        self.latest_frame_calls += 1
         return self._frame
 
     def is_running(self) -> bool:
@@ -102,6 +107,7 @@ class FakeOcrBackend:
 
     def __init__(self, candidates: tuple[OcrCandidate, ...]) -> None:
         self._candidates = candidates
+        self.generate_calls = 0
 
     def is_available(self) -> bool:
         return True
@@ -109,7 +115,23 @@ class FakeOcrBackend:
     def generate_candidates(
         self, frame: FramePacket, context: OcrCandidateContext
     ) -> tuple[OcrCandidate, ...]:
+        self.generate_calls += 1
         return self._candidates
+
+
+class StaticViewController:
+    """Minimal controller double for constructor fallback sequencing."""
+
+    gemini_send_available = False
+
+    def __init__(self, view: OperatorView) -> None:
+        self._view = view
+
+    def refresh(self) -> OperatorView:
+        return self._view
+
+    def list_self_team_presets(self) -> tuple[object, ...]:
+        return ()
 
 
 def _fresh_frame(frame_id: str = "frame-1", image: QImage | None = None) -> FramePacket:
@@ -129,11 +151,7 @@ def _fresh_frame(frame_id: str = "frame-1", image: QImage | None = None) -> Fram
 def build_window(
     tmp_path: Path, *, capture_backend: object, ocr_backend: object
 ) -> tuple[SQLiteRepository, MapleMainWindow]:
-    repository = SQLiteRepository(tmp_path / "maple.db")
-    application = BattleApplication(repository)
-    controller = SelectionFlowController(
-        application, repository, MockSelectionAdviceAdapter(), MockTurnAdviceAdapter()
-    )
+    repository, controller = build_controller(tmp_path)
     window = MapleMainWindow(
         controller,
         capture_backend=cast(object, capture_backend),  # type: ignore[arg-type]
@@ -141,6 +159,54 @@ def build_window(
         auto_start_capture=False,
     )
     return repository, window
+
+
+def build_controller(tmp_path: Path) -> tuple[SQLiteRepository, SelectionFlowController]:
+    repository = SQLiteRepository(tmp_path / "maple.db")
+    application = BattleApplication(repository)
+    controller = SelectionFlowController(
+        application, repository, MockSelectionAdviceAdapter(), MockTurnAdviceAdapter()
+    )
+    return repository, controller
+
+
+def _make_no_cache_fallback(view: OperatorView) -> OperatorView:
+    projection = replace(
+        view.projection,
+        application_mode="PERSISTENCE_UNAVAILABLE",
+        primary_cta="PERSISTENCE_UNAVAILABLE",
+        primary_cta_enabled=False,
+        secondary_actions=(),
+        message="PERSISTENCE_UNAVAILABLE",
+        provider_status="UNAVAILABLE",
+        provider_send_enabled=False,
+        session_state="PERSISTENCE_UNAVAILABLE",
+        battle_revision=None,
+        metadata_revision=None,
+        session_id=None,
+        match_id=None,
+        generation=None,
+        current_reviewed_selection_id=None,
+        current_selection_advice_id=None,
+        current_applied_selection_id=None,
+        current_turn_id=None,
+        current_reviewed_board_id=None,
+        current_turn_advice_id=None,
+        turn_number=None,
+    )
+    return replace(
+        view,
+        projection=projection,
+        error_message="persistence unavailable",
+        self_team=(),
+        opponent_team=(),
+        advice=None,
+        applied_selection=None,
+        turn_facts=None,
+        turn_advice=None,
+        action_history=(),
+        persistence_reads_allowed=False,
+    )
 
 
 def advance_to_turn_reviewable(window: MapleMainWindow) -> None:
@@ -351,6 +417,224 @@ def test_human_reconnect_is_one_bounded_attempt_without_duplicate_lease(
     assert backend.stop_calls == 2
     assert backend.is_running() is False
     repository.close()
+
+
+def test_running_capture_polling_stops_during_persistence_fallback_and_recovers(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Fallback blocks timer/direct polling, then resumes without a restart."""
+
+    qapp = qt_application()
+    backend = FakeCaptureBackend(_fresh_frame("fallback-frame"))
+    ocr_backend = FakeOcrBackend(())
+    repository, window = build_window(
+        tmp_path, capture_backend=backend, ocr_backend=ocr_backend
+    )
+    try:
+        window._start_capture()  # noqa: SLF001 - explicit lifecycle probe
+        assert window._capture_timer.isActive() is True  # noqa: SLF001
+        safe_view = window._controller.refresh()  # noqa: SLF001
+        before_bundle = window._latest_ocr_bundle  # noqa: SLF001
+        before_preview = window.capture_preview_label.pixmap()
+        before_preview_cache_key = 0 if before_preview is None else before_preview.cacheKey()
+        before_frame_id = window._capture_preview_frame_id  # noqa: SLF001
+        before_labels = (
+            window.capture_status_label.text(),
+            window.capture_freshness_label.text(),
+            window.capture_device_label.text(),
+        )
+        fallback_view = _make_no_cache_fallback(safe_view)
+        assert fallback_view.application_mode == "PERSISTENCE_UNAVAILABLE"
+
+        capture_spy = Mock(wraps=window._capture_service.latest_snapshot)  # noqa: SLF001
+        ocr_spy = Mock(  # noqa: SLF001
+            wraps=window._ocr_service.request_candidates_from_capture_status
+        )
+        capture_render_spy = Mock(wraps=window._render_capture_status)  # noqa: SLF001
+        ocr_render_spy = Mock(wraps=window._render_ocr_candidates)  # noqa: SLF001
+        with (
+            patch.object(window._capture_service, "latest_snapshot", capture_spy),
+            patch.object(
+                window._ocr_service,
+                "request_candidates_from_capture_status",
+                ocr_spy,
+            ),
+            patch.object(window, "_render_capture_status", capture_render_spy),
+            patch.object(window, "_render_ocr_candidates", ocr_render_spy),
+        ):
+            window.render_view(fallback_view)
+            qapp.processEvents()
+            assert window._capture_timer.isActive() is False  # noqa: SLF001
+            assert window._latest_ocr_bundle is before_bundle  # noqa: SLF001
+            assert window._capture_preview_frame_id == before_frame_id  # noqa: SLF001
+            after_preview = window.capture_preview_label.pixmap()
+            after_preview_cache_key = (
+                0 if after_preview is None else after_preview.cacheKey()
+            )
+            assert after_preview_cache_key == before_preview_cache_key
+            assert (
+                window.capture_status_label.text(),
+                window.capture_freshness_label.text(),
+                window.capture_device_label.text(),
+            ) == before_labels
+
+            for spy in (capture_spy, ocr_spy, capture_render_spy, ocr_render_spy):
+                spy.reset_mock()
+            QTest.qWait(_CAPTURE_POLL_INTERVAL_MS * 2 + 100)
+            qapp.processEvents()
+            window._poll_capture_status()  # noqa: SLF001 - direct guard probe
+            assert capture_spy.call_count == 0
+            assert ocr_spy.call_count == 0
+            assert capture_render_spy.call_count == 0
+            assert ocr_render_spy.call_count == 0
+
+        # The prior request is remembered: recovery resumes polling, but does
+        # not start the backend again and a repeated normal render is quiet.
+        generate_calls_before_recovery = ocr_backend.generate_calls
+        window.render_view(safe_view)
+        assert window._capture_timer.isActive() is True  # noqa: SLF001
+        assert backend.start_calls == 1
+        assert ocr_backend.generate_calls == generate_calls_before_recovery + 1
+        window.render_view(safe_view)
+        assert backend.start_calls == 1
+        assert ocr_backend.generate_calls == generate_calls_before_recovery + 1
+    finally:
+        window.close()
+        repository.close()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_cached_capture_fallback_preserves_display_and_blocks_reconnect(
+    tmp_path: Path,
+) -> None:
+    """Cached safe views stop capture/OCR without clearing the prior display."""
+
+    qapp = qt_application()
+    backend = FakeCaptureBackend(_fresh_frame("cached-frame"))
+    ocr_backend = FakeOcrBackend(())
+    repository, window = build_window(
+        tmp_path, capture_backend=backend, ocr_backend=ocr_backend
+    )
+    try:
+        window._start_capture()  # noqa: SLF001
+        safe_view = window._controller.refresh()  # noqa: SLF001
+        before_bundle = window._latest_ocr_bundle  # noqa: SLF001
+        before_frame_id = window._capture_preview_frame_id  # noqa: SLF001
+        before_status = window.capture_status_label.text()
+        before_preview = window.capture_preview_label.pixmap()
+        before_preview_cache_key = 0 if before_preview is None else before_preview.cacheKey()
+        cached_fallback = replace(safe_view, persistence_reads_allowed=False)
+
+        capture_spy = Mock(wraps=window._capture_service.latest_snapshot)  # noqa: SLF001
+        ocr_spy = Mock(  # noqa: SLF001
+            wraps=window._ocr_service.request_candidates_from_capture_status
+        )
+        capture_start_spy = Mock()
+        capture_stop_spy = Mock()
+        with (
+            patch.object(window._capture_service, "latest_snapshot", capture_spy),
+            patch.object(
+                window._ocr_service,
+                "request_candidates_from_capture_status",
+                ocr_spy,
+            ),
+            patch.object(window._capture_service, "start", capture_start_spy),
+            patch.object(window._capture_service, "stop", capture_stop_spy),
+        ):
+            window.render_view(cached_fallback)
+            qapp.processEvents()
+            assert window._capture_timer.isActive() is False  # noqa: SLF001
+            window.reconnect_capture_button.click()
+            window._on_reconnect_capture()  # noqa: SLF001 - direct guard probe
+            window._poll_capture_status()  # noqa: SLF001 - direct guard probe
+            QTest.qWait(_CAPTURE_POLL_INTERVAL_MS * 2 + 100)
+            qapp.processEvents()
+            assert capture_start_spy.call_count == 0
+            assert capture_stop_spy.call_count == 0
+            assert capture_spy.call_count == 0
+            assert ocr_spy.call_count == 0
+
+        assert window._latest_ocr_bundle is before_bundle  # noqa: SLF001
+        assert window._capture_preview_frame_id == before_frame_id  # noqa: SLF001
+        after_preview = window.capture_preview_label.pixmap()
+        after_preview_cache_key = 0 if after_preview is None else after_preview.cacheKey()
+        assert after_preview_cache_key == before_preview_cache_key
+        assert window.capture_status_label.text() == before_status
+    finally:
+        window.close()
+        repository.close()
+
+
+def test_initial_constructor_fallback_defers_auto_capture_until_recovery(
+    tmp_path: Path,
+) -> None:
+    """auto_start_capture must not bypass the initial persistence fallback."""
+
+    qt_application()
+    repository, controller = build_controller(tmp_path)
+    safe_view = controller.refresh()
+    fallback_view = _make_no_cache_fallback(safe_view)
+    backend = FakeCaptureBackend(_fresh_frame("initial-fallback-frame"))
+    ocr_backend = FakeOcrBackend(())
+    window = MapleMainWindow(
+        cast(SelectionFlowController, StaticViewController(fallback_view)),
+        capture_backend=cast(object, backend),  # type: ignore[arg-type]
+        ocr_backend=cast(object, ocr_backend),  # type: ignore[arg-type]
+        auto_start_capture=True,
+    )
+    try:
+        assert backend.start_calls == 0
+        assert backend.latest_frame_calls == 0
+        assert ocr_backend.generate_calls == 0
+        assert window._latest_ocr_bundle is None  # noqa: SLF001
+        assert window._capture_timer.isActive() is False  # noqa: SLF001
+
+        window.render_view(safe_view)
+        assert backend.start_calls == 1
+        assert backend.latest_frame_calls == 2
+        assert ocr_backend.generate_calls == 1
+        assert window._capture_timer.isActive() is True  # noqa: SLF001
+
+        window.render_view(safe_view)
+        assert backend.start_calls == 1
+        assert ocr_backend.generate_calls == 1
+    finally:
+        window.close()
+        repository.close()
+
+
+def test_auto_start_capture_false_does_not_resume_after_fallback(
+    tmp_path: Path,
+) -> None:
+    """Without an explicit start/reconnect request, recovery stays passive."""
+
+    qt_application()
+    repository, controller = build_controller(tmp_path)
+    safe_view = controller.refresh()
+    fallback_view = _make_no_cache_fallback(safe_view)
+    backend = FakeCaptureBackend(_fresh_frame("manual-only-frame"))
+    ocr_backend = FakeOcrBackend(())
+    window = MapleMainWindow(
+        cast(SelectionFlowController, StaticViewController(safe_view)),
+        capture_backend=cast(object, backend),  # type: ignore[arg-type]
+        ocr_backend=cast(object, ocr_backend),  # type: ignore[arg-type]
+        auto_start_capture=False,
+    )
+    try:
+        window.render_view(fallback_view)
+        window.render_view(safe_view)
+        window._poll_capture_status()  # noqa: SLF001
+        assert backend.start_calls == 0
+        assert backend.latest_frame_calls == 0
+        assert ocr_backend.generate_calls == 0
+        assert window._capture_timer.isActive() is False  # noqa: SLF001
+    finally:
+        window.close()
+        repository.close()
 
 
 def test_stale_frame_never_yields_an_adoptable_candidate(tmp_path: Path) -> None:

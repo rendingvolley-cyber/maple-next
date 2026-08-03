@@ -142,6 +142,9 @@ class MapleMainWindow(QMainWindow):
         self._loaded_turn_facts_id: str | None = None
         self._current_turn_facts: TurnFactsView | None = None
         self._persistence_reads_allowed = True
+        self._capture_polling_requested = auto_start_capture
+        self._capture_service_started = False
+        self._capture_lifecycle_initialized = False
 
         # -- Lane B (issue #31): UGREEN capture + OCR candidates -----------------
         # capture_service/ocr_service are display/candidate-only: nothing here
@@ -163,6 +166,7 @@ class MapleMainWindow(QMainWindow):
 
         if auto_start_capture:
             self._start_capture()
+        self._capture_lifecycle_initialized = True
 
     def _start_capture(self) -> None:
         """Human has opened the Battle Record screen; begin passive capture.
@@ -171,9 +175,24 @@ class MapleMainWindow(QMainWindow):
         sanitized status string, and ``manual_entry_allowed`` stays True.
         """
 
-        self._capture_service.start()
-        self._poll_capture_status()
-        self._capture_timer.start()
+        self._capture_polling_requested = True
+        if not self._persistence_reads_allowed:
+            self._capture_timer.stop()
+            return
+        self._resume_capture_polling()
+
+    def _resume_capture_polling(self) -> None:
+        """Resume a previously requested capture poll after a safe render."""
+
+        if not self._persistence_reads_allowed or not self._capture_polling_requested:
+            self._capture_timer.stop()
+            return
+        if not self._capture_service_started:
+            self._capture_service.start()
+            self._capture_service_started = True
+        if not self._capture_timer.isActive():
+            self._poll_capture_status()
+            self._capture_timer.start()
 
     def _mutation_slots_allowed(self) -> bool:
         """Fail-closed contract for every mutation-reaching private slot.
@@ -192,17 +211,19 @@ class MapleMainWindow(QMainWindow):
 
         if not self._mutation_slots_allowed():
             return
+        self._capture_polling_requested = True
         self._capture_timer.stop()
         self._capture_service.stop()
-        self._capture_service.start()
-        self._poll_capture_status()
-        self._capture_timer.start()
+        self._capture_service_started = False
+        self._resume_capture_polling()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
         """Clean shutdown: stop capture and release the device on app exit."""
 
         self._capture_timer.stop()
         self._capture_service.stop()
+        self._capture_service_started = False
+        self._capture_polling_requested = False
         super().closeEvent(event)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt override
@@ -406,6 +427,9 @@ class MapleMainWindow(QMainWindow):
 
     def _poll_capture_status(self) -> None:
         """Timer-driven, display-only refresh. Never a Turn Advice trigger."""
+
+        if not self._persistence_reads_allowed:
+            return
 
         status, frame = self._capture_service.latest_snapshot()
         self._render_capture_status(status, frame)
@@ -1002,6 +1026,8 @@ class MapleMainWindow(QMainWindow):
     def render_view(self, view: OperatorView | None = None) -> None:
         current = view if view is not None else self._controller.refresh()
         self._persistence_reads_allowed = current.persistence_reads_allowed
+        if not self._persistence_reads_allowed:
+            self._capture_timer.stop()
         projection = current.projection
         self.application_mode_label.setText(projection.application_mode)
         self.session_state_label.setText(projection.session_state or "—")
@@ -1192,6 +1218,8 @@ class MapleMainWindow(QMainWindow):
 
         if not current.persistence_reads_allowed:
             self._disable_mutation_controls()
+        elif self._capture_lifecycle_initialized:
+            self._resume_capture_polling()
 
     def _disable_mutation_controls(self) -> None:
         """Fail-closed: force-disable every mutation control this class owns.

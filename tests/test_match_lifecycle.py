@@ -27,7 +27,7 @@ from maple_next.domain.enums import (
 from maple_next.ocr.contracts import OcrFieldKey
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
-from maple_next.ui.match_controller import MatchFlowController
+from maple_next.ui.match_controller import MatchFlowController, MatchOperatorView
 from maple_next.ui.match_window import MatchFlowWindow
 
 SELF_TEAM = (
@@ -1519,6 +1519,263 @@ def test_no_cache_persistence_unavailable_view_disables_all_mutation_controls(
     assert repository.count_sessions() == 1
     window.close()
     repository.close()
+
+
+# --- Issue #31 (02 REWORK): preset-selection reads must fail closed -----------
+
+
+def _build_preset_probe_window(
+    tmp_path: Path,
+    *,
+    active_match: bool = True,
+) -> tuple[
+    SQLiteRepository,
+    MatchApplication,
+    MatchFlowController,
+    MatchFlowWindow,
+    QApplication,
+]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    if active_match:
+        repository, application, selection_adapter, turn_adapter = build_ready_application(
+            tmp_path
+        )
+    else:
+        repository = SQLiteRepository(tmp_path / "runtime" / "maple.db")
+        application = MatchApplication(repository, tmp_path / "user-data" / "exports")
+        selection_adapter = MockSelectionAdviceAdapter()
+        turn_adapter = MockTurnAdviceAdapter()
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    controller.save_self_team_preset("Alpha", SELF_TEAM)
+    controller.save_self_team_preset("Beta", SELF_TEAM)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+    assert window.self_team_preset_box.count() == 3
+    return repository, application, controller, window, qapp
+
+
+def _make_no_cache_persistence_unavailable_view(
+    application: MatchApplication,
+    repository: SQLiteRepository,
+    controller: MatchFlowController,
+) -> MatchOperatorView:
+    controller._last_safe_match_view = None
+    with (
+        patch.object(
+            application,
+            "abort_match",
+            side_effect=sqlite3.OperationalError("database is locked: SECRET_PATH"),
+        ),
+        patch.object(
+            repository,
+            "load_active_session",
+            side_effect=sqlite3.DatabaseError("persistent refresh failure: SECRET_PATH"),
+        ),
+    ):
+        view = controller.abort_match(human_confirmed=True)
+    assert view.application_mode == "PERSISTENCE_UNAVAILABLE"
+    assert view.persistence_reads_allowed is False
+    return view
+
+
+def test_preset_selection_direct_handler_has_zero_db_reads_in_no_cache_fallback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """LunaMAX direct probe: the handler must return before any preset lookup."""
+
+    repository, application, controller, window, qapp = _build_preset_probe_window(tmp_path)
+    try:
+        selected_index = window.self_team_preset_box.findText("Alpha")
+        assert selected_index > 0
+        window.self_team_preset_box.setCurrentIndex(selected_index)
+        qapp.processEvents()
+        name_before = window.self_team_preset_name.text()
+        assert name_before == "Alpha"
+
+        fallback_view = _make_no_cache_persistence_unavailable_view(
+            application, repository, controller
+        )
+        controller_list_spy = patch.object(
+            controller,
+            "list_self_team_presets",
+            wraps=controller.list_self_team_presets,
+        )
+        repository_list_spy = patch.object(
+            repository,
+            "list_self_team_presets",
+            wraps=repository.list_self_team_presets,
+        )
+        refresh_spy = patch.object(controller, "refresh", wraps=controller.refresh)
+        sql_trace: list[str] = []
+        repository.connection.set_trace_callback(sql_trace.append)
+        try:
+            with (
+                controller_list_spy as controller_list,
+                repository_list_spy as repository_list,
+                refresh_spy as refresh,
+            ):
+                window.render_view(fallback_view)
+                qapp.processEvents()
+                window._on_self_team_preset_selected(selected_index)
+                window._refresh_self_team_presets()
+                qapp.processEvents()
+
+                assert controller_list.call_count == 0
+                assert repository_list.call_count == 0
+                assert refresh.call_count == 0
+        finally:
+            repository.connection.set_trace_callback(None)
+
+        assert not any("self_team_presets" in statement.lower() for statement in sql_trace)
+        assert not any(statement.lstrip().upper().startswith("SELECT") for statement in sql_trace)
+        assert window.self_team_preset_name.text() == name_before
+        preset_controls = (
+            window.self_team_preset_box,
+            window.self_team_preset_name,
+            window.save_self_team_preset_button,
+            window.use_self_team_preset_button,
+            window.update_self_team_preset_button,
+            window.delete_self_team_preset_button,
+            window.import_self_team_button,
+        )
+        for control in preset_controls:
+            assert not control.isEnabled()
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+    finally:
+        window.close()
+        repository.close()
+
+
+def test_preset_selection_signal_has_zero_db_reads_when_selector_is_disabled(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A programmatic currentIndexChanged must still hit the guarded handler."""
+
+    repository, application, controller, window, qapp = _build_preset_probe_window(tmp_path)
+    try:
+        selected_index = window.self_team_preset_box.findText("Alpha")
+        other_index = window.self_team_preset_box.findText("Beta")
+        assert selected_index > 0
+        assert other_index > 0
+        assert selected_index != other_index
+        window.self_team_preset_box.setCurrentIndex(selected_index)
+        qapp.processEvents()
+        name_before = window.self_team_preset_name.text()
+        assert name_before == "Alpha"
+
+        fallback_view = _make_no_cache_persistence_unavailable_view(
+            application, repository, controller
+        )
+        window.render_view(fallback_view)
+        qapp.processEvents()
+        signal_spy = Mock()
+        window.self_team_preset_box.currentIndexChanged.connect(signal_spy)
+        controller_list_spy = patch.object(
+            controller,
+            "list_self_team_presets",
+            wraps=controller.list_self_team_presets,
+        )
+        repository_list_spy = patch.object(
+            repository,
+            "list_self_team_presets",
+            wraps=repository.list_self_team_presets,
+        )
+        refresh_spy = patch.object(controller, "refresh", wraps=controller.refresh)
+        sql_trace: list[str] = []
+        repository.connection.set_trace_callback(sql_trace.append)
+        try:
+            with (
+                controller_list_spy as controller_list,
+                repository_list_spy as repository_list,
+                refresh_spy as refresh,
+            ):
+                window.self_team_preset_box.setCurrentIndex(other_index)
+                qapp.processEvents()
+
+                assert signal_spy.call_count == 1
+                assert controller_list.call_count == 0
+                assert repository_list.call_count == 0
+                assert refresh.call_count == 0
+        finally:
+            repository.connection.set_trace_callback(None)
+
+        assert not any("self_team_presets" in statement.lower() for statement in sql_trace)
+        assert not any(statement.lstrip().upper().startswith("SELECT") for statement in sql_trace)
+        assert window.self_team_preset_name.text() == name_before
+        preset_controls = (
+            window.self_team_preset_box,
+            window.self_team_preset_name,
+            window.save_self_team_preset_button,
+            window.use_self_team_preset_button,
+            window.update_self_team_preset_button,
+            window.delete_self_team_preset_button,
+            window.import_self_team_button,
+        )
+        for control in preset_controls:
+            assert not control.isEnabled()
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+    finally:
+        window.close()
+        repository.close()
+
+
+def test_preset_controls_reenable_after_persistence_recovery(tmp_path: Path) -> None:
+    """Normal NO_ACTIVE_MATCH rendering restores the preset edit contract."""
+
+    repository, _application, controller, window, qapp = _build_preset_probe_window(
+        tmp_path, active_match=False
+    )
+    try:
+        selected_index = window.self_team_preset_box.findText("Alpha")
+        other_index = window.self_team_preset_box.findText("Beta")
+        window.self_team_preset_box.setCurrentIndex(selected_index)
+        qapp.processEvents()
+        assert window.self_team_preset_name.text() == "Alpha"
+        safe_view = controller.refresh()
+        assert safe_view.persistence_reads_allowed is True
+
+        cached_fallback = replace(safe_view, persistence_reads_allowed=False)
+        window.render_view(cached_fallback)
+        qapp.processEvents()
+        for control in (
+            window.self_team_preset_box,
+            window.self_team_preset_name,
+            window.save_self_team_preset_button,
+            window.use_self_team_preset_button,
+            window.update_self_team_preset_button,
+            window.delete_self_team_preset_button,
+            window.import_self_team_button,
+        ):
+            assert not control.isEnabled()
+
+        recovered = controller.refresh()
+        window.render_view(recovered)
+        qapp.processEvents()
+        assert recovered.persistence_reads_allowed is True
+        assert window.self_team_preset_box.isEnabled()
+        assert window.self_team_preset_name.isEnabled()
+        assert window.save_self_team_preset_button.isEnabled()
+        assert window.use_self_team_preset_button.isEnabled()
+        assert window.update_self_team_preset_button.isEnabled()
+        assert window.delete_self_team_preset_button.isEnabled()
+        assert window.import_self_team_button.isEnabled()
+
+        window.self_team_preset_box.setCurrentIndex(other_index)
+        qapp.processEvents()
+        assert window.self_team_preset_name.text() == "Beta"
+    finally:
+        window.close()
+        repository.close()
 
 
 # --- Issue #31 (05 REWORK): MatchFlowWindow-specific fail-closed controls ---

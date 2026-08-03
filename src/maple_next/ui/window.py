@@ -650,6 +650,8 @@ class MapleMainWindow(QMainWindow):
         self._refresh_self_team_presets()
 
     def _refresh_self_team_presets(self, selected_id: str | None = None) -> None:
+        if not self._mutation_slots_allowed():
+            return
         self.self_team_preset_box.blockSignals(True)
         self.self_team_preset_box.clear()
         self.self_team_preset_box.addItem("選択してください", None)
@@ -671,6 +673,8 @@ class MapleMainWindow(QMainWindow):
             field.setText(value)
 
     def _on_self_team_preset_selected(self, _index: int) -> None:
+        if not self._mutation_slots_allowed():
+            return
         preset_id = self._selected_self_team_preset_id()
         preset = next(
             (
@@ -1050,11 +1054,23 @@ class MapleMainWindow(QMainWindow):
         for field in self.self_team_inputs:
             field.setEnabled(self_team_editable)
         preset_selected = self._selected_self_team_preset_id() is not None
-        self.save_self_team_preset_button.setEnabled(self_team_editable)
-        self.import_self_team_button.setEnabled(self_team_editable)
-        self.use_self_team_preset_button.setEnabled(self_team_editable and preset_selected)
-        self.update_self_team_preset_button.setEnabled(self_team_editable and preset_selected)
-        self.delete_self_team_preset_button.setEnabled(self_team_editable and preset_selected)
+        preset_controls_enabled = (
+            current.persistence_reads_allowed
+            and self_team_editable
+        )
+        self.self_team_preset_box.setEnabled(preset_controls_enabled)
+        self.self_team_preset_name.setEnabled(preset_controls_enabled)
+        self.save_self_team_preset_button.setEnabled(preset_controls_enabled)
+        self.import_self_team_button.setEnabled(preset_controls_enabled)
+        self.use_self_team_preset_button.setEnabled(
+            preset_controls_enabled and preset_selected
+        )
+        self.update_self_team_preset_button.setEnabled(
+            preset_controls_enabled and preset_selected
+        )
+        self.delete_self_team_preset_button.setEnabled(
+            preset_controls_enabled and preset_selected
+        )
 
         if current.self_team and current.self_team != self._loaded_team:
             self._loaded_team = current.self_team
@@ -1205,6 +1221,8 @@ class MapleMainWindow(QMainWindow):
             self.reconnect_capture_button,
         ):
             button.setEnabled(False)
+        self.self_team_preset_box.setEnabled(False)
+        self.self_team_preset_name.setEnabled(False)
         for button in self._ocr_adopt_buttons.values():
             button.setEnabled(False)
 

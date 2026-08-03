@@ -25,9 +25,16 @@ from typing import Any, Final
 
 from maple_next.domain.enums import ActionType
 from maple_next.domain.models import ReviewedBoardSnapshot
+from maple_next.domain.team_build import (
+    ChampionsPokemonBuild,
+    ChampionsTeamBuild,
+)
 
 #: Fixed contract identifiers. Bound and checked on every result.
 CONTRACT_VERSION: Final[str] = "maple-turn-advice.v1"
+CONTRACT_VERSION_V2: Final[str] = "maple-turn-advice.v2"
+TURN_ADVICE_CONTRACT_VERSION_V1: Final[str] = CONTRACT_VERSION
+TURN_ADVICE_CONTRACT_VERSION_V2: Final[str] = CONTRACT_VERSION_V2
 JOB_TYPE: Final[str] = "TURN_ADVICE"
 
 #: Fixed and deterministic. Never derived from a live provider schema.
@@ -130,10 +137,14 @@ class TurnAdviceRequest:
     selected_three: tuple[str, str, str]
     legal_actions: tuple[LegalAction, ...]
     requested_output_schema: dict[str, Any]
+    self_team_build: ChampionsTeamBuild | None = None
+    self_team_build_sha256: str | None = None
+    selected_three_builds: tuple[ChampionsPokemonBuild, ...] = ()
+    self_active_build: ChampionsPokemonBuild | None = None
 
     def __post_init__(self) -> None:
-        if self.contract_version != CONTRACT_VERSION:
-            raise ValueError("contract_version must be the fixed Turn Advice contract version")
+        if self.contract_version not in {CONTRACT_VERSION, CONTRACT_VERSION_V2}:
+            raise ValueError("contract_version must be a fixed Turn Advice contract version")
         if self.job_type != JOB_TYPE:
             raise ValueError("job_type must be TURN_ADVICE")
         if self.turn_number < 1:
@@ -163,6 +174,30 @@ class TurnAdviceRequest:
                 if action.switch_target == self.self_active:
                     raise ValueError("SWITCH.switch_target must not equal self_active")
 
+        if self.self_team_build is None:
+            if (
+                self.self_team_build_sha256 is not None
+                or self.selected_three_builds
+                or self.self_active_build is not None
+            ):
+                raise ValueError("names-only turn request must not carry build details")
+            if self.contract_version != CONTRACT_VERSION:
+                raise ValueError("names-only turn request must use v1")
+        else:
+            if self.contract_version != CONTRACT_VERSION_V2:
+                raise ValueError("detailed turn request must use v2")
+            if self.self_team_build.pokemon_names != tuple(
+                self.self_team_build.pokemon_names
+            ):
+                raise ValueError("invalid self team build")
+            if self.self_team_build_sha256 != self.self_team_build.sha256():
+                raise ValueError("self team build hash does not match build")
+            expected_builds = self.self_team_build.selected_members(self.selected_three)
+            if tuple(self.selected_three_builds) != expected_builds:
+                raise ValueError("selected_three_builds do not match selected_three")
+            if self.self_active_build != self.self_team_build.member_by_name(self.self_active):
+                raise ValueError("self_active_build does not match self_active")
+
 
 def compute_reviewed_snapshot_hash(reviewed_snapshot: ReviewedBoardSnapshot) -> str:
     """Deterministic SHA-256 of the reviewed-snapshot canonical content only."""
@@ -188,6 +223,7 @@ def build_turn_advice_request(
     self_active: str,
     selected_three: tuple[str, str, str],
     legal_actions: tuple[LegalAction, ...],
+    self_team_build: ChampionsTeamBuild | None = None,
 ) -> TurnAdviceRequest:
     """Build the canonical request from exact canonical-store values only.
 
@@ -197,7 +233,7 @@ def build_turn_advice_request(
     """
 
     return TurnAdviceRequest(
-        contract_version=CONTRACT_VERSION,
+        contract_version=(CONTRACT_VERSION_V2 if self_team_build is not None else CONTRACT_VERSION),
         job_type=JOB_TYPE,
         session_id=session_id,
         match_id=match_id,
@@ -211,6 +247,20 @@ def build_turn_advice_request(
         selected_three=selected_three,
         legal_actions=tuple(legal_actions),
         requested_output_schema=REQUESTED_OUTPUT_SCHEMA,
+        self_team_build=self_team_build,
+        self_team_build_sha256=(
+            self_team_build.sha256() if self_team_build is not None else None
+        ),
+        selected_three_builds=(
+            self_team_build.selected_members(selected_three)
+            if self_team_build is not None
+            else ()
+        ),
+        self_active_build=(
+            self_team_build.member_by_name(self_active)
+            if self_team_build is not None
+            else None
+        ),
     )
 
 
@@ -227,7 +277,7 @@ def _canonical_legal_action_dict(action: LegalAction) -> dict[str, Any]:
 def canonical_request_dict(request: TurnAdviceRequest) -> dict[str, Any]:
     """Render the request as a plain dict. Key order does not affect hashing."""
 
-    return {
+    payload: dict[str, Any] = {
         "contract_version": request.contract_version,
         "job_type": request.job_type,
         "session_id": request.session_id,
@@ -243,6 +293,17 @@ def canonical_request_dict(request: TurnAdviceRequest) -> dict[str, Any]:
         "legal_actions": [_canonical_legal_action_dict(a) for a in request.legal_actions],
         "requested_output_schema": request.requested_output_schema,
     }
+    if request.self_team_build is not None:
+        active_build = request.self_active_build
+        if active_build is None:
+            raise ValueError("detailed turn request is missing self_active_build")
+        payload["contract_version"] = request.contract_version
+        payload["self_team_build_sha256"] = request.self_team_build_sha256
+        payload["selected_three_builds"] = [
+            build.to_canonical_dict() for build in request.selected_three_builds
+        ]
+        payload["self_active_build"] = active_build.to_canonical_dict()
+    return payload
 
 
 def encode_canonical_request(request: TurnAdviceRequest) -> bytes:

@@ -18,7 +18,10 @@ from maple_next.domain.match_models import MatchExportRecord, MatchOutcomeRecord
 from maple_next.domain.models import BattleSession
 from maple_next.persistence.sqlite import SQLiteRepository
 
-MATCH_EXPORT_SCHEMA_VERSION = "maple-match.v2"
+MATCH_EXPORT_SCHEMA_VERSION = "maple-match.v1"
+MATCH_EXPORT_SCHEMA_VERSION_V1 = MATCH_EXPORT_SCHEMA_VERSION
+MATCH_EXPORT_SCHEMA_VERSION_V2 = "maple-match.v2"
+MATCH_EXPORT_SCHEMA_VERSION_DETAILED = MATCH_EXPORT_SCHEMA_VERSION_V2
 
 
 class MatchApplication(BattleApplication):
@@ -142,7 +145,7 @@ class MatchApplication(BattleApplication):
         record = MatchExportRecord(
             session_id=session.session_id,
             match_id=session.match_id,
-            schema_version=MATCH_EXPORT_SCHEMA_VERSION,
+            schema_version=str(payload["schema_version"]),
             export_path=str(export_path),
             sha256=digest,
             exported_at_utc=datetime.now(UTC).isoformat(),
@@ -187,13 +190,15 @@ class MatchApplication(BattleApplication):
             raise DomainError("REVIEWED_SELECTION_UNAVAILABLE")
         if session.current_applied_selection_id is None:
             raise DomainError("APPLIED_SELECTION_REQUIRED")
-        selection_facts = self.repository.get_selection_facts(
-            session.current_reviewed_selection_id
-        )
-        applied = self.repository.get_applied_selection(
-            session.current_applied_selection_id
-        )
+        selection_facts = self.repository.get_selection_facts(session.current_reviewed_selection_id)
+        applied = self.repository.get_applied_selection(session.current_applied_selection_id)
 
+        detailed_build = selection_facts.self_team_build
+        export_schema_version = (
+            MATCH_EXPORT_SCHEMA_VERSION_V2
+            if detailed_build is not None
+            else MATCH_EXPORT_SCHEMA_VERSION
+        )
         turns: list[dict[str, Any]] = []
         for turn in self.repository.list_turns(session.session_id):
             facts = self.repository.get_latest_turn_facts(turn.turn_id)
@@ -203,63 +208,65 @@ class MatchApplication(BattleApplication):
                 raise DomainError("CANONICAL_TURN_FACTS_MISSING")
             if actual is None:
                 raise DomainError("CANONICAL_ACTUAL_ACTION_MISSING")
-            turns.append(
-                {
-                    "turn_number": turn.turn_number,
-                    "reviewed_facts": {
-                        "self_active": facts.self_active,
-                        "opponent_active": facts.opponent_active,
-                        "self_hp": facts.self_hp.value,
-                        "opponent_hp": facts.opponent_hp.value,
-                        "legal_moves": list(facts.legal_moves),
-                        "legal_switches": list(facts.legal_switches),
-                        "human_note": facts.human_note,
-                        "provenance": "HUMAN_CONFIRMED",
-                        "created_at_utc": self.repository.get_turn_facts_created_at(
-                            facts.turn_facts_id
+            turn_payload: dict[str, Any] = {
+                "turn_number": turn.turn_number,
+                "reviewed_facts": {
+                    "self_active": facts.self_active,
+                    "opponent_active": facts.opponent_active,
+                    "self_hp": facts.self_hp.value,
+                    "opponent_hp": facts.opponent_hp.value,
+                    "legal_moves": list(facts.legal_moves),
+                    "legal_switches": list(facts.legal_switches),
+                    "human_note": facts.human_note,
+                    "provenance": "HUMAN_CONFIRMED",
+                    "created_at_utc": self.repository.get_turn_facts_created_at(
+                        facts.turn_facts_id
+                    ),
+                },
+                "advice": (
+                    {
+                        "source_type": advice.source_type,
+                        "model": advice.model,
+                        "recommended_action_type": advice.action_type.value,
+                        "recommended_action_name": advice.action_name,
+                        "opponent_prediction": advice.opponent_prediction,
+                        "rationale": advice.rationale,
+                        "warnings": list(advice.warnings),
+                        "binding": "APPLIED",
+                        "legality": "VALID",
+                        "created_at_utc": self.repository.get_turn_advice_created_at(
+                            advice.turn_advice_id
                         ),
-                    },
-                    "advice": (
-                        {
-                            "source_type": advice.source_type,
-                            "model": advice.model,
-                            "recommended_action_type": advice.action_type.value,
-                            "recommended_action_name": advice.action_name,
-                            "opponent_prediction": advice.opponent_prediction,
-                            "rationale": advice.rationale,
-                            "warnings": list(advice.warnings),
-                            "binding": "APPLIED",
-                            "legality": "VALID",
-                            "created_at_utc": self.repository.get_turn_advice_created_at(
-                                advice.turn_advice_id
-                            ),
-                        }
-                        if advice is not None
-                        else None
-                    ),
-                    "self_executed_action": {
-                        "action_type": actual.action_type.value,
-                        "action_name": actual.action_name,
-                    },
-                    "opponent_executed_action": (
-                        {
-                            "action_type": actual.opponent_action_type.value,
-                            "action_name": actual.opponent_action_name,
-                        }
-                        if actual.opponent_action_type is not None
-                        else None
-                    ),
-                    "action_order": actual.action_order.value,
-                    "recorded_at_utc": self.repository.get_recorded_action_created_at(
-                        actual.action_id
-                    ),
-                    # Retained for backward compatibility with earlier exports.
-                    "actual_action": {
-                        "action_type": actual.action_type.value,
-                        "action_name": actual.action_name,
-                    },
-                }
-            )
+                    }
+                    if advice is not None
+                    else None
+                ),
+                "self_executed_action": {
+                    "action_type": actual.action_type.value,
+                    "action_name": actual.action_name,
+                },
+                "opponent_executed_action": (
+                    {
+                        "action_type": actual.opponent_action_type.value,
+                        "action_name": actual.opponent_action_name,
+                    }
+                    if actual.opponent_action_type is not None
+                    else None
+                ),
+                "action_order": actual.action_order.value,
+                "recorded_at_utc": self.repository.get_recorded_action_created_at(actual.action_id),
+                # Retained for backward compatibility with earlier exports.
+                "actual_action": {
+                    "action_type": actual.action_type.value,
+                    "action_name": actual.action_name,
+                },
+            }
+            if detailed_build is not None:
+                active_build = detailed_build.member_by_name(facts.self_active)
+                turn_payload["reviewed_facts"]["self_active_build"] = (
+                    active_build.to_canonical_dict()
+                )
+            turns.append(turn_payload)
 
         action_history = [
             {
@@ -276,20 +283,28 @@ class MatchApplication(BattleApplication):
             }
             for action in self.repository.list_recorded_actions(session.session_id)
         ]
+        selection_payload: dict[str, Any] = {
+            "self_team": list(selection_facts.self_team),
+            "opponent_team": list(selection_facts.opponent_team),
+            "selected_three": list(applied.selected_three),
+            "lead": applied.lead,
+        }
+        if detailed_build is not None:
+            selection_payload["self_team_build"] = detailed_build.to_canonical_dict()
+            selection_payload["self_team_build_sha256"] = selection_facts.self_team_build_sha256
+            selection_payload["selected_three_builds"] = [
+                member.to_canonical_dict()
+                for member in detailed_build.selected_members(applied.selected_three)
+            ]
         return {
-            "schema_version": MATCH_EXPORT_SCHEMA_VERSION,
+            "schema_version": export_schema_version,
             "match_id": session.match_id,
             "session_id": session.session_id,
             "generation": session.generation,
             "outcome": outcome.outcome.value,
             "ended_at_utc": outcome.ended_at_utc,
             "final_battle_revision": outcome.final_battle_revision,
-            "selection": {
-                "self_team": list(selection_facts.self_team),
-                "opponent_team": list(selection_facts.opponent_team),
-                "selected_three": list(applied.selected_three),
-                "lead": applied.lead,
-            },
+            "selection": selection_payload,
             "turns": turns,
             "action_history": action_history,
         }

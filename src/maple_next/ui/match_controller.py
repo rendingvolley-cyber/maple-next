@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from maple_next.application.match_service import MatchApplication
+from maple_next.application.projection import DomainProjection
 from maple_next.application.service import DomainError
 from maple_next.domain.enums import MatchOutcome
 from maple_next.persistence.sqlite import SQLiteRepository
@@ -61,6 +62,14 @@ _MATCH_ERROR_MESSAGES = {
     "EXPECTED_MATCH_EXPORTED": "MATCH JSONの保存成功後にNEW MATCHを実行してください。",
 }
 
+_ABORT_FAILURE_MESSAGE = (
+    "stale対戦の終了に失敗しました。canonical stateは変更されていません。"
+)
+_PERSISTENT_ABORT_FAILURE_MESSAGE = (
+    "stale対戦の終了に失敗しました。データベースを読み込めないため、"
+    "直前の安全な画面を維持しています。"
+)
+
 
 def _match_message(error: DomainError) -> str:
     code = str(error)
@@ -88,6 +97,7 @@ class MatchFlowController(TurnAdviceIntegrationController):
             turn_gemini_adapter,
         )
         self._match_application = application
+        self._last_safe_match_view: MatchOperatorView | None = None
 
     def refresh(self) -> MatchOperatorView:
         base = super().refresh()
@@ -113,7 +123,7 @@ class MatchFlowController(TurnAdviceIntegrationController):
                 export_path = export.export_path
                 export_sha256 = export.sha256
                 export_schema_version = export.schema_version
-        return MatchOperatorView(
+        view = MatchOperatorView(
             projection=base.projection,
             error_message=base.error_message,
             self_team=base.self_team,
@@ -132,6 +142,8 @@ class MatchFlowController(TurnAdviceIntegrationController):
             export_sha256=export_sha256,
             export_schema_version=export_schema_version,
         )
+        self._last_safe_match_view = view
+        return view
 
     def end_match(self, outcome: str, *, human_confirmed: bool) -> MatchOperatorView:
         try:
@@ -154,17 +166,56 @@ class MatchFlowController(TurnAdviceIntegrationController):
         return self.refresh()
 
     def abort_match(self, *, human_confirmed: bool) -> MatchOperatorView:
+        fallback_view = self._last_safe_match_view
+        abort_failed = False
         try:
             self._match_application.abort_match(human_confirmed=human_confirmed)
         except DomainError as error:
             self._error_message = _match_message(error)
         except (RuntimeError, sqlite3.Error):
-            self._error_message = (
-                "stale対戦の終了に失敗しました。canonical stateは変更されていません。"
-            )
+            abort_failed = True
+            self._error_message = _ABORT_FAILURE_MESSAGE
         else:
             self._error_message = None
-        return self.refresh()
+        try:
+            return self.refresh()
+        except sqlite3.Error:
+            if not abort_failed:
+                raise
+            self._error_message = _PERSISTENT_ABORT_FAILURE_MESSAGE
+            if fallback_view is not None:
+                return replace(
+                    fallback_view,
+                    error_message=_PERSISTENT_ABORT_FAILURE_MESSAGE,
+                )
+            return self._persistence_unavailable_view()
+
+    def _persistence_unavailable_view(self) -> MatchOperatorView:
+        return MatchOperatorView(
+            projection=DomainProjection(
+                application_mode="PERSISTENCE_UNAVAILABLE",
+                primary_cta="PERSISTENCE_UNAVAILABLE",
+                primary_cta_enabled=False,
+                secondary_actions=(),
+                message="PERSISTENCE_UNAVAILABLE",
+                provider_status="UNAVAILABLE",
+                provider_send_enabled=False,
+                session_state="PERSISTENCE_UNAVAILABLE",
+                battle_revision=None,
+                metadata_revision=None,
+                session_id=None,
+                match_id=None,
+                generation=None,
+                current_reviewed_selection_id=None,
+                current_selection_advice_id=None,
+                current_applied_selection_id=None,
+            ),
+            error_message=_PERSISTENT_ABORT_FAILURE_MESSAGE,
+            self_team=(),
+            opponent_team=(),
+            advice=None,
+            applied_selection=None,
+        )
 
     def save_match_json(self) -> MatchOperatorView:
         try:

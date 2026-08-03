@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -273,6 +274,156 @@ def test_abort_controller_sanitizes_sqlite_errors(
     repository.close()
 
 
+def test_abort_controller_preserves_last_safe_view_on_persistent_sqlite_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, application, selection_adapter, turn_adapter = build_ready_application(
+        tmp_path
+    )
+    controller = MatchFlowController(
+        application,
+        repository,
+        selection_adapter,
+        turn_adapter,
+    )
+    safe_view = controller.refresh()
+    before = repository.load_active_session()
+    assert before is not None
+    counts_before = session_record_counts(repository, before.session_id)
+    sessions_before = repository.count_sessions()
+    original_save_session = repository.save_session
+    original_load_active_session = repository.load_active_session
+
+    def save_then_fail(session: object) -> None:
+        original_save_session(session)  # type: ignore[arg-type]
+        raise sqlite3.OperationalError(
+            "database is locked: SECRET_PATH UPDATE battle_sessions"
+        )
+
+    def fail_refresh_read() -> None:
+        raise sqlite3.DatabaseError(
+            "persistent read failure: SECRET_PATH SELECT battle_sessions"
+        )
+
+    monkeypatch.setattr(repository, "save_session", save_then_fail)
+    monkeypatch.setattr(repository, "load_active_session", fail_refresh_read)
+    failed = controller.abort_match(human_confirmed=True)
+
+    expected = (
+        "stale対戦の終了に失敗しました。データベースを読み込めないため、"
+        "直前の安全な画面を維持しています。"
+    )
+    assert failed == replace(safe_view, error_message=expected)
+    assert controller._last_safe_match_view == safe_view
+    assert failed.projection == safe_view.projection
+    assert failed.session_state == safe_view.session_state == before.state.value
+    assert failed.projection.session_id == before.session_id
+    assert failed.projection.match_id == before.match_id
+    assert failed.battle_revision == before.battle_revision
+    assert all(
+        forbidden not in failed.error_message
+        for forbidden in (
+            "DatabaseError",
+            "OperationalError",
+            "database is locked",
+            "SECRET_PATH",
+            "SELECT battle_sessions",
+            "UPDATE battle_sessions",
+            str(repository.database_path),
+        )
+    )
+
+    monkeypatch.setattr(repository, "load_active_session", original_load_active_session)
+    after = repository.load_active_session()
+    assert after == before
+    assert after.active_slot == 1
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert repository.count_sessions() == sessions_before
+
+    recovered = controller.refresh()
+    assert recovered.projection == safe_view.projection
+    assert controller._last_safe_match_view == recovered
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+    repository.close()
+
+
+def test_abort_controller_without_safe_view_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, application, selection_adapter, turn_adapter = build_ready_application(
+        tmp_path
+    )
+    controller = MatchFlowController(
+        application,
+        repository,
+        selection_adapter,
+        turn_adapter,
+    )
+
+    def fail_abort(*, human_confirmed: bool) -> None:
+        assert human_confirmed is True
+        raise sqlite3.OperationalError("database is locked: SECRET_PATH")
+
+    def fail_refresh_read() -> None:
+        raise sqlite3.DatabaseError("malformed database: SECRET_PATH SELECT")
+
+    monkeypatch.setattr(application, "abort_match", fail_abort)
+    monkeypatch.setattr(repository, "load_active_session", fail_refresh_read)
+    failed = controller.abort_match(human_confirmed=True)
+
+    assert failed.application_mode == "PERSISTENCE_UNAVAILABLE"
+    assert failed.session_state == "PERSISTENCE_UNAVAILABLE"
+    assert failed.projection.session_id is None
+    assert failed.projection.match_id is None
+    assert failed.projection.generation is None
+    assert failed.projection.primary_cta_enabled is False
+    assert failed.projection.provider_send_enabled is False
+    assert failed.projection.secondary_actions == ()
+    assert failed.self_team == ()
+    assert failed.opponent_team == ()
+    assert failed.advice is None
+    assert failed.applied_selection is None
+    assert "SECRET_PATH" not in failed.error_message
+    assert "database" not in failed.error_message.lower()
+    assert controller._last_safe_match_view is None
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+    repository.close()
+
+
+def test_refresh_database_error_does_not_replace_last_safe_view(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, application, selection_adapter, turn_adapter = build_ready_application(
+        tmp_path
+    )
+    controller = MatchFlowController(
+        application,
+        repository,
+        selection_adapter,
+        turn_adapter,
+    )
+    safe_view = controller.refresh()
+
+    def fail_mid_refresh(_session_id: str) -> None:
+        raise sqlite3.DatabaseError("SECRET_PATH SELECT match_outcomes")
+
+    monkeypatch.setattr(repository, "get_match_outcome", fail_mid_refresh)
+    with pytest.raises(sqlite3.DatabaseError, match="SECRET_PATH"):
+        controller.refresh()
+
+    assert controller._last_safe_match_view == safe_view
+    assert repository.load_active_session() is not None
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+    repository.close()
+
+
 def test_abort_after_restart_is_fail_safe_and_sanitized(tmp_path: Path) -> None:
     repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
     session = repository.load_active_session()
@@ -400,6 +551,11 @@ def test_ui_abort_sqlite_failure_is_sanitized_and_rolled_back(
     window = MatchFlowWindow(controller)
     window.show()
     qapp.processEvents()
+    safe_view = controller.refresh()
+    original_load_active_session = repository.load_active_session
+    old_session_label = window.session_state_label.text()
+    old_revision_label = window.battle_revision_label.text()
+    old_advice = window.advice_three_label.text()
 
     def save_then_fail(session: object) -> None:
         original_save_session(session)  # type: ignore[arg-type]
@@ -408,7 +564,14 @@ def test_ui_abort_sqlite_failure_is_sanitized_and_rolled_back(
             "UPDATE battle_sessions"
         )
 
+    def fail_refresh_read() -> None:
+        raise sqlite3.DatabaseError(
+            f"persistent read failure: SECRET_PATH {repository.database_path} "
+            "SELECT battle_sessions"
+        )
+
     monkeypatch.setattr(repository, "save_session", save_then_fail)
+    monkeypatch.setattr(repository, "load_active_session", fail_refresh_read)
     with patch.object(
         QMessageBox,
         "exec",
@@ -417,7 +580,10 @@ def test_ui_abort_sqlite_failure_is_sanitized_and_rolled_back(
         window.abort_match_button.click()
         qapp.processEvents()
 
-    expected = "stale対戦の終了に失敗しました。canonical stateは変更されていません。"
+    expected = (
+        "stale対戦の終了に失敗しました。データベースを読み込めないため、"
+        "直前の安全な画面を維持しています。"
+    )
     assert window.error_label.text() == expected
     assert all(
         forbidden not in window.error_label.text()
@@ -425,9 +591,21 @@ def test_ui_abort_sqlite_failure_is_sanitized_and_rolled_back(
             "database is locked",
             "SECRET_PATH",
             "UPDATE battle_sessions",
+            "SELECT battle_sessions",
             str(repository.database_path),
         )
     )
+    assert window.application_mode_label.text() == safe_view.application_mode
+    assert window.session_state_label.text() == old_session_label
+    assert window.battle_revision_label.text() == old_revision_label
+    assert window.advice_three_label.text() == old_advice
+    assert window.match_recovery_group.isVisible()
+    assert window.abort_match_button.isVisible()
+    assert window.abort_match_button.isEnabled()
+    assert not window.import_self_team_button.isVisible()
+    assert "NO_ACTIVE_MATCH" not in window.application_mode_label.text()
+
+    monkeypatch.setattr(repository, "load_active_session", original_load_active_session)
     after = repository.load_active_session()
     assert after == before
     assert session_record_counts(repository, before.session_id) == counts_before
@@ -435,6 +613,8 @@ def test_ui_abort_sqlite_failure_is_sanitized_and_rolled_back(
     assert selection_adapter.network_call_count == 0
     assert turn_adapter.network_call_count == 0
     assert repository.count_actions(before.session_id) == 0
+    recovered = controller.refresh()
+    assert recovered.projection == safe_view.projection
     window.close()
     repository.close()
 

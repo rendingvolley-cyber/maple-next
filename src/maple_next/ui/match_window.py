@@ -145,7 +145,7 @@ class MatchFlowWindow(TurnAdviceIntegrationWindow):
         self.export_schema_label.setText(current.export_schema_version or "—")
         self.new_match_after_export_button.setEnabled(exported)
 
-        recoverable = state not in {None, "MATCH_ENDED", "MATCH_EXPORTED"}
+        recoverable = "ABORT_MATCH" in current.projection.secondary_actions
         self.match_recovery_group.setVisible(recoverable)
         self.abort_match_button.setEnabled(recoverable)
 

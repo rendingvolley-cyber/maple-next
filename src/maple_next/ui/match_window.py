@@ -113,6 +113,12 @@ class MatchFlowWindow(TurnAdviceIntegrationWindow):
         if not self._match_widgets_ready:
             return
         if not isinstance(current, MatchOperatorView):
+            if not current.persistence_reads_allowed:
+                # A durable read is exactly what a persistence_reads_allowed=False
+                # view must never trigger -- render safe placeholders instead of
+                # refreshing, and never fabricate match-specific identity.
+                self._render_match_placeholder_fallback()
+                return
             current = self._match_controller.refresh()
 
         state = current.session_state
@@ -160,8 +166,53 @@ class MatchFlowWindow(TurnAdviceIntegrationWindow):
                 "MATCH JSONは保存済みです。次の対戦を始める場合はNEW MATCHを押してください。"
             )
 
+        if not current.persistence_reads_allowed:
+            self._disable_match_mutation_controls()
+
+    def _render_match_placeholder_fallback(self) -> None:
+        """persistence_reads_allowed=False with a non-MatchOperatorView view.
+
+        No match-specific data (outcome, export summary, ...) is available
+        without a durable read, so every match-only group is hidden rather
+        than showing fabricated or stale identity, and every match mutation
+        control is force-disabled.
+        """
+
+        self.match_end_group.setVisible(False)
+        self.match_summary_group.setVisible(False)
+        self.match_export_group.setVisible(False)
+        self.match_recovery_group.setVisible(False)
+        self._disable_match_mutation_controls()
+
+    def _disable_match_mutation_controls(self) -> None:
+        """Fail-closed: force-disable every match-lifecycle control this
+        subclass owns.
+
+        The base ``MapleMainWindow._disable_mutation_controls`` cannot see
+        these widgets, and this method's own state-based enablement above
+        runs *before* this call within the same render pass -- so this must
+        run last, unconditionally, whenever the rendered view was built
+        without a durable DB read (cached safe fallback or no-cache
+        PERSISTENCE_UNAVAILABLE). Retrying abort, or any other match
+        mutation, while canonical state cannot be confirmed is not allowed;
+        recovery only happens through a normal, durable refresh.
+        """
+
+        for widget in (
+            self.outcome_box,
+            self.outcome_confirm_checkbox,
+            self.end_match_button,
+            self.save_match_button,
+            self.new_match_after_export_button,
+            self.abort_match_button,
+        ):
+            widget.setEnabled(False)
+
     def _update_end_match_button(self, _value: object = None) -> None:
         if not self._match_widgets_ready:
+            return
+        if not self._persistence_reads_allowed:
+            self.end_match_button.setEnabled(False)
             return
         self.end_match_button.setEnabled(
             self.outcome_box.isEnabled()
@@ -173,6 +224,8 @@ class MatchFlowWindow(TurnAdviceIntegrationWindow):
         )
 
     def _on_end_match(self, _checked: bool = False) -> None:
+        if not self._persistence_reads_allowed:
+            return
         view = self._match_controller.end_match(
             self.outcome_box.currentText(),
             human_confirmed=self.outcome_confirm_checkbox.isChecked(),
@@ -195,6 +248,8 @@ class MatchFlowWindow(TurnAdviceIntegrationWindow):
         return dialog
 
     def _on_abort_match(self, _checked: bool = False) -> None:
+        if not self._persistence_reads_allowed:
+            return
         dialog = self._build_abort_confirmation_dialog()
         if dialog.exec() != QMessageBox.StandardButton.Yes:
             return
@@ -204,7 +259,11 @@ class MatchFlowWindow(TurnAdviceIntegrationWindow):
         self.render_view(view)
 
     def _on_save_match(self, _checked: bool = False) -> None:
+        if not self._persistence_reads_allowed:
+            return
         self.render_view(self._match_controller.save_match_json())
 
     def _on_new_match_after_export(self, _checked: bool = False) -> None:
+        if not self._persistence_reads_allowed:
+            return
         self.render_view(self._match_controller.new_match_after_export())

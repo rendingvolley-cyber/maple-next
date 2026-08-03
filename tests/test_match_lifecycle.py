@@ -628,7 +628,10 @@ def test_ui_abort_sqlite_failure_is_sanitized_and_rolled_back(
     assert window.advice_three_label.text() == old_advice
     assert window.match_recovery_group.isVisible()
     assert window.abort_match_button.isVisible()
-    assert window.abort_match_button.isEnabled()
+    # Retrying abort (or any other match mutation) while the DB state cannot
+    # be confirmed is no longer allowed: only a durable, successful refresh
+    # may re-enable it.
+    assert not window.abort_match_button.isEnabled()
     assert not window.import_self_team_button.isVisible()
     assert "NO_ACTIVE_MATCH" not in window.application_mode_label.text()
 
@@ -642,6 +645,9 @@ def test_ui_abort_sqlite_failure_is_sanitized_and_rolled_back(
     assert repository.count_actions(before.session_id) == 0
     recovered = controller.refresh()
     assert recovered.projection == safe_view.projection
+    window.render_view(recovered)
+    assert recovered.persistence_reads_allowed is True
+    assert window.abort_match_button.isEnabled()
     window.close()
     repository.close()
 
@@ -1489,6 +1495,13 @@ def test_no_cache_persistence_unavailable_view_disables_all_mutation_controls(
     for button in mutation_buttons:
         assert not button.isEnabled(), button.text()
 
+    # Match-specific non-button controls (issue #31 05 REWORK item 17): the
+    # outcome combobox and its confirmation checkbox must also fail closed,
+    # even though they are not QPushButtons and cannot be exercised via a
+    # synthetic .click().
+    assert not window.outcome_box.isEnabled()
+    assert not window.outcome_confirm_checkbox.isEnabled()
+
     for button in mutation_buttons:
         button.click()
     qapp.processEvents()
@@ -1503,4 +1516,628 @@ def test_no_cache_persistence_unavailable_view_disables_all_mutation_controls(
     assert session_record_counts(repository, before.session_id) == counts_before
     assert repository.count_sessions() == 1
     window.close()
+    repository.close()
+
+
+# --- Issue #31 (05 REWORK): MatchFlowWindow-specific fail-closed controls ---
+#
+# The 05 independent re-verification of PR #39 reproduced a High finding:
+# MatchFlowController.abort_match() was the only match-lifecycle command with
+# a symmetric sqlite3.Error boundary and the only render path gated on
+# OperatorView.persistence_reads_allowed. end_match/save_match_json/
+# new_match_after_export caught only (DomainError, RuntimeError), and
+# MatchFlowWindow.render_view() re-evaluated outcome/end/save/new-match/abort
+# controls purely from session state, so a cached fallback view built from a
+# pre-failure endable state (WIN/LOSE already selected and confirmed) could
+# re-enable end_match_button and reach an unguarded sqlite3 write from a Qt
+# slot. The tests below reproduce that exact scenario and its close cousins.
+
+
+def test_cached_fallback_disables_match_lifecycle_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Section 8: the High finding itself, reproduced end-to-end."""
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    record_one_turn(application, turn_adapter)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    safe_view = controller.refresh()
+    assert safe_view.session_state == "TURN_RECORDED"
+    window.render_view(safe_view)
+    window.outcome_box.setCurrentText(MatchOutcome.WIN.value)
+    window.outcome_confirm_checkbox.setChecked(True)
+    qapp.processEvents()
+    assert window.end_match_button.isEnabled()
+
+    original_save_session = repository.save_session
+    original_load_active_session = repository.load_active_session
+
+    def save_then_fail(session: object) -> None:
+        original_save_session(session)  # type: ignore[arg-type]
+        raise sqlite3.OperationalError(
+            "database is locked: SECRET_PATH UPDATE battle_sessions"
+        )
+
+    load_call_count = 0
+
+    def load_active_session_selective_failure() -> object:
+        nonlocal load_call_count
+        load_call_count += 1
+        if load_call_count == 2:
+            raise sqlite3.DatabaseError(
+                "persistent refresh failure: SECRET_PATH SELECT battle_sessions"
+            )
+        return original_load_active_session()
+
+    monkeypatch.setattr(repository, "save_session", save_then_fail)
+    monkeypatch.setattr(repository, "load_active_session", load_active_session_selective_failure)
+
+    fallback_view = controller.abort_match(human_confirmed=True)
+    assert fallback_view.persistence_reads_allowed is False
+    window.render_view(fallback_view)
+    qapp.processEvents()
+
+    # Display may be preserved...
+    assert window.outcome_box.currentText() == MatchOutcome.WIN.value
+    assert window.outcome_confirm_checkbox.isChecked() is True
+    # ...but every control must fail closed.
+    assert not window.outcome_box.isEnabled()
+    assert not window.outcome_confirm_checkbox.isEnabled()
+    assert not window.end_match_button.isEnabled()
+
+    with patch.object(controller, "end_match", wraps=controller.end_match) as end_spy:
+        window._on_end_match()
+        qapp.processEvents()
+        assert end_spy.call_count == 0
+
+        window.end_match_button.click()
+        qapp.processEvents()
+        assert end_spy.call_count == 0
+
+    monkeypatch.setattr(repository, "load_active_session", original_load_active_session)
+    after = repository.load_active_session()
+    assert after is not None
+    assert after.state is BattleState.TURN_RECORDED
+    assert repository.get_match_outcome(after.session_id) is None
+    window.close()
+    repository.close()
+
+
+def test_cached_match_ended_fallback_disables_save(tmp_path: Path) -> None:
+    """Section 9: a cached MATCH_ENDED view must fail closed on SAVE."""
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    record_one_turn(application, turn_adapter)
+    application.end_match(MatchOutcome.WIN, human_confirmed=True)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    safe_view = controller.refresh()
+    assert safe_view.session_state == "MATCH_ENDED"
+    window.render_view(safe_view)
+    assert window.save_match_button.isEnabled()
+    outcome_before = window.match_outcome_label.text()
+    match_id_before = window.match_id_label.text()
+    export_directory = application.export_directory
+
+    fallback_view = replace(
+        safe_view,
+        error_message=(
+            "操作結果をデータベースから確認できません。復旧するまで操作を停止しています。"
+        ),
+        persistence_reads_allowed=False,
+    )
+    window.render_view(fallback_view)
+    qapp.processEvents()
+
+    assert window.match_outcome_label.text() == outcome_before
+    assert window.match_id_label.text() == match_id_before
+    assert not window.save_match_button.isEnabled()
+
+    with patch.object(
+        controller, "save_match_json", wraps=controller.save_match_json
+    ) as save_spy:
+        window._on_save_match()
+        qapp.processEvents()
+        assert save_spy.call_count == 0
+
+        window.save_match_button.click()
+        qapp.processEvents()
+        assert save_spy.call_count == 0
+
+    assert not export_directory.exists()
+    session = repository.load_active_session()
+    assert session is not None
+    assert repository.get_match_export(session.session_id) is None
+    window.close()
+    repository.close()
+
+
+def test_cached_match_exported_fallback_disables_new_match(tmp_path: Path) -> None:
+    """Section 10: a cached MATCH_EXPORTED view must fail closed on NEW MATCH."""
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    application.end_match(MatchOutcome.WIN, human_confirmed=True)
+    application.export_match()
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    safe_view = controller.refresh()
+    assert safe_view.session_state == "MATCH_EXPORTED"
+    window.render_view(safe_view)
+    assert window.new_match_after_export_button.isEnabled()
+    export_file_before = window.export_file_label.text()
+    export_hash_before = window.export_hash_label.text()
+
+    sessions_before = repository.count_sessions()
+    before_session = repository.load_active_session()
+    assert before_session is not None
+
+    fallback_view = replace(
+        safe_view,
+        error_message=(
+            "操作結果をデータベースから確認できません。復旧するまで操作を停止しています。"
+        ),
+        persistence_reads_allowed=False,
+    )
+    window.render_view(fallback_view)
+    qapp.processEvents()
+
+    assert window.export_file_label.text() == export_file_before
+    assert window.export_hash_label.text() == export_hash_before
+    assert not window.new_match_after_export_button.isEnabled()
+
+    with patch.object(
+        controller, "new_match_after_export", wraps=controller.new_match_after_export
+    ) as new_match_spy:
+        window._on_new_match_after_export()
+        qapp.processEvents()
+        assert new_match_spy.call_count == 0
+
+        window.new_match_after_export_button.click()
+        qapp.processEvents()
+        assert new_match_spy.call_count == 0
+
+    after_session = repository.load_active_session()
+    assert after_session == before_session
+    assert after_session is not None
+    assert after_session.active_slot == before_session.active_slot
+    assert repository.count_sessions() == sessions_before
+    window.close()
+    repository.close()
+
+
+def test_cached_fallback_abort_control_is_disabled_and_dialog_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Section 11: cached fallback also retracts the previous "abort is
+    still retryable" behavior -- no dialog, no controller call, no click
+    side effect, until a durable refresh succeeds again."""
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qapp = QApplication.instance() or QApplication([])
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    window = MatchFlowWindow(controller)
+    window.show()
+    qapp.processEvents()
+
+    safe_view = controller.refresh()
+    assert "ABORT_MATCH" in safe_view.projection.secondary_actions
+    window.render_view(safe_view)
+    assert window.abort_match_button.isEnabled()
+
+    original_save_session = repository.save_session
+    original_load_active_session = repository.load_active_session
+
+    def save_then_fail(session: object) -> None:
+        original_save_session(session)  # type: ignore[arg-type]
+        raise sqlite3.OperationalError("database is locked: SECRET_PATH")
+
+    load_call_count = 0
+
+    def load_active_session_selective_failure() -> object:
+        nonlocal load_call_count
+        load_call_count += 1
+        if load_call_count == 2:
+            raise sqlite3.DatabaseError("persistent refresh failure: SECRET_PATH SELECT")
+        return original_load_active_session()
+
+    monkeypatch.setattr(repository, "save_session", save_then_fail)
+    monkeypatch.setattr(repository, "load_active_session", load_active_session_selective_failure)
+
+    fallback_view = controller.abort_match(human_confirmed=True)
+    assert fallback_view.persistence_reads_allowed is False
+    window.render_view(fallback_view)
+    qapp.processEvents()
+
+    assert not window.abort_match_button.isEnabled()
+
+    with (
+        patch.object(
+            window,
+            "_build_abort_confirmation_dialog",
+            wraps=window._build_abort_confirmation_dialog,
+        ) as dialog_spy,
+        patch.object(controller, "abort_match", wraps=controller.abort_match) as abort_spy,
+    ):
+        window._on_abort_match()
+        qapp.processEvents()
+        assert dialog_spy.call_count == 0
+        assert abort_spy.call_count == 0
+
+        window.abort_match_button.click()
+        qapp.processEvents()
+        assert dialog_spy.call_count == 0
+        assert abort_spy.call_count == 0
+
+    monkeypatch.setattr(repository, "load_active_session", original_load_active_session)
+    recovered = controller.refresh()
+    window.render_view(recovered)
+    assert recovered.persistence_reads_allowed is True
+    assert "ABORT_MATCH" in recovered.projection.secondary_actions
+    assert window.abort_match_button.isEnabled()
+    window.close()
+    repository.close()
+
+
+def test_controller_end_match_sqlite_failure_is_sanitized_and_reversible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Section 12: end_match now has abort_match's symmetric SQLite boundary."""
+
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    record_one_turn(application, turn_adapter)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    controller.refresh()
+    before = repository.load_active_session()
+    assert before is not None
+    counts_before = session_record_counts(repository, before.session_id)
+
+    original_save_session = repository.save_session
+    original_load_active_session = repository.load_active_session
+
+    def save_then_fail(session: object) -> None:
+        original_save_session(session)  # type: ignore[arg-type]
+        raise sqlite3.OperationalError(
+            "database is locked: SECRET_PATH UPDATE match_outcomes"
+        )
+
+    load_call_count = 0
+
+    def load_active_session_selective_failure() -> object:
+        nonlocal load_call_count
+        load_call_count += 1
+        if load_call_count == 2:
+            raise sqlite3.DatabaseError(
+                "persistent refresh: SECRET_PATH SELECT battle_sessions"
+            )
+        return original_load_active_session()
+
+    monkeypatch.setattr(repository, "save_session", save_then_fail)
+    monkeypatch.setattr(repository, "load_active_session", load_active_session_selective_failure)
+
+    view = controller.end_match(MatchOutcome.WIN.value, human_confirmed=True)
+
+    expected = "勝敗の保存に失敗しました。canonical stateは変更されていません。"
+    assert view.error_message == expected
+    assert view.persistence_reads_allowed is False
+    assert view.projection == controller._last_safe_match_view.projection  # type: ignore[union-attr]
+    assert all(
+        forbidden not in view.error_message
+        for forbidden in (
+            "OperationalError",
+            "DatabaseError",
+            "database is locked",
+            "SECRET_PATH",
+            "SELECT",
+            "UPDATE",
+        )
+    )
+
+    monkeypatch.setattr(repository, "load_active_session", original_load_active_session)
+    after = repository.load_active_session()
+    assert after is not None
+    assert after.session_id == before.session_id
+    assert after.state is before.state
+    assert after.battle_revision == before.battle_revision
+    assert after.active_slot == before.active_slot
+    assert repository.get_match_outcome(after.session_id) is None
+    assert session_record_counts(repository, before.session_id) == counts_before
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+    repository.close()
+
+
+def test_controller_export_sqlite_failure_is_sanitized_and_reversible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Section 13: export command DB persistence fails after the atomic file
+    write already succeeded. The DB row must not exist; whether the JSON
+    file itself exists is checked as an observed fact, not assumed."""
+
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    application.end_match(MatchOutcome.WIN, human_confirmed=True)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    controller.refresh()
+    before = repository.load_active_session()
+    assert before is not None
+    expected_export_path = application.export_directory / f"maple-match-{before.match_id}.json"
+
+    original_append_match_export = repository.append_match_export
+    original_load_active_session = repository.load_active_session
+
+    # export_match() re-validates the active session a second time inside
+    # its own transaction (race-condition guard) before calling
+    # append_match_export, so a simple call-count trigger on
+    # load_active_session would misfire on that internal re-check instead of
+    # the post-command refresh. Use a flag set by the actual failure point
+    # instead, so every load_active_session call up to and including that
+    # internal re-check still succeeds, and only calls strictly after the
+    # command has genuinely failed are affected.
+    command_failed = False
+
+    def append_then_fail(record: object) -> None:
+        nonlocal command_failed
+        command_failed = True
+        raise sqlite3.OperationalError(
+            "database is locked: SECRET_PATH INSERT match_exports"
+        )
+
+    def load_active_session_after_command_failure() -> object:
+        if command_failed:
+            raise sqlite3.DatabaseError(
+                "persistent refresh: SECRET_PATH SELECT battle_sessions"
+            )
+        return original_load_active_session()
+
+    monkeypatch.setattr(repository, "append_match_export", append_then_fail)
+    monkeypatch.setattr(
+        repository, "load_active_session", load_active_session_after_command_failure
+    )
+
+    view = controller.save_match_json()
+
+    expected = "MATCH JSONの保存に失敗しました。MATCH_ENDEDを維持しています。"
+    assert view.error_message == expected
+    assert view.persistence_reads_allowed is False
+    assert all(
+        forbidden not in view.error_message
+        for forbidden in (
+            "OperationalError",
+            "DatabaseError",
+            "database is locked",
+            "SECRET_PATH",
+            "SELECT",
+            "INSERT",
+        )
+    )
+
+    # Observed fact (not assumed): MatchApplication.export_match() performs
+    # the atomic filesystem write *before* the DB transaction that this test
+    # fails, so the JSON file for this attempt does land on disk even though
+    # the export DB row never commits. This is safe because a retried export
+    # is idempotent: it verifies existing bytes against the recomputed
+    # payload instead of blindly rewriting.
+    assert expected_export_path.exists(), (
+        "expected the atomic write to precede the failed DB transaction"
+    )
+    no_stray_temp_files = list(application.export_directory.glob(".*.tmp"))
+    assert no_stray_temp_files == [], "atomic write must not leave temp files behind"
+
+    monkeypatch.setattr(repository, "load_active_session", original_load_active_session)
+    after = repository.load_active_session()
+    assert after is not None
+    assert after.state is BattleState.MATCH_ENDED
+    assert repository.get_match_export(after.session_id) is None
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+
+    monkeypatch.setattr(repository, "append_match_export", original_append_match_export)
+    recovered = controller.save_match_json()
+    assert recovered.session_state == "MATCH_EXPORTED"
+    assert recovered.persistence_reads_allowed is True
+    repository.close()
+
+
+def test_controller_new_match_after_export_sqlite_failure_is_sanitized_and_reversible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Section 14: NEW MATCH after export fails persistently mid-transaction."""
+
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    application.end_match(MatchOutcome.WIN, human_confirmed=True)
+    application.export_match()
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    controller.refresh()
+    before = repository.load_active_session()
+    assert before is not None
+    sessions_before = repository.count_sessions()
+
+    original_load_active_session = repository.load_active_session
+
+    def insert_then_fail(session: object) -> None:
+        raise sqlite3.OperationalError(
+            "database is locked: SECRET_PATH INSERT battle_sessions"
+        )
+
+    load_call_count = 0
+
+    def load_active_session_selective_failure() -> object:
+        nonlocal load_call_count
+        load_call_count += 1
+        if load_call_count == 2:
+            raise sqlite3.DatabaseError(
+                "persistent refresh: SECRET_PATH SELECT battle_sessions"
+            )
+        return original_load_active_session()
+
+    monkeypatch.setattr(repository, "insert_session", insert_then_fail)
+    monkeypatch.setattr(repository, "load_active_session", load_active_session_selective_failure)
+
+    view = controller.new_match_after_export()
+
+    expected = "NEW MATCHの作成に失敗しました。前試合は変更されていません。"
+    assert view.error_message == expected
+    assert view.persistence_reads_allowed is False
+    assert all(
+        forbidden not in view.error_message
+        for forbidden in (
+            "OperationalError",
+            "DatabaseError",
+            "database is locked",
+            "SECRET_PATH",
+            "SELECT",
+            "INSERT",
+        )
+    )
+
+    monkeypatch.setattr(repository, "load_active_session", original_load_active_session)
+    after = repository.load_active_session()
+    assert after is not None
+    assert after.session_id == before.session_id
+    assert after.state is BattleState.MATCH_EXPORTED
+    assert after.active_slot == before.active_slot
+    assert after.generation == before.generation
+    assert repository.count_sessions() == sessions_before
+    assert selection_adapter.network_call_count == 0
+    assert turn_adapter.network_call_count == 0
+    repository.close()
+
+
+def test_end_match_success_with_refresh_failure_fails_closed_not_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Section 15 (end_match): the command really committed, so the returned
+    view must not be the stale pre-command safe view -- it must fail closed
+    to a no-cache, identity-free PERSISTENCE_UNAVAILABLE view instead."""
+
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    record_one_turn(application, turn_adapter)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    controller.refresh()
+
+    original_count_turns = repository.count_turns
+
+    def fail_count_turns(session_id: str) -> int:
+        raise sqlite3.DatabaseError("SECRET_PATH SELECT battle_turns")
+
+    monkeypatch.setattr(repository, "count_turns", fail_count_turns)
+
+    view = controller.end_match(MatchOutcome.WIN.value, human_confirmed=True)
+
+    assert view.application_mode == "PERSISTENCE_UNAVAILABLE"
+    assert view.persistence_reads_allowed is False
+    assert view.projection.session_id is None
+    assert view.projection.match_id is None
+    assert view.projection.generation is None
+    assert view.projection.primary_cta_enabled is False
+    assert view.projection.secondary_actions == ()
+    assert "SECRET_PATH" not in (view.error_message or "")
+    assert "SELECT" not in (view.error_message or "")
+
+    session = repository.load_active_session()
+    assert session is not None
+    assert session.state is BattleState.MATCH_ENDED
+    assert repository.get_match_outcome(session.session_id) is not None
+
+    monkeypatch.setattr(repository, "count_turns", original_count_turns)
+    recovered = controller.refresh()
+    assert recovered.session_state == "MATCH_ENDED"
+    assert recovered.persistence_reads_allowed is True
+    repository.close()
+
+
+def test_export_success_with_refresh_failure_fails_closed_not_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Section 15 (save_match_json): export really committed to the DB and
+    disk; the returned view must not misrepresent it as still MATCH_ENDED."""
+
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    application.end_match(MatchOutcome.WIN, human_confirmed=True)
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    controller.refresh()
+
+    original_count_turns = repository.count_turns
+
+    def fail_count_turns(session_id: str) -> int:
+        raise sqlite3.DatabaseError("SECRET_PATH SELECT battle_turns")
+
+    monkeypatch.setattr(repository, "count_turns", fail_count_turns)
+
+    view = controller.save_match_json()
+
+    assert view.application_mode == "PERSISTENCE_UNAVAILABLE"
+    assert view.persistence_reads_allowed is False
+    assert view.projection.session_id is None
+    assert "SECRET_PATH" not in (view.error_message or "")
+
+    session = repository.load_active_session()
+    assert session is not None
+    assert session.state is BattleState.MATCH_EXPORTED
+    assert repository.get_match_export(session.session_id) is not None
+
+    monkeypatch.setattr(repository, "count_turns", original_count_turns)
+    recovered = controller.refresh()
+    assert recovered.session_state == "MATCH_EXPORTED"
+    assert recovered.persistence_reads_allowed is True
+    repository.close()
+
+
+def test_new_match_success_with_refresh_failure_fails_closed_not_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Section 15 (new_match_after_export): the new session really exists;
+    the returned view must not misrepresent it as still MATCH_EXPORTED."""
+
+    repository, application, selection_adapter, turn_adapter = build_ready_application(tmp_path)
+    application.end_match(MatchOutcome.WIN, human_confirmed=True)
+    application.export_match()
+    controller = MatchFlowController(application, repository, selection_adapter, turn_adapter)
+    controller.refresh()
+    sessions_before = repository.count_sessions()
+
+    original_count_turns = repository.count_turns
+
+    def fail_count_turns(session_id: str) -> int:
+        raise sqlite3.DatabaseError("SECRET_PATH SELECT battle_turns")
+
+    monkeypatch.setattr(repository, "count_turns", fail_count_turns)
+
+    view = controller.new_match_after_export()
+
+    assert view.application_mode == "PERSISTENCE_UNAVAILABLE"
+    assert view.persistence_reads_allowed is False
+    assert view.projection.session_id is None
+    assert "SECRET_PATH" not in (view.error_message or "")
+
+    assert repository.count_sessions() == sessions_before + 1
+
+    monkeypatch.setattr(repository, "count_turns", original_count_turns)
+    recovered = controller.refresh()
+    assert recovered.session_state == "SELECTION_OPEN"
+    assert recovered.persistence_reads_allowed is True
     repository.close()

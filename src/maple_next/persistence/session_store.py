@@ -1,4 +1,4 @@
-"""BattleSession and reviewed Selection fact persistence."""
+"""BattleSession and immutable reviewed Selection fact persistence."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import cast
 
 from maple_next.domain.enums import BattleState
 from maple_next.domain.models import BattleSession, SelectionFacts
+from maple_next.domain.team_build import ChampionsTeamBuild
 from maple_next.persistence.base import StoreBase
 
 
@@ -109,18 +110,26 @@ class SessionStoreMixin(StoreBase):
         )
 
     def append_selection_facts(self, session_id: str, facts: SelectionFacts) -> None:
+        build_json = (
+            facts.self_team_build.canonical_json_bytes().decode("utf-8")
+            if facts.self_team_build is not None
+            else None
+        )
         self.connection.execute(
             """
             INSERT INTO reviewed_selection_facts (
                 reviewed_selection_id, session_id, self_team_json,
-                opponent_team_json, created_at
-            ) VALUES (?, ?, ?, ?, ?)
+                opponent_team_json, self_team_build_json,
+                self_team_build_sha256, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 facts.reviewed_selection_id,
                 session_id,
                 json.dumps(facts.self_team, ensure_ascii=False),
                 json.dumps(facts.opponent_team, ensure_ascii=False),
+                build_json,
+                facts.self_team_build_sha256,
                 self._now(),
             ),
         )
@@ -132,10 +141,36 @@ class SessionStoreMixin(StoreBase):
         ).fetchone()
         if row is None:
             raise KeyError(reviewed_selection_id)
-        self_team = cast(list[str], json.loads(str(row["self_team_json"])))
-        opponent_team = cast(list[str], json.loads(str(row["opponent_team_json"])))
-        return SelectionFacts(
-            reviewed_selection_id=reviewed_selection_id,
-            self_team=tuple(self_team),
-            opponent_team=tuple(opponent_team),
-        )
+        try:
+            self_team = cast(list[str], json.loads(str(row["self_team_json"])))
+            opponent_team = cast(list[str], json.loads(str(row["opponent_team_json"])))
+            raw_build = row["self_team_build_json"]
+            raw_hash = row["self_team_build_sha256"]
+            team_build: ChampionsTeamBuild | None = None
+            team_build_sha256: str | None = None
+            if raw_build is None:
+                if raw_hash is not None:
+                    raise ValueError("selection build hash without build")
+            else:
+                if raw_hash is None:
+                    raise ValueError("selection build without hash")
+                team_build = ChampionsTeamBuild.from_json_bytes(str(raw_build).encode("utf-8"))
+                team_build_sha256 = str(raw_hash)
+                if team_build.sha256() != team_build_sha256:
+                    raise ValueError("selection build hash mismatch")
+            return SelectionFacts(
+                reviewed_selection_id=reviewed_selection_id,
+                self_team=tuple(self_team),
+                opponent_team=tuple(opponent_team),
+                self_team_build=team_build,
+                self_team_build_sha256=team_build_sha256,
+            )
+        except (
+            TypeError,
+            ValueError,
+            KeyError,
+            IndexError,
+            json.JSONDecodeError,
+            RecursionError,
+        ) as exc:
+            raise ValueError("stored selection facts are invalid") from exc

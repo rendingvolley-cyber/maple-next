@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import TypeAlias, cast
 
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QPixmap
@@ -22,6 +22,7 @@ from maple_next.selection_roi.contracts import (
     SELECTION_SLOT_COUNT,
     UNKNOWN_LABEL,
     SelectionMatchBundle,
+    SelectionRoiError,
     SelectionSlotMatch,
 )
 from maple_next.selection_roi.service import SelectionRoiService
@@ -33,6 +34,7 @@ from maple_next.ui.match_window import MatchFlowWindow
 _SELECTION_ROI_INTERVAL_MS = 500
 _SELECTION_TAB_INDEX = 0
 _THUMBNAIL_SIZE = QSize(160, 90)
+SelectionIdentity: TypeAlias = tuple[str | None, str | None, int | None]
 
 
 class SelectionRoiMatchFlowWindow(MatchFlowWindow):
@@ -49,6 +51,9 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
         self._selection_roi_worker: LatestOnlySelectionRoiWorker | None = None
         self._selection_roi_timer: QTimer | None = None
         self._selection_roi_bundle: SelectionMatchBundle | None = None
+        self._selection_roi_bundle_identity: SelectionIdentity | None = None
+        self._selection_roi_render_identity: SelectionIdentity | None = None
+        self._selection_roi_submitted_identities: dict[str, SelectionIdentity] = {}
         self._selection_roi_last_submitted_frame_id: str | None = None
         self._selection_roi_facts_editable = False
         self._selection_roi_last_status_text = ""
@@ -64,6 +69,11 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
         self._selection_roi_timer = timer
         self._selection_roi_ready = True
         self.render_view()
+
+    @staticmethod
+    def _selection_identity(view: OperatorView) -> SelectionIdentity:
+        projection = view.projection
+        return (projection.session_id, projection.match_id, projection.generation)
 
     def _build_selection_roi_group(self) -> None:
         self.selection_roi_group = QGroupBox(
@@ -123,6 +133,10 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
         super().render_view(current)
         if not self._selection_roi_ready:
             return
+        current_identity = self._selection_identity(current)
+        if current_identity != self._selection_roi_render_identity:
+            self._clear_selection_roi_candidates()
+            self._selection_roi_render_identity = current_identity
         selection_open = current.projection.session_state == "SELECTION_OPEN"
         self._selection_roi_facts_editable = (
             current.persistence_reads_allowed
@@ -162,6 +176,14 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
             or not self._selection_roi_facts_editable
         ):
             return
+        current = self._controller.refresh()
+        current_identity = self._selection_identity(current)
+        if (
+            not current.persistence_reads_allowed
+            or current.projection.session_state != "SELECTION_OPEN"
+            or current_identity != self._selection_roi_render_identity
+        ):
+            return
         status, frame = self._capture_service.latest_snapshot()
         if (
             not status.available
@@ -180,17 +202,32 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
         if worker is None:
             return
         self._selection_roi_last_submitted_frame_id = frame.frame_id
+        self._selection_roi_submitted_identities[frame.frame_id] = current_identity
+        while len(self._selection_roi_submitted_identities) > 4:
+            oldest_frame_id = next(iter(self._selection_roi_submitted_identities))
+            del self._selection_roi_submitted_identities[oldest_frame_id]
         worker.submit(frame)
 
     def _on_selection_roi_result(self, payload: object) -> None:
-        if not isinstance(payload, SelectionMatchBundle):
+        if not isinstance(payload, SelectionMatchBundle) or payload.frame_id is None:
             return
+        submitted_identity = self._selection_roi_submitted_identities.pop(
+            payload.frame_id,
+            None,
+        )
+        current = self._controller.refresh()
+        current_identity = self._selection_identity(current)
         if (
-            self._last_rendered_session_state != "SELECTION_OPEN"
+            submitted_identity is None
+            or submitted_identity != current_identity
+            or current_identity != self._selection_roi_render_identity
+            or not current.persistence_reads_allowed
+            or current.projection.session_state != "SELECTION_OPEN"
             or self.header_tabs.currentIndex() != _SELECTION_TAB_INDEX
         ):
             return
         self._selection_roi_bundle = payload
+        self._selection_roi_bundle_identity = submitted_identity
         self._selection_roi_slot_matches = {
             slot.slot: slot for slot in payload.slots
         }
@@ -235,21 +272,28 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
 
     def _update_selection_roi_buttons(self) -> None:
         has_any = False
+        identity_current = (
+            self._selection_roi_bundle_identity is not None
+            and self._selection_roi_bundle_identity == self._selection_roi_render_identity
+        )
         for slot, button in self._selection_roi_apply_buttons.items():
             match = self._selection_roi_slot_matches.get(slot)
             enabled = (
                 self._selection_roi_facts_editable
+                and identity_current
                 and match is not None
                 and match.assigned_label != UNKNOWN_LABEL
             )
             button.setEnabled(enabled)
             has_any = has_any or enabled
         self.selection_roi_apply_all_button.setEnabled(
-            self._selection_roi_facts_editable and has_any
+            self._selection_roi_facts_editable and identity_current and has_any
         )
 
     def _apply_selection_roi_slot(self, slot: int) -> None:
         if not self._mutation_slots_allowed() or not self._selection_roi_facts_editable:
+            return
+        if self._selection_roi_bundle_identity != self._selection_roi_render_identity:
             return
         match = self._selection_roi_slot_matches.get(slot)
         if match is None or match.assigned_label == UNKNOWN_LABEL:
@@ -258,6 +302,8 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
 
     def _apply_selection_roi_all(self, _checked: bool = False) -> None:
         if not self._mutation_slots_allowed() or not self._selection_roi_facts_editable:
+            return
+        if self._selection_roi_bundle_identity != self._selection_roi_render_identity:
             return
         for slot in range(1, SELECTION_SLOT_COUNT + 1):
             field = self.opponent_team_inputs[slot - 1]
@@ -271,7 +317,9 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
         if not self._mutation_slots_allowed():
             return
         before = self._controller.refresh()
+        before_identity = self._selection_identity(before)
         bundle = self._selection_roi_bundle
+        bundle_identity = self._selection_roi_bundle_identity
         names = tuple(field.text().strip() for field in self.opponent_team_inputs)
         super()._on_confirm_facts(_checked)
         after = self._controller.refresh()
@@ -282,23 +330,50 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
             and reviewed_selection_id
             != before.projection.current_reviewed_selection_id
         )
-        if not confirmed or bundle is None or bundle.observation_id is None:
+        if (
+            not confirmed
+            or bundle is None
+            or bundle.observation_id is None
+            or bundle_identity != before_identity
+        ):
             return
         typed_names = cast(
             tuple[str, str, str, str, str, str],
             names,
         )
-        result = self._selection_roi_service.confirm_observation(
-            observation_id=bundle.observation_id,
-            opponent_names=typed_names,
-            reviewed_selection_id=reviewed_selection_id,
-        )
+        try:
+            result = self._selection_roi_service.confirm_observation(
+                observation_id=bundle.observation_id,
+                opponent_names=typed_names,
+                reviewed_selection_id=reviewed_selection_id,
+            )
+        except (OSError, SelectionRoiError):
+            self._set_selection_roi_status(
+                "相手6体は確認済みですが、ROI参照画像の保存に失敗しました。"
+            )
+            return
         self._set_selection_roi_status(
             "相手6体を確認しました。"
             f"参照追加={result.added_count} / "
             f"重複={result.duplicate_count} / "
             f"競合隔離={result.conflict_count}"
         )
+
+    def _clear_selection_roi_candidates(self) -> None:
+        self._selection_roi_bundle = None
+        self._selection_roi_bundle_identity = None
+        self._selection_roi_last_submitted_frame_id = None
+        self._selection_roi_submitted_identities.clear()
+        self._selection_roi_slot_matches.clear()
+        if not hasattr(self, "_selection_roi_thumbnail_labels"):
+            return
+        for slot in range(1, SELECTION_SLOT_COUNT + 1):
+            thumbnail = self._selection_roi_thumbnail_labels[slot]
+            thumbnail.clear()
+            thumbnail.setText("ROI —")
+            self._selection_roi_candidate_labels[slot].setText("候補なし")
+            self._selection_roi_apply_buttons[slot].setEnabled(False)
+        self.selection_roi_apply_all_button.setEnabled(False)
 
     def _set_selection_roi_status(self, text: str) -> None:
         if text == self._selection_roi_last_status_text:

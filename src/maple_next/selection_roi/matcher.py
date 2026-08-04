@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, cast
+from typing import Final
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 
 from maple_next.selection_roi.contracts import (
@@ -27,20 +28,16 @@ _SUPPORTED_IMAGE_SUFFIXES: Final[frozenset[str]] = frozenset(
 )
 
 
-def _normalized_png_bytes(image: QImage) -> bytes:
+def _normalized_pixel_bytes(image: QImage) -> bytes:
     """Return deterministic full-pixel bytes for exact duplicate identity."""
 
     normalized = image.convertToFormat(QImage.Format.Format_RGBA8888)
-    data = QByteArray()
-    buffer = QBuffer(data)
-    if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
-        raise SelectionRoiError("selection ROI image buffer is unavailable")
-    try:
-        if not normalized.save(buffer, b"PNG"):
-            raise SelectionRoiError("selection ROI image encoding failed")
-    finally:
-        buffer.close()
-    return cast(bytes, data.data())
+    pixel_bytes = normalized.constBits().tobytes()
+    expected_size = normalized.width() * normalized.height() * 4
+    if len(pixel_bytes) != expected_size:
+        raise SelectionRoiError("selection ROI pixel buffer has unexpected padding")
+    header = struct.pack(">II", normalized.width(), normalized.height())
+    return header + pixel_bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +50,7 @@ class ImageFingerprint:
     def from_image(cls, image: QImage) -> ImageFingerprint:
         if image.isNull() or image.width() <= 0 or image.height() <= 0:
             raise SelectionRoiError("selection ROI image is invalid")
-        exact_hash = hashlib.sha256(_normalized_png_bytes(image)).hexdigest()
+        exact_hash = hashlib.sha256(_normalized_pixel_bytes(image)).hexdigest()
         grayscale = image.convertToFormat(QImage.Format.Format_Grayscale8)
         signature_image = grayscale.scaled(
             _SIGNATURE_SIZE,

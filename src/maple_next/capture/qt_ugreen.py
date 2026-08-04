@@ -13,9 +13,12 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from typing import TypeVar
 
 from maple_next.capture.contracts import DeviceOpenResult, SourceFramePacket
+from maple_next.capture.format_policy import (
+    apply_preferred_720p_format,
+    select_exact_720p_format,
+)
 
 try:  # pragma: no cover - exercised only when PySide6 Multimedia is importable
     from PySide6.QtCore import QObject
@@ -44,22 +47,6 @@ def select_ugreen_device(descriptions: Sequence[str], selector: str) -> int | No
     return None
 
 
-_CameraFormatT = TypeVar("_CameraFormatT")
-
-
-def select_exact_720p_format(formats: Sequence[_CameraFormatT]) -> _CameraFormatT | None:
-    """Return the first device format whose declared resolution is 1280x720."""
-
-    for camera_format in formats:
-        try:
-            resolution = camera_format.resolution()  # type: ignore[attr-defined]
-            if resolution.width() == 1280 and resolution.height() == 720:
-                return camera_format
-        except Exception:  # noqa: BLE001 - malformed driver format is ignored
-            continue
-    return None
-
-
 class QtMultimediaUgreenBackend:
     """VideoCaptureBackend implementation backed by QMediaDevices/QCamera.
 
@@ -69,6 +56,10 @@ class QtMultimediaUgreenBackend:
     and at most once for each callback sequence, whether conversion succeeds
     or fails. A stalled malformed frame therefore cannot create a 10 ms retry
     loop, while a later distinct valid callback recovers normally.
+
+    The operator-selected low-load policy requests exact 1280x720 input. It
+    preserves the default cadence when choosing between multiple 720p formats
+    and falls back to Qt/driver auto-negotiation if 720p cannot be applied.
     """
 
     def __init__(self) -> None:
@@ -87,6 +78,7 @@ class QtMultimediaUgreenBackend:
         self._successful_conversion_count = 0
         self._failed_conversion_count = 0
         self._selected_resolution: tuple[int, int] | None = None
+        self._preferred_720p_applied = False
 
     def start(
         self,
@@ -125,9 +117,8 @@ class QtMultimediaUgreenBackend:
             self._device_label = "UGREEN capture device"
 
             self._owner = QObject()
-            # Deliberately do not call camera.setCameraFormat(): source cadence
-            # and stable driver negotiation matter more than maximizing FPS.
             camera = QCamera(chosen, self._owner)
+            self._preferred_720p_applied = apply_preferred_720p_format(camera, chosen)
             capture_session = QMediaCaptureSession(self._owner)
             video_sink = QVideoSink(self._owner)
             capture_session.setCamera(camera)
@@ -223,6 +214,7 @@ class QtMultimediaUgreenBackend:
             "successful_conversion_count": self._successful_conversion_count,
             "failed_conversion_count": self._failed_conversion_count,
             "selected_resolution": self._selected_resolution,
+            "preferred_720p_applied": self._preferred_720p_applied,
             "preview_mode": "fallback",
         }
 
@@ -259,3 +251,4 @@ class QtMultimediaUgreenBackend:
         self._successful_conversion_count = 0
         self._failed_conversion_count = 0
         self._selected_resolution = None
+        self._preferred_720p_applied = False

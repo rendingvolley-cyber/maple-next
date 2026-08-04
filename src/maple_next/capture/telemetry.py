@@ -17,18 +17,21 @@ class SourceFpsSampler:
     minimum_window_ns: int = 1_000_000_000
     _baseline_count: int | None = None
     _baseline_ns: int | None = None
+    _last_fps: float | None = None
 
     def reset(self) -> None:
         self._baseline_count = None
         self._baseline_ns = None
+        self._last_fps = None
 
     def sample(self, *, frame_count: int, now_ns: int) -> float | None:
-        """Return frames/second once a full window has elapsed.
+        """Return the latest stable frames/second observation.
 
-        Counter resets and non-increasing clocks fail closed by starting a new
-        window and returning ``None``. The baseline advances only after a
-        completed sample window, so early timer wakeups do not distort the
-        measurement.
+        A full window is required before the first value is produced. Early or
+        duplicate timer wakeups retain the most recent completed observation,
+        preventing the UI from flashing back to a dash between one-second
+        samples. Counter rollback or a genuinely decreasing monotonic clock
+        resets the window fail-closed.
         """
 
         if frame_count < 0 or now_ns < 0:
@@ -38,16 +41,20 @@ class SourceFpsSampler:
             self._baseline_count = frame_count
             self._baseline_ns = now_ns
             return None
-        if frame_count < self._baseline_count or now_ns <= self._baseline_ns:
+        if frame_count < self._baseline_count or now_ns < self._baseline_ns:
+            self.reset()
             self._baseline_count = frame_count
             self._baseline_ns = now_ns
             return None
+        if now_ns == self._baseline_ns:
+            return self._last_fps
 
         elapsed_ns = now_ns - self._baseline_ns
         if elapsed_ns < self.minimum_window_ns:
-            return None
+            return self._last_fps
 
         delta_frames = frame_count - self._baseline_count
         self._baseline_count = frame_count
         self._baseline_ns = now_ns
-        return delta_frames * 1_000_000_000 / elapsed_ns
+        self._last_fps = delta_frames * 1_000_000_000 / elapsed_ns
+        return self._last_fps

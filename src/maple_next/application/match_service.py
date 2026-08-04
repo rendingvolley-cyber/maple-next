@@ -18,9 +18,9 @@ from maple_next.domain.match_models import MatchExportRecord, MatchOutcomeRecord
 from maple_next.domain.models import BattleSession
 from maple_next.persistence.sqlite import SQLiteRepository
 
-MATCH_EXPORT_SCHEMA_VERSION = "maple-match.v1"
-MATCH_EXPORT_SCHEMA_VERSION_V1 = MATCH_EXPORT_SCHEMA_VERSION
-MATCH_EXPORT_SCHEMA_VERSION_V2 = "maple-match.v2"
+MATCH_EXPORT_SCHEMA_VERSION = "maple-match.v2"
+MATCH_EXPORT_SCHEMA_VERSION_V1 = "maple-match.v1"
+MATCH_EXPORT_SCHEMA_VERSION_V2 = MATCH_EXPORT_SCHEMA_VERSION
 MATCH_EXPORT_SCHEMA_VERSION_DETAILED = MATCH_EXPORT_SCHEMA_VERSION_V2
 
 

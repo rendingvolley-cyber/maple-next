@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
 from contextlib import ExitStack
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
+from uuid import UUID
 
 import pytest
 from PySide6.QtTest import QTest
@@ -1030,6 +1033,140 @@ def test_export_allowlist_and_schema_for_zero_turn_match(tmp_path: Path) -> None
     }
     assert payload["turns"] == []
     assert payload["action_history"] == []
+
+
+def test_names_only_export_preserves_v2_contract_through_full_lifecycle(
+    tmp_path: Path,
+) -> None:
+    fixed_timestamp = datetime(2025, 1, 2, 3, 4, 5, 678901, tzinfo=UTC)
+    uuid_values = iter(
+        UUID(f"00000000-0000-0000-0000-{index:012d}") for index in range(1, 15)
+    )
+
+    class FixedClock:
+        @staticmethod
+        def now(_tz: object) -> datetime:
+            return fixed_timestamp
+
+    def next_uuid() -> UUID:
+        return next(uuid_values)
+
+    repository = SQLiteRepository(tmp_path / "runtime" / "maple.db")
+    application = MatchApplication(repository, tmp_path / "user-data" / "exports")
+    try:
+        with (
+            patch("maple_next.application.service.uuid4", side_effect=next_uuid),
+            patch("maple_next.ui.dev_advice.uuid4", side_effect=next_uuid),
+            patch("maple_next.application.match_service.uuid4", side_effect=next_uuid),
+            patch("maple_next.application.service.datetime", FixedClock),
+            patch("maple_next.persistence.base.datetime", FixedClock),
+            patch("maple_next.application.match_service.datetime", FixedClock),
+        ):
+            application.new_match()
+            application.confirm_selection_facts(SELF_TEAM, OPPONENT_TEAM)
+            selection_adapter = MockSelectionAdviceAdapter()
+            selection_result = selection_adapter.submit(
+                application,
+                selected_three=("Meowscarada", "Gholdengo", "Dragonite"),
+                lead="Meowscarada",
+            )
+            assert selection_result.disposition is ResultDisposition.APPLIED
+            application.apply_selection(
+                selected_three=SELECTED_THREE,
+                lead="Dondozo",
+                human_confirmed=True,
+            )
+            record_one_turn(application, MockTurnAdviceAdapter())
+            application.end_match(MatchOutcome.WIN, human_confirmed=True)
+            record = application.export_match()
+
+        encoded = Path(record.export_path).read_bytes()
+        payload = json.loads(encoded.decode("utf-8"))
+        assert json.loads(encoded.decode("utf-8")) == payload
+        assert payload["schema_version"] == "maple-match.v2"
+        assert record.schema_version == "maple-match.v2"
+        expected_payload = {
+            "schema_version": "maple-match.v2",
+            "match_id": "00000000-0000-0000-0000-000000000002",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "generation": 1,
+            "outcome": "WIN",
+            "ended_at_utc": fixed_timestamp.isoformat(),
+            "final_battle_revision": 9,
+            "selection": {
+                "self_team": list(SELF_TEAM),
+                "opponent_team": list(OPPONENT_TEAM),
+                "selected_three": list(SELECTED_THREE),
+                "lead": "Dondozo",
+            },
+            "turns": [
+                {
+                    "turn_number": 1,
+                    "reviewed_facts": {
+                        "self_active": "Dondozo",
+                        "opponent_active": "Garchomp",
+                        "self_hp": "100",
+                        "opponent_hp": "81-90",
+                        "legal_moves": list(LEGAL_MOVES),
+                        "legal_switches": list(LEGAL_SWITCHES),
+                        "human_note": "manual review",
+                        "provenance": "HUMAN_CONFIRMED",
+                        "created_at_utc": fixed_timestamp.isoformat(),
+                    },
+                    "advice": {
+                        "source_type": "MOCK",
+                        "model": "mock-dev",
+                        "recommended_action_type": "MOVE",
+                        "recommended_action_name": "Protect",
+                        "opponent_prediction": "Earthquake",
+                        "rationale": "Scout before committing.",
+                        "warnings": [],
+                        "binding": "APPLIED",
+                        "legality": "VALID",
+                        "created_at_utc": fixed_timestamp.isoformat(),
+                    },
+                    "self_executed_action": {
+                        "action_type": "MOVE",
+                        "action_name": "Wave Crash",
+                    },
+                    "opponent_executed_action": None,
+                    "action_order": "UNKNOWN",
+                    "recorded_at_utc": fixed_timestamp.isoformat(),
+                    "actual_action": {
+                        "action_type": "MOVE",
+                        "action_name": "Wave Crash",
+                    },
+                }
+            ],
+            "action_history": [
+                {
+                    "turn_number": 1,
+                    "action_type": "MOVE",
+                    "action_name": "Wave Crash",
+                    "opponent_action_type": None,
+                    "opponent_action_name": "",
+                    "action_order": "UNKNOWN",
+                }
+            ],
+        }
+        assert payload == expected_payload
+        assert all(
+            detailed_field not in json.dumps(payload, ensure_ascii=False)
+            for detailed_field in (
+                "self_team_build",
+                "self_team_build_sha256",
+                "selected_three_builds",
+                "self_active_build",
+                "tera",
+            )
+        )
+        assert record.sha256 == hashlib.sha256(encoded).hexdigest()
+        assert encoded == MatchApplication._encode_payload(expected_payload)
+        assert hashlib.sha256(encoded).hexdigest() == (
+            "628a439f5ccf4597097f23155063056d426c3205b534c3bacd127ec89da2800e"
+        )
+    finally:
+        repository.close()
 
 
 def test_export_contains_only_latest_corrected_turn_facts(tmp_path: Path) -> None:

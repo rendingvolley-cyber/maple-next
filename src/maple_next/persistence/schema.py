@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -46,6 +46,8 @@ def migrate(connection: sqlite3.Connection) -> None:
             session_id TEXT NOT NULL,
             self_team_json TEXT NOT NULL,
             opponent_team_json TEXT NOT NULL,
+            self_team_build_json TEXT NULL,
+            self_team_build_sha256 TEXT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id)
         );
@@ -238,6 +240,9 @@ def migrate(connection: sqlite3.Connection) -> None:
             name TEXT NOT NULL,
             normalized_name TEXT NOT NULL UNIQUE,
             self_team_json TEXT NOT NULL,
+            build_schema_version TEXT NOT NULL DEFAULT 'maple-team.v1',
+            team_build_json TEXT NULL,
+            team_build_sha256 TEXT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -250,7 +255,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         );
         INSERT OR IGNORE INTO operator_preferences(singleton_id) VALUES (1);
 
-        UPDATE schema_meta SET schema_version = 11 WHERE singleton_id = 1;
+        UPDATE schema_meta SET schema_version = 12 WHERE singleton_id = 1;
         """
     )
     _ensure_column(
@@ -301,7 +306,41 @@ def migrate(connection: sqlite3.Connection) -> None:
         "action_order",
         "TEXT NOT NULL DEFAULT 'UNKNOWN'",
     )
+    _ensure_column(
+        connection,
+        "reviewed_selection_facts",
+        "self_team_build_json",
+        "TEXT NULL",
+    )
+    _ensure_column(
+        connection,
+        "reviewed_selection_facts",
+        "self_team_build_sha256",
+        "TEXT NULL",
+    )
+    _ensure_column(
+        connection,
+        "self_team_presets",
+        "build_schema_version",
+        "TEXT NOT NULL DEFAULT 'maple-team.v1'",
+    )
+    _ensure_column(
+        connection,
+        "self_team_presets",
+        "team_build_json",
+        "TEXT NULL",
+    )
+    _ensure_column(
+        connection,
+        "self_team_presets",
+        "team_build_sha256",
+        "TEXT NULL",
+    )
     _sanitize_async_job_result_payloads(connection)
+    connection.execute(
+        "UPDATE schema_meta SET schema_version = ? WHERE singleton_id = 1",
+        (SCHEMA_VERSION,),
+    )
     connection.commit()
 
 

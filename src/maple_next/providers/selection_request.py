@@ -14,6 +14,13 @@ import json
 from dataclasses import dataclass
 from typing import Any, Final
 
+from maple_next.domain.team_build import ChampionsTeamBuild
+
+CONTRACT_VERSION_V1: Final[str] = "maple-selection-advice.v1"
+CONTRACT_VERSION_V2: Final[str] = "maple-selection-advice.v2"
+SELECTION_ADVICE_CONTRACT_VERSION_V1: Final[str] = CONTRACT_VERSION_V1
+SELECTION_ADVICE_CONTRACT_VERSION_V2: Final[str] = CONTRACT_VERSION_V2
+
 #: Fixed and deterministic. Never derived from a live provider schema.
 REQUESTED_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
@@ -44,6 +51,9 @@ class SelectionAdviceRequest:
     self_team: tuple[str, ...]
     opponent_team: tuple[str, ...]
     requested_output_schema: dict[str, Any]
+    contract_version: str = CONTRACT_VERSION_V1
+    self_team_build: ChampionsTeamBuild | None = None
+    self_team_build_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if self.job_type != "SELECTION_ADVICE":
@@ -52,6 +62,22 @@ class SelectionAdviceRequest:
             raise ValueError("self_team must contain exactly six entries")
         if len(self.opponent_team) != 6:
             raise ValueError("opponent_team must contain exactly six entries")
+        if self.self_team_build is None:
+            if self.self_team_build_sha256 is not None:
+                raise ValueError("names-only selection request must not have a build hash")
+            if self.contract_version != CONTRACT_VERSION_V1:
+                raise ValueError("names-only selection request must use v1")
+        else:
+            if self.contract_version != CONTRACT_VERSION_V2:
+                raise ValueError("detailed selection request must use v2")
+            if self.self_team_build.pokemon_names != tuple(self.self_team):
+                raise ValueError("selection build names must match self_team")
+            if self.self_team_build_sha256 != self.self_team_build.sha256():
+                raise ValueError("selection build hash does not match build")
+
+    @property
+    def request_version(self) -> str:
+        return self.contract_version
 
 
 def build_selection_advice_request(
@@ -63,6 +89,7 @@ def build_selection_advice_request(
     reviewed_selection_id: str,
     self_team: tuple[str, ...],
     opponent_team: tuple[str, ...],
+    self_team_build: ChampionsTeamBuild | None = None,
 ) -> SelectionAdviceRequest:
     """Build the canonical request from exact canonical-store values only.
 
@@ -81,13 +108,22 @@ def build_selection_advice_request(
         self_team=tuple(self_team),
         opponent_team=tuple(opponent_team),
         requested_output_schema=REQUESTED_OUTPUT_SCHEMA,
+        contract_version=(
+            CONTRACT_VERSION_V2
+            if self_team_build is not None
+            else CONTRACT_VERSION_V1
+        ),
+        self_team_build=self_team_build,
+        self_team_build_sha256=(
+            self_team_build.sha256() if self_team_build is not None else None
+        ),
     )
 
 
 def canonical_request_dict(request: SelectionAdviceRequest) -> dict[str, Any]:
     """Render the request as a plain dict. Key order does not affect hashing."""
 
-    return {
+    payload: dict[str, Any] = {
         "job_type": request.job_type,
         "session_id": request.session_id,
         "match_id": request.match_id,
@@ -98,6 +134,11 @@ def canonical_request_dict(request: SelectionAdviceRequest) -> dict[str, Any]:
         "opponent_team": list(request.opponent_team),
         "requested_output_schema": request.requested_output_schema,
     }
+    if request.self_team_build is not None:
+        payload["contract_version"] = request.contract_version
+        payload["self_team_build"] = request.self_team_build.to_canonical_dict()
+        payload["self_team_build_sha256"] = request.self_team_build_sha256
+    return payload
 
 
 def encode_canonical_request(request: SelectionAdviceRequest) -> bytes:
@@ -120,7 +161,7 @@ def build_provider_prompt(request: SelectionAdviceRequest) -> str:
 
     self_team = ", ".join(request.self_team)
     opponent_team = ", ".join(request.opponent_team)
-    return (
+    prompt = (
         "You are assisting a human Pokemon Champions player during Team "
         "Selection for a single official match.\n"
         f"Your own confirmed team (exact six, in order): {self_team}\n"
@@ -133,6 +174,19 @@ def build_provider_prompt(request: SelectionAdviceRequest) -> str:
         "selected_three must contain three distinct names taken only from "
         "your own confirmed team above. lead must be one of those three names."
     )
+    if request.self_team_build is not None:
+        details = json.dumps(
+            request.self_team_build.to_canonical_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        prompt += (
+            "\nDetailed self-team build (confirmed; use only these values): "
+            f"{details}\n"
+            f"self_team_build_sha256={request.self_team_build_sha256}"
+        )
+    return prompt
 
 
 def build_provider_request_body(request: SelectionAdviceRequest) -> dict[str, Any]:

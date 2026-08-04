@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
 from maple_next.domain.enums import ActionOrder, ActionType, BattleState, HpBucket
+from maple_next.domain.team_build import ChampionsTeamBuild
 
 T = TypeVar("T")
 
@@ -58,12 +59,34 @@ class SelectionFacts:
     reviewed_selection_id: str
     self_team: tuple[str, ...]
     opponent_team: tuple[str, ...]
+    self_team_build: ChampionsTeamBuild | None = None
+    self_team_build_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if len(self.self_team) != 6 or len(set(self.self_team)) != 6:
             raise ValueError("self team must contain six unique names")
         if len(self.opponent_team) != 6 or len(set(self.opponent_team)) != 6:
             raise ValueError("opponent team must contain six unique names")
+        if self.self_team_build is None:
+            if self.self_team_build_sha256 is not None:
+                raise ValueError("names-only selection facts must not have a build hash")
+        else:
+            if self.self_team_build.pokemon_names != tuple(self.self_team):
+                raise ValueError("self team build names must match selection facts")
+            expected_hash = self.self_team_build.sha256()
+            if self.self_team_build_sha256 != expected_hash:
+                raise ValueError("self team build hash does not match canonical build")
+
+    def to_canonical_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "reviewed_selection_id": self.reviewed_selection_id,
+            "self_team": list(self.self_team),
+            "opponent_team": list(self.opponent_team),
+        }
+        if self.self_team_build is not None:
+            payload["self_team_build"] = self.self_team_build.to_canonical_dict()
+            payload["self_team_build_sha256"] = self.self_team_build_sha256
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +98,52 @@ class SelfTeamPreset:
     self_team: tuple[str, str, str, str, str, str]
     created_at_utc: str
     updated_at_utc: str
+    build_schema_version: str = "maple-team.v1"
+    team_build: ChampionsTeamBuild | None = None
+    team_build_sha256: str | None = None
+
+    @property
+    def status(self) -> str:
+        return "DETAILED" if self.team_build is not None else "NAMES_ONLY"
+
+    @property
+    def detail_status(self) -> str:
+        return self.status
+
+    def to_canonical_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "schema_version": self.build_schema_version,
+            "name": self.name,
+            "pokemon": list(self.self_team),
+        }
+        if self.team_build is not None:
+            payload["game"] = self.team_build.game
+            payload["battle_format"] = self.team_build.battle_format
+            payload["members"] = [
+                member.to_canonical_dict() for member in self.team_build.members
+            ]
+            payload["team_build_sha256"] = self.team_build_sha256
+        return payload
+
+    def __post_init__(self) -> None:
+        if (
+            len(self.self_team) != 6
+            or len(set(self.self_team)) != 6
+            or any(not isinstance(name, str) or not name.strip() for name in self.self_team)
+        ):
+            raise ValueError("preset team must contain six unique names")
+        if self.team_build is None:
+            if self.build_schema_version != "maple-team.v1":
+                raise ValueError("names-only preset must use maple-team.v1")
+            if self.team_build_sha256 is not None:
+                raise ValueError("names-only preset must not have a build hash")
+            return
+        if self.build_schema_version != "maple-team.v2":
+            raise ValueError("detailed preset must use maple-team.v2")
+        if self.team_build.pokemon_names != tuple(self.self_team):
+            raise ValueError("preset names and build members must match")
+        if self.team_build_sha256 != self.team_build.sha256():
+            raise ValueError("preset build hash does not match canonical build")
 
 
 @dataclass(frozen=True, slots=True)

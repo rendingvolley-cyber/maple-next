@@ -12,6 +12,7 @@ from maple_next.application.projection import DomainProjection
 from maple_next.application.service import BattleApplication, DomainError
 from maple_next.domain.enums import ActionOrder, ActionType, HpBucket, ResultDisposition
 from maple_next.domain.models import AppliedSelectionSnapshot, SelfTeamPreset
+from maple_next.domain.team_build import ChampionsTeamBuild
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter, describe_gemini_failure
@@ -82,6 +83,9 @@ class OperatorView:
     turn_facts: TurnFactsView | None = None
     turn_advice: TurnAdviceView | None = None
     action_history: tuple[RecordedActionView, ...] = ()
+    self_team_build: ChampionsTeamBuild | None = None
+    self_team_build_sha256: str | None = None
+    self_team_build_status: str = "NAMES_ONLY"
     persistence_reads_allowed: bool = True
     """Explicit renderer contract: False means this view was built without a
     durable DB read and must not trigger any further DB-backed read while
@@ -250,6 +254,7 @@ class SelectionFlowController:
         self._mock_turn_adapter = mock_turn_adapter or MockTurnAdviceAdapter()
         self._gemini_adapter = gemini_adapter
         self._error_message: str | None = None
+        self._staged_self_team_build: ChampionsTeamBuild | None = None
 
     @property
     def network_call_count(self) -> int:
@@ -261,46 +266,70 @@ class SelectionFlowController:
         )
 
     def list_self_team_presets(self) -> tuple[SelfTeamPreset, ...]:
-        return self._repository.list_self_team_presets()
+        try:
+            return self._repository.list_self_team_presets()
+        except (ValueError, sqlite3.Error, RuntimeError):
+            self._error_message = "team preset detailed data is invalid"
+            return ()
 
     def last_used_self_team_preset(self) -> SelfTeamPreset | None:
-        return self._repository.get_last_used_self_team_preset()
+        try:
+            return self._repository.get_last_used_self_team_preset()
+        except (ValueError, sqlite3.Error, RuntimeError):
+            self._error_message = "team preset detailed data is invalid"
+            return None
+
+    def stage_self_team_build(self, team_build: ChampionsTeamBuild | None) -> None:
+        """Set the in-memory draft used by the next human selection confirm."""
+
+        self._staged_self_team_build = team_build
 
     def save_self_team_preset(
-        self, name: str, self_entries: Sequence[str]
+        self,
+        name: str,
+        self_entries: Sequence[str],
+        team_build: ChampionsTeamBuild | None = None,
     ) -> OperatorView:
         try:
             display_name, normalized_name = self._validate_preset_name(name)
             self_team = self._validate_preset_team(self_entries)
+            self._validate_preset_build(self_team, team_build)
             with self._repository.transaction():
                 self._repository.insert_self_team_preset(
                     preset_id=str(uuid4()),
                     name=display_name,
                     normalized_name=normalized_name,
                     self_team=self_team,
+                    team_build=team_build,
                 )
-        except (OperatorInputError, sqlite3.IntegrityError) as error:
+        except (OperatorInputError, sqlite3.Error, ValueError) as error:
             self._error_message = self._preset_error_message(error)
         else:
             self._error_message = None
         return self.refresh()
 
     def update_self_team_preset(
-        self, preset_id: str, name: str, self_entries: Sequence[str]
+        self,
+        preset_id: str,
+        name: str,
+        self_entries: Sequence[str],
+        team_build: ChampionsTeamBuild | None = None,
     ) -> OperatorView:
         try:
             display_name, normalized_name = self._validate_preset_name(name)
             self_team = self._validate_preset_team(self_entries)
+            self._validate_preset_build(self_team, team_build)
             with self._repository.transaction():
                 updated = self._repository.update_self_team_preset(
                     preset_id=preset_id,
                     name=display_name,
                     normalized_name=normalized_name,
                     self_team=self_team,
+                    team_build=team_build,
                 )
                 if not updated:
                     raise OperatorInputError("選択した構築が見つかりません。")
-        except (OperatorInputError, sqlite3.IntegrityError) as error:
+        except (OperatorInputError, sqlite3.Error, ValueError) as error:
             self._error_message = self._preset_error_message(error)
         else:
             self._error_message = None
@@ -311,19 +340,28 @@ class SelectionFlowController:
             with self._repository.transaction():
                 if not self._repository.delete_self_team_preset(preset_id):
                     raise OperatorInputError("選択した構築が見つかりません。")
-        except OperatorInputError as error:
-            self._error_message = str(error)
+        except (OperatorInputError, sqlite3.Error, ValueError, RuntimeError) as error:
+            self._error_message = self._preset_error_message(error)
         else:
             self._error_message = None
         return self.refresh()
 
     def use_self_team_preset(self, preset_id: str) -> SelfTeamPreset | None:
-        preset = self._repository.get_self_team_preset(preset_id)
+        try:
+            preset = self._repository.get_self_team_preset(preset_id)
+        except (ValueError, sqlite3.Error, RuntimeError):
+            self._error_message = "team preset detailed data is invalid"
+            return None
         if preset is None:
             self._error_message = "選択した構築が見つかりません。"
             return None
-        with self._repository.transaction():
-            self._repository.set_last_used_self_team_preset(preset_id)
+        try:
+            with self._repository.transaction():
+                self._repository.set_last_used_self_team_preset(preset_id)
+        except (sqlite3.Error, RuntimeError):
+            self._error_message = "team preset could not be updated"
+            return None
+        self._staged_self_team_build = preset.team_build
         self._error_message = None
         return preset
 
@@ -344,9 +382,21 @@ class SelectionFlowController:
         return (team[0], team[1], team[2], team[3], team[4], team[5])
 
     @staticmethod
+    def _validate_preset_build(
+        self_team: tuple[str, str, str, str, str, str],
+        team_build: ChampionsTeamBuild | None,
+    ) -> None:
+        if team_build is not None and team_build.pokemon_names != self_team:
+            raise OperatorInputError("team build names must match the six team names")
+
+    @staticmethod
     def _preset_error_message(error: Exception) -> str:
         if isinstance(error, sqlite3.IntegrityError):
             return "同じ名前の構築が既にあります。"
+        if isinstance(error, sqlite3.Error):
+            return "team preset could not be saved"
+        if isinstance(error, ValueError) and not isinstance(error, OperatorInputError):
+            return "team preset detailed data is invalid"
         return str(error)
 
     def refresh(self) -> OperatorView:
@@ -358,13 +408,17 @@ class SelectionFlowController:
         turn_facts: TurnFactsView | None = None
         turn_advice: TurnAdviceView | None = None
         action_history: tuple[RecordedActionView, ...] = ()
+        self_team_build: ChampionsTeamBuild | None = self._staged_self_team_build
+        self_team_build_sha256: str | None = (
+            self_team_build.sha256() if self_team_build is not None else None
+        )
 
         if projection.current_reviewed_selection_id is not None:
-            facts = self._repository.get_selection_facts(
-                projection.current_reviewed_selection_id
-            )
+            facts = self._repository.get_selection_facts(projection.current_reviewed_selection_id)
             self_team = facts.self_team
             opponent_team = facts.opponent_team
+            self_team_build = facts.self_team_build
+            self_team_build_sha256 = facts.self_team_build_sha256
         if projection.current_selection_advice_id is not None:
             stored_advice = self._repository.get_selection_advice(
                 projection.current_selection_advice_id
@@ -397,9 +451,7 @@ class SelectionFlowController:
                 human_note=stored_turn_facts.human_note,
             )
         if projection.current_turn_advice_id is not None:
-            stored_turn_advice = self._repository.get_turn_advice(
-                projection.current_turn_advice_id
-            )
+            stored_turn_advice = self._repository.get_turn_advice(projection.current_turn_advice_id)
             turn_advice = TurnAdviceView(
                 action_type=stored_turn_advice.action_type.value,
                 action_name=stored_turn_advice.action_name,
@@ -424,9 +476,7 @@ class SelectionFlowController:
                     opponent_action_name=action.opponent_action_name,
                     action_order=action.action_order.value,
                 )
-                for action in self._repository.list_recorded_actions(
-                    projection.session_id
-                )
+                for action in self._repository.list_recorded_actions(projection.session_id)
             )
 
         return OperatorView(
@@ -439,6 +489,9 @@ class SelectionFlowController:
             turn_facts=turn_facts,
             turn_advice=turn_advice,
             action_history=action_history,
+            self_team_build=self_team_build,
+            self_team_build_sha256=self_team_build_sha256,
+            self_team_build_status=("DETAILED" if self_team_build is not None else "NAMES_ONLY"),
         )
 
     def new_match(self) -> OperatorView:
@@ -451,11 +504,35 @@ class SelectionFlowController:
         self,
         self_entries: Sequence[str],
         opponent_entries: Sequence[str],
+        self_team_build: ChampionsTeamBuild | None = None,
     ) -> OperatorView:
         try:
             self_team = validate_team(self_entries, label="自分のチーム")
             opponent_team = validate_team(opponent_entries, label="相手のチーム")
-            self._application.confirm_selection_facts(self_team, opponent_team)
+            selected_build = self_team_build or self._staged_self_team_build
+            if (
+                self_team_build is None
+                and selected_build is not None
+                and selected_build.pokemon_names != tuple(self_team)
+            ):
+                selected_build = None
+            self._validate_preset_build(
+                (
+                    self_team[0],
+                    self_team[1],
+                    self_team[2],
+                    self_team[3],
+                    self_team[4],
+                    self_team[5],
+                ),
+                selected_build,
+            )
+            self._application.confirm_selection_facts(
+                self_team,
+                opponent_team,
+                self_team_build=selected_build,
+            )
+            self._staged_self_team_build = selected_build
         except OperatorInputError as error:
             self._error_message = str(error)
         except DomainError as error:
@@ -538,9 +615,7 @@ class SelectionFlowController:
             self._error_message = "現在はGeminiへ送信できません。"
             return self.refresh()
         if self.gemini_selection_attempt_consumed():
-            self._error_message = _domain_message(
-                DomainError("GEMINI_SELECTION_ATTEMPT_CONSUMED")
-            )
+            self._error_message = _domain_message(DomainError("GEMINI_SELECTION_ATTEMPT_CONSUMED"))
             return self.refresh()
 
         callback_already_ran = False

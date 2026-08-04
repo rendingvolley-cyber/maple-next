@@ -28,6 +28,7 @@ from maple_next.domain.models import (
     TurnAdviceSnapshot,
     TurnFactsSnapshot,
 )
+from maple_next.domain.team_build import ChampionsTeamBuild
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers.selection_request import (
     SelectionAdviceRequest,
@@ -170,8 +171,20 @@ class BattleApplication:
         self,
         self_team: tuple[str, ...],
         opponent_team: tuple[str, ...],
+        self_team_build: ChampionsTeamBuild | None = None,
     ) -> SelectionFacts:
-        facts = SelectionFacts(str(uuid4()), self_team, opponent_team)
+        try:
+            facts = SelectionFacts(
+                str(uuid4()),
+                self_team,
+                opponent_team,
+                self_team_build=self_team_build,
+                self_team_build_sha256=(
+                    self_team_build.sha256() if self_team_build is not None else None
+                ),
+            )
+        except ValueError as exc:
+            raise DomainError("SELF_TEAM_BUILD_MISMATCH") from exc
         with self.repository.transaction():
             session = self._require_session(BattleState.SELECTION_OPEN)
             self.repository.append_selection_facts(session.session_id, facts)
@@ -201,6 +214,7 @@ class BattleApplication:
                 reviewed_selection_id=session.current_reviewed_selection_id,
                 self_team=selection_facts.self_team,
                 opponent_team=selection_facts.opponent_team,
+                self_team_build=selection_facts.self_team_build,
             )
             job = JobEnvelope(
                 contract_version="maple-worker.v1",
@@ -267,6 +281,7 @@ class BattleApplication:
                 reviewed_selection_id=session.current_reviewed_selection_id,
                 self_team=selection_facts.self_team,
                 opponent_team=selection_facts.opponent_team,
+                self_team_build=selection_facts.self_team_build,
             )
             job = JobEnvelope(
                 contract_version="maple-worker.v1",
@@ -325,6 +340,7 @@ class BattleApplication:
             reviewed_selection_id=job.input_snapshot_id,
             self_team=selection_facts.self_team,
             opponent_team=selection_facts.opponent_team,
+            self_team_build=selection_facts.self_team_build,
         )
         if compute_selection_request_payload_hash(request) != job.request_payload_hash:
             raise DomainError("REQUEST_PAYLOAD_HASH_MISMATCH")
@@ -629,6 +645,13 @@ class BattleApplication:
 
         reviewed_snapshot = _reviewed_board_snapshot_from_turn_facts(facts)
         legal_actions = _legal_actions_from_turn_facts(facts)
+        self_team_build: ChampionsTeamBuild | None = None
+        session = self.repository.load_active_session()
+        if session is not None and session.current_reviewed_selection_id is not None:
+            selection_facts = self.repository.get_selection_facts(
+                session.current_reviewed_selection_id
+            )
+            self_team_build = selection_facts.self_team_build
         return build_turn_advice_request(
             session_id=session_id,
             match_id=match_id,
@@ -640,6 +663,7 @@ class BattleApplication:
             self_active=facts.self_active,
             selected_three=selected_three,
             legal_actions=legal_actions,
+            self_team_build=self_team_build,
         )
 
     def request_turn_advice(self, command_id: str) -> JobEnvelope:

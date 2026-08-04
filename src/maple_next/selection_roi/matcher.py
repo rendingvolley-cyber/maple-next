@@ -36,11 +36,11 @@ def _normalized_png_bytes(image: QImage) -> bytes:
     if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
         raise SelectionRoiError("selection ROI image buffer is unavailable")
     try:
-        if not normalized.save(buffer, "PNG"):
+        if not normalized.save(buffer, b"PNG"):
             raise SelectionRoiError("selection ROI image encoding failed")
     finally:
         buffer.close()
-    return bytes(data)
+    return data.data()
 
 
 @dataclass(frozen=True, slots=True)

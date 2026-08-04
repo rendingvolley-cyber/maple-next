@@ -36,6 +36,15 @@ except ImportError:  # pragma: no cover
     QObject = object  # type: ignore[assignment, misc]
 
 
+# The UGREEN/Windows driver may ignore a requested 720p/30 camera format and
+# still deliver 720p/60 callbacks. Maple does not need 60 image conversions or
+# UI renders. Keep the newest frame only and admit at most about 30 distinct
+# preview frames per second. 25/29.97/30 fps sources pass through unchanged.
+_PREVIEW_PROCESSING_MAX_FPS = 30.0
+_PREVIEW_PROCESSING_INTERVAL_NS = round(1_000_000_000 / _PREVIEW_PROCESSING_MAX_FPS)
+_PREVIEW_PROCESSING_TOLERANCE_NS = 1_000_000
+
+
 def select_ugreen_device(descriptions: Sequence[str], selector: str) -> int | None:
     """Pure, hardware-free selection: sanitized substring search.
 
@@ -56,16 +65,21 @@ def select_ugreen_device(descriptions: Sequence[str], selector: str) -> int | No
 class QtMultimediaUgreenBackend:
     """VideoCaptureBackend implementation backed by QMediaDevices/QCamera.
 
-    The source-cadence callback never touches Python image data: it stores only
-    the newest QVideoFrame reference and advances a monotonically increasing
-    sequence. ``get_latest_frame()`` performs ``toImage()``/``copy()`` lazily
-    and at most once for each callback sequence, whether conversion succeeds
-    or fails. A stalled malformed frame therefore cannot create a 10 ms retry
+    The Qt callback never touches Python image data. It stores only the newest
+    admitted QVideoFrame reference and advances a monotonically increasing
+    sequence. The physical driver may callback at 60 fps even after accepting
+    a 720p/30 format request; those raw callbacks are latest-only thinned to a
+    maximum processing cadence of about 30 fps before any QImage conversion.
+
+    ``get_latest_frame()`` performs ``toImage()``/``copy()`` lazily and at most
+    once for each admitted callback sequence, whether conversion succeeds or
+    fails. A stalled malformed frame therefore cannot create a 10 ms retry
     loop, while a later distinct valid callback recovers normally.
 
-    The operator-selected low-load policy requests exact 1280x720 input. It
-    preserves the default cadence when choosing between multiple 720p formats
-    and falls back to Qt/driver auto-negotiation if 720p cannot be applied.
+    The operator-selected low-load policy requests exact 1280x720 at about
+    30 fps and falls back to Qt/driver auto-negotiation if that format cannot
+    be applied. The processing cap remains active when the driver ignores the
+    requested cadence.
     """
 
     def __init__(self) -> None:
@@ -80,6 +94,9 @@ class QtMultimediaUgreenBackend:
         self._pending_frame_sequence = 0
         self._attempted_frame_sequence = 0
         self._incoming_frame_count = 0
+        self._raw_callback_count = 0
+        self._dropped_preview_frame_count = 0
+        self._last_admitted_stream_ns: int | None = None
         self._conversion_attempt_count = 0
         self._successful_conversion_count = 0
         self._failed_conversion_count = 0
@@ -164,7 +181,7 @@ class QtMultimediaUgreenBackend:
         self._teardown()
 
     def get_latest_frame(self) -> SourceFramePacket | None:
-        """Lazily convert the newest callback frame, at most once per sequence."""
+        """Lazily convert the newest admitted callback, once per sequence."""
 
         pending = self._pending_qt_frame
         sequence = self._pending_frame_sequence
@@ -175,8 +192,8 @@ class QtMultimediaUgreenBackend:
 
         # Mark attempted before entering driver/image code. Every failure path
         # is therefore cached for this exact callback sequence and cannot be
-        # retried by the 10 ms preview poll. A later callback advances the
-        # sequence and is eligible for one fresh attempt.
+        # retried by the 10 ms preview poll. A later admitted callback advances
+        # the sequence and is eligible for one fresh attempt.
         self._attempted_frame_sequence = sequence
         self._conversion_attempt_count += 1
         try:
@@ -210,10 +227,18 @@ class QtMultimediaUgreenBackend:
         return self._running
 
     def metrics(self) -> dict[str, object]:
-        """Return sanitized counters without device identifiers or raw objects."""
+        """Return sanitized counters without device identifiers or raw objects.
+
+        ``incoming_frame_count`` is the admitted latest-only preview cadence
+        used by the UI telemetry. ``raw_callback_count`` records all driver
+        callbacks, including frames intentionally dropped before conversion.
+        """
 
         return {
             "incoming_frame_count": self._incoming_frame_count,
+            "raw_callback_count": self._raw_callback_count,
+            "dropped_preview_frame_count": self._dropped_preview_frame_count,
+            "preview_processing_max_fps": _PREVIEW_PROCESSING_MAX_FPS,
             # Backward-compatible key: successful source-frame conversions.
             "conversion_count": self._successful_conversion_count,
             "conversion_attempt_count": self._conversion_attempt_count,
@@ -226,14 +251,53 @@ class QtMultimediaUgreenBackend:
 
     # -- internals --------------------------------------------------------------
 
+    @staticmethod
+    def _stream_timestamp_ns(qt_frame: object) -> int | None:
+        """Read QVideoFrame stream time; legacy test fakes may omit it.
+
+        QVideoFrame.startTime() is expressed in microseconds. A negative value
+        means unavailable, in which case production falls back to monotonic
+        time. Objects without a startTime method are treated as legacy fakes
+        and bypass cadence thinning so existing contract probes stay stable.
+        """
+
+        method = getattr(qt_frame, "startTime", None)
+        if not callable(method):
+            return None
+        try:
+            start_time_us = int(method())
+        except Exception:  # noqa: BLE001 - malformed driver metadata is safe
+            start_time_us = -1
+        if start_time_us >= 0:
+            return start_time_us * 1_000
+        return time.monotonic_ns()
+
+    def _admit_preview_frame(self, qt_frame: object) -> bool:
+        stream_ns = self._stream_timestamp_ns(qt_frame)
+        if stream_ns is None:
+            return True
+        previous_ns = self._last_admitted_stream_ns
+        if previous_ns is None or stream_ns < previous_ns:
+            self._last_admitted_stream_ns = stream_ns
+            return True
+        elapsed_ns = stream_ns - previous_ns
+        if elapsed_ns + _PREVIEW_PROCESSING_TOLERANCE_NS < _PREVIEW_PROCESSING_INTERVAL_NS:
+            return False
+        self._last_admitted_stream_ns = stream_ns
+        return True
+
     def _on_qt_frame(
         self,
         qt_frame: object,
         _on_frame: Callable[[SourceFramePacket], None] | None,
     ) -> None:
-        """Source-cadence callback: latest-only bookkeeping, no image work."""
+        """Latest-only callback with a 30 fps pre-conversion admission cap."""
 
         if not self._running:
+            return
+        self._raw_callback_count += 1
+        if not self._admit_preview_frame(qt_frame):
+            self._dropped_preview_frame_count += 1
             return
         self._incoming_frame_count += 1
         self._pending_frame_sequence += 1
@@ -253,6 +317,9 @@ class QtMultimediaUgreenBackend:
         self._pending_frame_sequence = 0
         self._attempted_frame_sequence = 0
         self._incoming_frame_count = 0
+        self._raw_callback_count = 0
+        self._dropped_preview_frame_count = 0
+        self._last_admitted_stream_ns = None
         self._conversion_attempt_count = 0
         self._successful_conversion_count = 0
         self._failed_conversion_count = 0

@@ -172,7 +172,10 @@ def test_feedback_is_written_only_after_successful_existing_confirm_button(
 
     assert feedback_path.exists()
     assert len(feedback_path.read_text(encoding="utf-8").splitlines()) == 6
-    assert window._controller.refresh().projection.current_reviewed_selection_id is not None  # noqa: SLF001
+    reviewed_selection_id = (  # noqa: SLF001
+        window._controller.refresh().projection.current_reviewed_selection_id
+    )
+    assert reviewed_selection_id is not None
 
     window.close()
     repository.close()
@@ -194,7 +197,10 @@ def test_failed_confirmation_adds_no_feedback(tmp_path: Path) -> None:
 
     feedback_path = root / "selection" / "feedback" / "selection_labels.jsonl"
     assert not feedback_path.exists()
-    assert window._controller.refresh().projection.current_reviewed_selection_id is None  # noqa: SLF001
+    reviewed_selection_id = (  # noqa: SLF001
+        window._controller.refresh().projection.current_reviewed_selection_id
+    )
+    assert reviewed_selection_id is None
 
     window.close()
     repository.close()

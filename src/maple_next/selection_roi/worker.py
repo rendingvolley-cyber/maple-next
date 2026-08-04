@@ -78,5 +78,7 @@ class LatestOnlySelectionRoiWorker(QObject):
                 continue
             bundle: SelectionMatchBundle = self._service.process_frame(frame)
             with self._condition:
+                if self._closing:
+                    return
                 self._completed_count += 1
             self.result_ready.emit(bundle)

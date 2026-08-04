@@ -31,6 +31,7 @@ from maple_next.selection_roi.contracts import (
 from maple_next.selection_roi.matcher import (
     ImageFingerprint,
     ReferenceImageIndex,
+    fingerprint_similarity,
     match_selection_crops,
 )
 
@@ -43,6 +44,7 @@ _FEEDBACK_RELATIVE_PATH: Final[Path] = Path("selection/feedback/selection_labels
 _MANIFEST_RELATIVE_PATH: Final[Path] = Path(
     "selection/manifests/selection_roi_manifest.jsonl"
 )
+_NEAR_DUPLICATE_THRESHOLD: Final[float] = 0.995
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +92,7 @@ class StoredSelectionObservation:
     captured_at_utc: datetime
     slot_files: tuple[Path, ...]
     slot_hashes: tuple[str, ...]
+    fingerprints: tuple[ImageFingerprint, ...]
     matches: tuple[SelectionSlotMatch, ...]
 
 
@@ -119,6 +122,8 @@ class SelectionRoiService:
         self._config_signature: tuple[int, int] | None = None
         self._config: SelectionRoiConfig | None = None
         self._observations: dict[str, StoredSelectionObservation] = {}
+        self._last_distinct_observation: StoredSelectionObservation | None = None
+        self._near_duplicate_suppressed_count = 0
 
     def process_frame(self, frame: FramePacket) -> SelectionMatchBundle:
         with self._lock:
@@ -171,6 +176,13 @@ class SelectionRoiService:
                 reference_count=self._index.reference_count,
                 roi_config_provenance=config.source_provenance,
             )
+
+    def metrics(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "distinct_observation_count": len(self._observations),
+                "near_duplicate_suppressed_count": self._near_duplicate_suppressed_count,
+            }
 
     def confirm_observation(
         self,
@@ -277,7 +289,20 @@ class SelectionRoiService:
         config: SelectionRoiConfig,
     ) -> StoredSelectionObservation:
         fingerprints = tuple(ImageFingerprint.from_image(match.crop) for match in matches)
+        previous = self._last_distinct_observation
+        if previous is not None and self._near_duplicate(
+            fingerprints,
+            previous.fingerprints,
+        ):
+            self._near_duplicate_suppressed_count += 1
+            return previous
+
         observation_id = self._observation_id(fingerprints)
+        existing = self._observations.get(observation_id)
+        if existing is not None:
+            self._last_distinct_observation = existing
+            return existing
+
         observation_dir = self.paths.captures_root / observation_id
         observation_dir.mkdir(parents=True, exist_ok=True)
         slot_files: list[Path] = []
@@ -292,9 +317,11 @@ class SelectionRoiService:
             captured_at_utc=frame.captured_at_utc,
             slot_files=tuple(slot_files),
             slot_hashes=tuple(item.exact_hash for item in fingerprints),
+            fingerprints=fingerprints,
             matches=matches,
         )
         self._observations[observation_id] = observation
+        self._last_distinct_observation = observation
         manifest_marker = observation_dir / ".manifest-recorded"
         if not manifest_marker.exists():
             self._append_jsonl(
@@ -308,9 +335,7 @@ class SelectionRoiService:
                         "roi_config_schema": config.schema_version,
                         "roi_config_provenance": config.source_provenance,
                         "slot_hashes": list(observation.slot_hashes),
-                        "assigned_labels": [
-                            match.assigned_label for match in matches
-                        ],
+                        "assigned_labels": [match.assigned_label for match in matches],
                         "assigned_scores": [
                             round(match.assigned_score, 6) for match in matches
                         ],
@@ -319,6 +344,19 @@ class SelectionRoiService:
             )
             manifest_marker.write_text("recorded\n", encoding="utf-8")
         return observation
+
+    @staticmethod
+    def _near_duplicate(
+        current: tuple[ImageFingerprint, ...],
+        previous: tuple[ImageFingerprint, ...],
+    ) -> bool:
+        if len(current) != SELECTION_SLOT_COUNT or len(previous) != SELECTION_SLOT_COUNT:
+            return False
+        return all(
+            fingerprint_similarity(current_item, previous_item)
+            >= _NEAR_DUPLICATE_THRESHOLD
+            for current_item, previous_item in zip(current, previous, strict=True)
+        )
 
     @staticmethod
     def _observation_id(

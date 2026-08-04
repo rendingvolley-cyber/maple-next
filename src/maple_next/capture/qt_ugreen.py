@@ -15,7 +15,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import TypeVar
 
-from maple_next.capture.contracts import DeviceOpenResult, FramePacket
+from maple_next.capture.contracts import DeviceOpenResult, SourceFramePacket
 
 try:  # pragma: no cover - exercised only when PySide6 Multimedia is importable
     from PySide6.QtCore import QObject
@@ -63,14 +63,12 @@ def select_exact_720p_format(formats: Sequence[_CameraFormatT]) -> _CameraFormat
 class QtMultimediaUgreenBackend:
     """VideoCaptureBackend implementation backed by QMediaDevices/QCamera.
 
-    The videoFrameChanged callback (which fires at the source's own cadence -
-    up to 60x/sec) never touches Python image data: it only stores a
-    reference to the newest QVideoFrame and bumps a counter. The expensive
-    work - toImage()/copy()/FramePacket construction - happens lazily inside
-    get_latest_frame(), and only once per distinct incoming frame (a repeat
-    poll before the next frame arrives returns the cached FramePacket).
-    Preview and OCR polling can therefore both call get_latest_frame() as
-    often as they like without multiplying conversion cost.
+    The source-cadence callback never touches Python image data: it stores only
+    the newest QVideoFrame reference and advances a monotonically increasing
+    sequence. ``get_latest_frame()`` performs ``toImage()``/``copy()`` lazily
+    and at most once for each callback sequence, whether conversion succeeds
+    or fails. A stalled malformed frame therefore cannot create a 10 ms retry
+    loop, while a later distinct valid callback recovers normally.
     """
 
     def __init__(self) -> None:
@@ -79,16 +77,21 @@ class QtMultimediaUgreenBackend:
         self._video_sink: object | None = None
         self._running = False
         self._device_label: str | None = None
-        self._latest_frame: FramePacket | None = None
+        self._latest_frame: SourceFramePacket | None = None
         self._owner: QObject | None = None
         self._pending_qt_frame: object | None = None
-        self._converted_qt_frame: object | None = None
+        self._pending_frame_sequence = 0
+        self._attempted_frame_sequence = 0
         self._incoming_frame_count = 0
-        self._conversion_count = 0
+        self._conversion_attempt_count = 0
+        self._successful_conversion_count = 0
+        self._failed_conversion_count = 0
         self._selected_resolution: tuple[int, int] | None = None
 
     def start(
-        self, selector: str, on_frame: Callable[[FramePacket], None] | None = None
+        self,
+        selector: str,
+        on_frame: Callable[[SourceFramePacket], None] | None = None,
     ) -> DeviceOpenResult:
         if self._running:
             return DeviceOpenResult(
@@ -122,14 +125,8 @@ class QtMultimediaUgreenBackend:
             self._device_label = "UGREEN capture device"
 
             self._owner = QObject()
-            # Deliberately do not call camera.setCameraFormat(): FPS
-            # maximization is not a goal here, and forcing a format can
-            # fight the driver's own negotiation. Auto-negotiation is left
-            # in charge; whatever resolution/cadence the device actually
-            # produces is what preview and (separately) OCR canonicalization
-            # work with. select_exact_720p_format stays available as a pure
-            # helper for a future deterministic fallback if a specific
-            # driver is proven to need one, but nothing here calls it.
+            # Deliberately do not call camera.setCameraFormat(): source cadence
+            # and stable driver negotiation matter more than maximizing FPS.
             camera = QCamera(chosen, self._owner)
             capture_session = QMediaCaptureSession(self._owner)
             video_sink = QVideoSink(self._owner)
@@ -169,31 +166,35 @@ class QtMultimediaUgreenBackend:
     def stop(self) -> None:
         self._teardown()
 
-    def get_latest_frame(self) -> FramePacket | None:
-        """Pull (and lazily convert) the newest incoming frame.
-
-        Safe to call at any polling rate from preview and/or OCR: a QImage
-        conversion only happens the first time a *new* QVideoFrame is seen.
-        Repeated calls between two incoming frames are effectively free -
-        they just return the same cached FramePacket object.
-        """
+    def get_latest_frame(self) -> SourceFramePacket | None:
+        """Lazily convert the newest callback frame, at most once per sequence."""
 
         pending = self._pending_qt_frame
-        if pending is None:
+        sequence = self._pending_frame_sequence
+        if pending is None or sequence <= 0:
             return None
-        if pending is self._converted_qt_frame and self._latest_frame is not None:
+        if sequence == self._attempted_frame_sequence:
             return self._latest_frame
+
+        # Mark attempted before entering driver/image code. Every failure path
+        # is therefore cached for this exact callback sequence and cannot be
+        # retried by the 10 ms preview poll. A later callback advances the
+        # sequence and is eligible for one fresh attempt.
+        self._attempted_frame_sequence = sequence
+        self._conversion_attempt_count += 1
         try:
             image = pending.toImage()  # type: ignore[attr-defined]
             detached = image.copy()
             if detached.isNull() or detached.width() <= 0 or detached.height() <= 0:
+                self._failed_conversion_count += 1
                 return self._latest_frame
             width = detached.width()
             height = detached.height()
         except Exception:  # noqa: BLE001 - never crash on a bad frame
+            self._failed_conversion_count += 1
             return self._latest_frame
 
-        packet = FramePacket(
+        packet = SourceFramePacket(
             frame_id=str(uuid.uuid4()),
             source="UGREEN_DIRECT",
             captured_at_utc=datetime.now(UTC),
@@ -203,23 +204,24 @@ class QtMultimediaUgreenBackend:
             image=detached,
         )
         self._latest_frame = packet
-        self._converted_qt_frame = pending
-        self._conversion_count += 1
+        self._successful_conversion_count += 1
+        if self._selected_resolution is None:
+            self._selected_resolution = (width, height)
         return packet
 
     def is_running(self) -> bool:
         return self._running
 
     def metrics(self) -> dict[str, object]:
-        """Sanitized, hardware-free counters for the local verification report.
-
-        Never exposes a raw device id, driver object, or filesystem detail -
-        only counters and the negotiated resolution.
-        """
+        """Return sanitized counters without device identifiers or raw objects."""
 
         return {
             "incoming_frame_count": self._incoming_frame_count,
-            "conversion_count": self._conversion_count,
+            # Backward-compatible key: successful source-frame conversions.
+            "conversion_count": self._successful_conversion_count,
+            "conversion_attempt_count": self._conversion_attempt_count,
+            "successful_conversion_count": self._successful_conversion_count,
+            "failed_conversion_count": self._failed_conversion_count,
             "selected_resolution": self._selected_resolution,
             "preview_mode": "fallback",
         }
@@ -227,21 +229,16 @@ class QtMultimediaUgreenBackend:
     # -- internals --------------------------------------------------------------
 
     def _on_qt_frame(
-        self, qt_frame: object, _on_frame: Callable[[FramePacket], None] | None
+        self,
+        qt_frame: object,
+        _on_frame: Callable[[SourceFramePacket], None] | None,
     ) -> None:
-        """Source-cadence callback: bookkeeping only, no image processing.
-
-        This is invoked once per frame the driver produces (potentially 60x/
-        sec). It must stay O(1) and allocation-free of Python image data;
-        get_latest_frame() does the actual (lazy, cached) conversion work.
-        The push-style ``_on_frame`` callback is intentionally never invoked
-        from here - polling via get_latest_frame() is the only frame path,
-        so nothing re-introduces a per-frame conversion cost.
-        """
+        """Source-cadence callback: latest-only bookkeeping, no image work."""
 
         if not self._running:
             return
         self._incoming_frame_count += 1
+        self._pending_frame_sequence += 1
         self._pending_qt_frame = qt_frame
 
     def _teardown(self) -> None:
@@ -255,7 +252,10 @@ class QtMultimediaUgreenBackend:
         self._running = False
         self._latest_frame = None
         self._pending_qt_frame = None
-        self._converted_qt_frame = None
+        self._pending_frame_sequence = 0
+        self._attempted_frame_sequence = 0
         self._incoming_frame_count = 0
-        self._conversion_count = 0
+        self._conversion_attempt_count = 0
+        self._successful_conversion_count = 0
+        self._failed_conversion_count = 0
         self._selected_resolution = None

@@ -15,12 +15,12 @@ from PySide6.QtGui import QColor, QImage, QPainter
 
 from maple_next.capture.contracts import FrameKind, FramePacket
 from maple_next.selection_roi.contracts import (
+    UNKNOWN_LABEL,
     SelectionCandidateScore,
     SelectionRoiConfig,
     SelectionRoiCrop,
     SelectionRoiError,
     SelectionRoiRect,
-    UNKNOWN_LABEL,
 )
 from maple_next.selection_roi.matcher import (
     ReferenceImageIndex,

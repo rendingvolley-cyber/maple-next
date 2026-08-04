@@ -29,6 +29,7 @@ from maple_next.capture.contracts import (
     CaptureStatus,
     CaptureStatusCode,
     FramePacket,
+    SourceFramePacket,
     VideoCaptureBackend,
     sanitized_capture_message,
 )
@@ -69,9 +70,11 @@ def resolve_device_selector(explicit_selector: str | None = None) -> str:
 class CaptureService(QObject):
     """Loosely coupled orchestrator around a VideoCaptureBackend.
 
-    Qt signals (frame_ready, status_changed) are best-effort UI hooks; the
-    service is fully usable without a Qt event loop via latest_status()/
-    latest_frame() polling, which is what the test suite and the probe CLI use.
+    ``latest_preview_snapshot()`` exposes a raw ``SourceFramePacket`` and never
+    canonicalizes it. ``latest_snapshot()`` is the OCR-only boundary and always
+    returns a canonical ``FramePacket``. Keeping the two immutable types
+    distinct prevents a future OCR consumer from accidentally treating source
+    pixels as the 1280x720 working canvas.
     """
 
     if _QT_CORE_AVAILABLE:
@@ -100,7 +103,7 @@ class CaptureService(QObject):
         self._ocr_sample_count = 0
         self._ocr_conversion_count = 0
 
-    # -- public UI-facing interface -------------------------------------------------
+    # -- public UI-facing interface ---------------------------------------------
 
     def start(self) -> CaptureStatus:
         if self._backend.is_running():
@@ -159,20 +162,13 @@ class CaptureService(QObject):
         return status
 
     def latest_snapshot(self) -> tuple[CaptureStatus, FramePacket | None]:
-        """OCR-oriented read: status plus the canonical (1280x720) frame.
-
-        This is the only path that pays the letterbox/pillarbox resize cost,
-        so callers must reserve it for OCR sampling (intended to run at a
-        low, bounded rate - see the UI's OCR-only poll timer) and never wire
-        it into a per-frame or high-frequency preview path. Preview must use
-        latest_preview_snapshot() instead, which never resizes.
-        """
+        """OCR-oriented read: status plus the canonical 1280x720 packet."""
 
         if not self._backend.is_running():
             return self._status, None
         self._ocr_sample_count += 1
         try:
-            source_frame = self._backend.get_latest_frame()
+            source_frame = self._coerce_source_frame(self._backend.get_latest_frame())
         except Exception:  # noqa: BLE001
             status = self._build_status(
                 CaptureStatusCode.CAPTURE_ERROR,
@@ -190,20 +186,15 @@ class CaptureService(QObject):
         _status, frame = self.latest_snapshot()
         return frame
 
-    def latest_preview_snapshot(self) -> tuple[CaptureStatus, FramePacket | None]:
-        """Preview-oriented read: status plus the raw, un-resized frame.
-
-        Never canonicalizes/letterboxes - that cost belongs to OCR sampling
-        only (see latest_snapshot()). Safe to poll at a high rate: a backend
-        with its own lazy-conversion cache (like the real Qt backend) only
-        does real work once per distinct incoming frame regardless of how
-        often this is called.
-        """
+    def latest_preview_snapshot(
+        self,
+    ) -> tuple[CaptureStatus, SourceFramePacket | None]:
+        """Preview-oriented read: status plus the raw, un-resized source packet."""
 
         if not self._backend.is_running():
             return self._status, None
         try:
-            frame = self._backend.get_latest_frame()
+            frame = self._coerce_source_frame(self._backend.get_latest_frame())
         except Exception:  # noqa: BLE001
             status = self._build_status(
                 CaptureStatusCode.CAPTURE_ERROR,
@@ -231,24 +222,47 @@ class CaptureService(QObject):
 
     # -- internals --------------------------------------------------------------
 
-    def _on_frame(self, frame: FramePacket) -> None:
+    @staticmethod
+    def _coerce_source_frame(
+        frame: SourceFramePacket | FramePacket | None,
+    ) -> SourceFramePacket | None:
+        """Normalize legacy fake-backend FramePacket values without copying pixels."""
+
+        if frame is None:
+            return None
+        if isinstance(frame, SourceFramePacket):
+            return frame
+        return SourceFramePacket(
+            frame_id=frame.frame_id,
+            source=frame.source,
+            captured_at_utc=frame.captured_at_utc,
+            captured_monotonic_ns=frame.captured_monotonic_ns,
+            width=frame.width,
+            height=frame.height,
+            image=frame.image,
+        )
+
+    def _on_frame(self, frame: SourceFramePacket) -> None:
         canonical = self._canonicalize_once(frame)
         status = self._status_from_frame(canonical or frame)
         self._set_status(status)
         if _QT_CORE_AVAILABLE and canonical is not None:
             self.frame_ready.emit(canonical)
 
-    def _canonicalize_once(self, frame: FramePacket | None) -> FramePacket | None:
+    def _canonicalize_once(self, frame: SourceFramePacket | None) -> FramePacket | None:
         if frame is None:
             return None
         if frame.frame_id == self._source_frame_id:
             return self._canonical_frame
         self._source_frame_id = frame.frame_id
         self._canonical_frame = canonicalize_frame_packet(frame)
-        self._ocr_conversion_count += 1
+        if self._canonical_frame is not None:
+            self._ocr_conversion_count += 1
         return self._canonical_frame
 
-    def _status_from_frame(self, frame: FramePacket | None) -> CaptureStatus:
+    def _status_from_frame(
+        self, frame: SourceFramePacket | FramePacket | None
+    ) -> CaptureStatus:
         if frame is None:
             return self._build_status(
                 CaptureStatusCode.FRAME_UNAVAILABLE,

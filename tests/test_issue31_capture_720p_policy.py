@@ -1,8 +1,9 @@
-"""Focused coverage for the operator-selected low-load 720p capture policy."""
+"""Focused coverage for the operator-selected low-load 720p/30 capture policy."""
 
 from __future__ import annotations
 
 from maple_next.capture.format_policy import (
+    PREFERRED_720P_FPS,
     apply_preferred_720p_format,
     select_exact_720p_format,
 )
@@ -61,18 +62,9 @@ class FakeDevice:
 
 
 class FakeCamera:
-    def __init__(
-        self,
-        current_format: object,
-        *,
-        set_raises: bool = False,
-    ) -> None:
-        self._current_format = current_format
+    def __init__(self, *, set_raises: bool = False) -> None:
         self._set_raises = set_raises
         self.set_calls: list[object] = []
-
-    def cameraFormat(self) -> object:  # noqa: N802 - mirrors Qt API
-        return self._current_format
 
     def setCameraFormat(self, selected: object) -> None:  # noqa: N802 - mirrors Qt API
         if self._set_raises:
@@ -80,24 +72,33 @@ class FakeCamera:
         self.set_calls.append(selected)
 
 
-def test_720p_policy_preserves_current_cadence_instead_of_maximizing_fps() -> None:
-    current = FakeFormat("current-1440p-30", 2560, 1440, 30.0, 30.0)
+def test_720p_policy_selects_30_instead_of_60() -> None:
     format_720p_60 = FakeFormat("720p-60", 1280, 720, 60.0, 60.0)
     format_720p_30 = FakeFormat("720p-30", 1280, 720, 30.0, 30.0)
 
-    selected = select_exact_720p_format(
-        [format_720p_60, format_720p_30],
-        preferred_fps=current.maxFrameRate(),
-    )
+    selected = select_exact_720p_format([format_720p_60, format_720p_30])
 
+    assert PREFERRED_720P_FPS == 30.0
     assert selected is format_720p_30
 
 
-def test_720p_policy_keeps_device_order_without_a_cadence_hint() -> None:
-    first = FakeFormat("first", 1280, 720, 25.0, 25.0)
-    second = FakeFormat("second", 1280, 720, 30.0, 30.0)
+def test_720p_policy_accepts_ntsc_like_2997() -> None:
+    format_720p_2997 = FakeFormat("720p-29.97", 1280, 720, 29.97, 29.97)
 
-    assert select_exact_720p_format([first, second]) is first
+    assert select_exact_720p_format([format_720p_2997]) is format_720p_2997
+
+
+def test_720p_policy_rejects_60_only_instead_of_increasing_load() -> None:
+    format_720p_60 = FakeFormat("720p-60", 1280, 720, 60.0, 60.0)
+
+    assert select_exact_720p_format([format_720p_60]) is None
+
+
+def test_720p_policy_rejects_unrelated_25_and_60_candidates() -> None:
+    format_720p_25 = FakeFormat("720p-25", 1280, 720, 25.0, 25.0)
+    format_720p_60 = FakeFormat("720p-60", 1280, 720, 60.0, 60.0)
+
+    assert select_exact_720p_format([format_720p_25, format_720p_60]) is None
 
 
 def test_720p_policy_ignores_non_720p_and_malformed_formats() -> None:
@@ -107,19 +108,25 @@ def test_720p_policy_ignores_non_720p_and_malformed_formats() -> None:
     assert select_exact_720p_format([BrokenFormat(), other, chosen]) is chosen
 
 
-def test_apply_720p_requests_exact_format_once() -> None:
-    current = FakeFormat("current", 2560, 1440, 30.0, 30.0)
-    chosen = FakeFormat("720p", 1280, 720, 30.0, 30.0)
-    camera = FakeCamera(current)
-    device = FakeDevice([chosen])
+def test_apply_720p_requests_exact_30_format_once() -> None:
+    chosen = FakeFormat("720p-30", 1280, 720, 30.0, 30.0)
+    camera = FakeCamera()
+    device = FakeDevice([FakeFormat("720p-60", 1280, 720, 60.0, 60.0), chosen])
 
     assert apply_preferred_720p_format(camera, device) is True
     assert camera.set_calls == [chosen]
 
 
+def test_apply_720p_falls_back_when_only_60fps_exists() -> None:
+    camera = FakeCamera()
+    device = FakeDevice([FakeFormat("720p-60", 1280, 720, 60.0, 60.0)])
+
+    assert apply_preferred_720p_format(camera, device) is False
+    assert camera.set_calls == []
+
+
 def test_apply_720p_falls_back_safely_when_no_exact_format_exists() -> None:
-    current = FakeFormat("current", 2560, 1440, 30.0, 30.0)
-    camera = FakeCamera(current)
+    camera = FakeCamera()
     device = FakeDevice([FakeFormat("1080p", 1920, 1080, 30.0, 30.0)])
 
     assert apply_preferred_720p_format(camera, device) is False
@@ -127,16 +134,15 @@ def test_apply_720p_falls_back_safely_when_no_exact_format_exists() -> None:
 
 
 def test_apply_720p_falls_back_safely_on_driver_failures() -> None:
-    current = FakeFormat("current", 2560, 1440, 30.0, 30.0)
     chosen = FakeFormat("720p", 1280, 720, 30.0, 30.0)
 
-    enumeration_camera = FakeCamera(current)
+    enumeration_camera = FakeCamera()
     assert apply_preferred_720p_format(
         enumeration_camera,
         FakeDevice([chosen], raises=True),
     ) is False
     assert enumeration_camera.set_calls == []
 
-    rejected_camera = FakeCamera(current, set_raises=True)
+    rejected_camera = FakeCamera(set_raises=True)
     assert apply_preferred_720p_format(rejected_camera, FakeDevice([chosen])) is False
     assert rejected_camera.set_calls == []

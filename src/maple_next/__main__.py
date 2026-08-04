@@ -45,9 +45,6 @@ def default_export_directory() -> Path:
 def default_ocr_data_directory() -> Path:
     """Keep every OCR/ROI asset inside the official local repository root."""
 
-    configured = os.environ.get("MAPLE_NEXT_OCR_DATA_DIR")
-    if configured:
-        return Path(configured).expanduser()
     return Path(__file__).resolve().parents[2] / "data" / "ocr"
 
 
@@ -72,11 +69,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--ocr-data-directory",
         type=Path,
         default=default_ocr_data_directory(),
+        help="Must resolve to this checkout's data/ocr directory.",
     )
     args = parser.parse_args(argv)
     database_path = cast(Path, args.database).expanduser()
     export_directory = cast(Path, args.export_directory).expanduser()
-    ocr_data_directory = cast(Path, args.ocr_data_directory).expanduser()
+    expected_ocr_data_directory = default_ocr_data_directory().resolve()
+    ocr_data_directory = cast(Path, args.ocr_data_directory).expanduser().resolve()
+    if ocr_data_directory != expected_ocr_data_directory:
+        parser.error(
+            "--ocr-data-directory must be the current repository's data/ocr directory"
+        )
     database_path.parent.mkdir(parents=True, exist_ok=True)
     ocr_data_directory.mkdir(parents=True, exist_ok=True)
 

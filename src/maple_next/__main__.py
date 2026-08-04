@@ -25,7 +25,7 @@ from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
 from maple_next.ui.gemini_turn_advice import GeminiTurnAdviceAdapter
 from maple_next.ui.match_controller import MatchFlowController
-from maple_next.ui.match_window import MatchFlowWindow
+from maple_next.ui.selection_roi_window import SelectionRoiMatchFlowWindow
 
 
 def default_database_path() -> Path:
@@ -40,6 +40,15 @@ def default_export_directory() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".maple-next" / "exports"
+
+
+def default_ocr_data_directory() -> Path:
+    """Keep every OCR/ROI asset inside the official local repository root."""
+
+    configured = os.environ.get("MAPLE_NEXT_OCR_DATA_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return Path(__file__).resolve().parents[2] / "data" / "ocr"
 
 
 def build_turn_gemini_adapter() -> GeminiTurnAdviceAdapter:
@@ -59,10 +68,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         default=default_export_directory(),
     )
+    parser.add_argument(
+        "--ocr-data-directory",
+        type=Path,
+        default=default_ocr_data_directory(),
+    )
     args = parser.parse_args(argv)
     database_path = cast(Path, args.database).expanduser()
     export_directory = cast(Path, args.export_directory).expanduser()
+    ocr_data_directory = cast(Path, args.ocr_data_directory).expanduser()
     database_path.parent.mkdir(parents=True, exist_ok=True)
+    ocr_data_directory.mkdir(parents=True, exist_ok=True)
 
     qt_application = QApplication([sys.argv[0]])
     repository = SQLiteRepository(database_path)
@@ -79,7 +95,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             turn_gemini_adapter=build_turn_gemini_adapter(),
         )
-        window = MatchFlowWindow(controller)
+        window = SelectionRoiMatchFlowWindow(
+            controller,
+            ocr_data_directory=ocr_data_directory,
+        )
         window.show()
         return qt_application.exec()
     finally:

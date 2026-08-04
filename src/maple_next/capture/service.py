@@ -97,6 +97,8 @@ class CaptureService(QObject):
         self._status = self._stopped_status()
         self._canonical_frame: FramePacket | None = None
         self._source_frame_id: str | None = None
+        self._ocr_sample_count = 0
+        self._ocr_conversion_count = 0
 
     # -- public UI-facing interface -------------------------------------------------
 
@@ -146,6 +148,8 @@ class CaptureService(QObject):
             self._backend.stop()
         self._canonical_frame = None
         self._source_frame_id = None
+        self._ocr_sample_count = 0
+        self._ocr_conversion_count = 0
         status = self._stopped_status()
         self._set_status(status)
         return status
@@ -155,15 +159,18 @@ class CaptureService(QObject):
         return status
 
     def latest_snapshot(self) -> tuple[CaptureStatus, FramePacket | None]:
-        """Read the latest status and frame from one backend snapshot.
+        """OCR-oriented read: status plus the canonical (1280x720) frame.
 
-        Consumers that display both metadata and pixels must use this method so
-        a status frame id cannot accidentally describe a different backend read
-        than the image sent to the preview or OCR path.
+        This is the only path that pays the letterbox/pillarbox resize cost,
+        so callers must reserve it for OCR sampling (intended to run at a
+        low, bounded rate - see the UI's OCR-only poll timer) and never wire
+        it into a per-frame or high-frequency preview path. Preview must use
+        latest_preview_snapshot() instead, which never resizes.
         """
 
         if not self._backend.is_running():
             return self._status, None
+        self._ocr_sample_count += 1
         try:
             source_frame = self._backend.get_latest_frame()
         except Exception:  # noqa: BLE001
@@ -183,6 +190,45 @@ class CaptureService(QObject):
         _status, frame = self.latest_snapshot()
         return frame
 
+    def latest_preview_snapshot(self) -> tuple[CaptureStatus, FramePacket | None]:
+        """Preview-oriented read: status plus the raw, un-resized frame.
+
+        Never canonicalizes/letterboxes - that cost belongs to OCR sampling
+        only (see latest_snapshot()). Safe to poll at a high rate: a backend
+        with its own lazy-conversion cache (like the real Qt backend) only
+        does real work once per distinct incoming frame regardless of how
+        often this is called.
+        """
+
+        if not self._backend.is_running():
+            return self._status, None
+        try:
+            frame = self._backend.get_latest_frame()
+        except Exception:  # noqa: BLE001
+            status = self._build_status(
+                CaptureStatusCode.CAPTURE_ERROR,
+                error_code=CaptureErrorCode.CAPTURE_FAILED,
+                device_label=self._status.device_label,
+            )
+            self._set_status(status)
+            return status, None
+        status = self._status_from_frame(frame)
+        self._set_status(status)
+        return status, frame
+
+    def capture_metrics(self) -> dict[str, object]:
+        """Sanitized counters merging service-level and backend-level metrics."""
+
+        backend_metrics = getattr(self._backend, "metrics", None)
+        merged: dict[str, object] = {
+            "ocr_sample_count": self._ocr_sample_count,
+            "ocr_conversion_count": self._ocr_conversion_count,
+        }
+        if callable(backend_metrics):
+            with contextlib.suppress(Exception):
+                merged.update(backend_metrics())
+        return merged
+
     # -- internals --------------------------------------------------------------
 
     def _on_frame(self, frame: FramePacket) -> None:
@@ -199,6 +245,7 @@ class CaptureService(QObject):
             return self._canonical_frame
         self._source_frame_id = frame.frame_id
         self._canonical_frame = canonicalize_frame_packet(frame)
+        self._ocr_conversion_count += 1
         return self._canonical_frame
 
     def _status_from_frame(self, frame: FramePacket | None) -> CaptureStatus:

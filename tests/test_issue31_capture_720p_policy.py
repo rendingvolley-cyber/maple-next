@@ -76,7 +76,10 @@ def test_720p_policy_selects_30_instead_of_60() -> None:
     format_720p_60 = FakeFormat("720p-60", 1280, 720, 60.0, 60.0)
     format_720p_30 = FakeFormat("720p-30", 1280, 720, 30.0, 30.0)
 
-    selected = select_exact_720p_format([format_720p_60, format_720p_30])
+    selected = select_exact_720p_format(
+        [format_720p_60, format_720p_30],
+        preferred_fps=PREFERRED_720P_FPS,
+    )
 
     assert PREFERRED_720P_FPS == 30.0
     assert selected is format_720p_30
@@ -85,27 +88,58 @@ def test_720p_policy_selects_30_instead_of_60() -> None:
 def test_720p_policy_accepts_ntsc_like_2997() -> None:
     format_720p_2997 = FakeFormat("720p-29.97", 1280, 720, 29.97, 29.97)
 
-    assert select_exact_720p_format([format_720p_2997]) is format_720p_2997
+    assert (
+        select_exact_720p_format(
+            [format_720p_2997],
+            preferred_fps=PREFERRED_720P_FPS,
+        )
+        is format_720p_2997
+    )
 
 
 def test_720p_policy_rejects_60_only_instead_of_increasing_load() -> None:
     format_720p_60 = FakeFormat("720p-60", 1280, 720, 60.0, 60.0)
 
-    assert select_exact_720p_format([format_720p_60]) is None
+    assert (
+        select_exact_720p_format(
+            [format_720p_60],
+            preferred_fps=PREFERRED_720P_FPS,
+        )
+        is None
+    )
 
 
 def test_720p_policy_rejects_unrelated_25_and_60_candidates() -> None:
     format_720p_25 = FakeFormat("720p-25", 1280, 720, 25.0, 25.0)
     format_720p_60 = FakeFormat("720p-60", 1280, 720, 60.0, 60.0)
 
-    assert select_exact_720p_format([format_720p_25, format_720p_60]) is None
+    assert (
+        select_exact_720p_format(
+            [format_720p_25, format_720p_60],
+            preferred_fps=PREFERRED_720P_FPS,
+        )
+        is None
+    )
+
+
+def test_720p_helper_keeps_first_exact_format_without_fps_preference() -> None:
+    first = FakeFormat("720p-60", 1280, 720, 60.0, 60.0)
+    second = FakeFormat("720p-30", 1280, 720, 30.0, 30.0)
+
+    assert select_exact_720p_format([first, second]) is first
 
 
 def test_720p_policy_ignores_non_720p_and_malformed_formats() -> None:
     other = FakeFormat("1440p", 2560, 1440, 30.0, 30.0)
     chosen = FakeFormat("720p", 1280, 720, 30.0, 30.0)
 
-    assert select_exact_720p_format([BrokenFormat(), other, chosen]) is chosen
+    assert (
+        select_exact_720p_format(
+            [BrokenFormat(), other, chosen],
+            preferred_fps=PREFERRED_720P_FPS,
+        )
+        is chosen
+    )
 
 
 def test_apply_720p_requests_exact_30_format_once() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -29,7 +30,10 @@ from maple_next.ocr.contracts import OcrBundleStatus, OcrCandidateContext
 from maple_next.ocr.service import OcrCandidateService
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
-from maple_next.ui.explicit_turn_number import ExplicitTurnNumberController, ExplicitTurnNumberWindow
+from maple_next.ui.explicit_turn_number import (
+    ExplicitTurnNumberController,
+    ExplicitTurnNumberWindow,
+)
 
 
 def qt_application() -> QApplication:
@@ -137,7 +141,7 @@ class SourceBackend:
             frame_id=f"source-{self.incoming_frame_count}",
             source="UGREEN_DIRECT",
             captured_at_utc=datetime.now(UTC),
-            captured_monotonic_ns=self.frame.captured_monotonic_ns,
+            captured_monotonic_ns=time.monotonic_ns(),
             width=self.frame.width,
             height=self.frame.height,
             image=self.frame.image,
@@ -149,7 +153,7 @@ def source_packet() -> SourceFramePacket:
         frame_id="source-1",
         source="UGREEN_DIRECT",
         captured_at_utc=datetime.now(UTC),
-        captured_monotonic_ns=1_000_000_000,
+        captured_monotonic_ns=time.monotonic_ns(),
         width=640,
         height=480,
         image=valid_image(640, 480),
@@ -157,8 +161,9 @@ def source_packet() -> SourceFramePacket:
 
 
 def test_preview_returns_source_packet_and_ocr_returns_canonical_packet() -> None:
-    clock = [1_000_000_000]
-    backend = SourceBackend(source_packet())
+    packet = source_packet()
+    clock = [packet.captured_monotonic_ns]
+    backend = SourceBackend(packet)
     service = CaptureService(backend, monotonic_clock=lambda: clock[0])
     service.start()
 
@@ -195,7 +200,9 @@ class RecordingOcrBackend:
         self.available_calls += 1
         return True
 
-    def generate_candidates(self, frame: FramePacket, context: OcrCandidateContext) -> tuple:
+    def generate_candidates(
+        self, frame: FramePacket, context: OcrCandidateContext
+    ) -> tuple:
         self.generate_calls += 1
         return ()
 

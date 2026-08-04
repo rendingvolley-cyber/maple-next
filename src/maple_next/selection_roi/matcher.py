@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PySide6.QtGui import QImage
 
 from maple_next.selection_roi.contracts import (
@@ -27,6 +27,22 @@ _SUPPORTED_IMAGE_SUFFIXES: Final[frozenset[str]] = frozenset(
 )
 
 
+def _normalized_png_bytes(image: QImage) -> bytes:
+    """Return deterministic full-pixel bytes for exact duplicate identity."""
+
+    normalized = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    data = QByteArray()
+    buffer = QBuffer(data)
+    if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+        raise SelectionRoiError("selection ROI image buffer is unavailable")
+    try:
+        if not normalized.save(buffer, "PNG"):
+            raise SelectionRoiError("selection ROI image encoding failed")
+    finally:
+        buffer.close()
+    return bytes(data)
+
+
 @dataclass(frozen=True, slots=True)
 class ImageFingerprint:
     exact_hash: str
@@ -37,6 +53,7 @@ class ImageFingerprint:
     def from_image(cls, image: QImage) -> ImageFingerprint:
         if image.isNull() or image.width() <= 0 or image.height() <= 0:
             raise SelectionRoiError("selection ROI image is invalid")
+        exact_hash = hashlib.sha256(_normalized_png_bytes(image)).hexdigest()
         grayscale = image.convertToFormat(QImage.Format.Format_Grayscale8)
         signature_image = grayscale.scaled(
             _SIGNATURE_SIZE,
@@ -49,7 +66,6 @@ class ImageFingerprint:
             for y in range(_SIGNATURE_SIZE)
             for x in range(_SIGNATURE_SIZE)
         )
-        exact_hash = hashlib.sha256(bytes(signature)).hexdigest()
         dhash_image = grayscale.scaled(
             _DHASH_WIDTH,
             _DHASH_HEIGHT,
@@ -260,10 +276,7 @@ def match_selection_crops(
     if top_k <= 0:
         raise SelectionRoiError("selection match top_k is invalid")
     index.refresh()
-    candidate_lists = tuple(
-        index.candidates_for(crop, top_k=top_k)
-        for crop in crops
-    )
+    candidate_lists = tuple(index.candidates_for(crop, top_k=top_k) for crop in crops)
     return assign_unique_team_candidates(
         crops,
         candidate_lists,

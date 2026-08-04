@@ -1,9 +1,10 @@
 """Deterministic, fail-safe camera format preference helpers.
 
 The operator requested a 1280x720 capture input to reduce per-frame image
-conversion and scaling cost. The policy does not target a particular FPS: when
-multiple 720p formats exist, it prefers the frame-rate range closest to the
-camera's current/default cadence and otherwise keeps device order stable.
+conversion and scaling cost, while retaining the previously verified ~30 fps
+cadence. The policy therefore requests an exact 720p format whose declared
+cadence is approximately 30 fps. It never upgrades to a 60 fps format merely
+because the device or current/default format reports 60 fps.
 """
 
 from __future__ import annotations
@@ -12,6 +13,9 @@ from collections.abc import Sequence
 from typing import TypeVar
 
 _CameraFormatT = TypeVar("_CameraFormatT")
+
+PREFERRED_720P_FPS = 30.0
+_FPS_TOLERANCE = 1.0
 
 
 def _safe_rate(camera_format: object, method_name: str) -> float | None:
@@ -25,17 +29,17 @@ def _safe_rate(camera_format: object, method_name: str) -> float | None:
 def select_exact_720p_format(
     formats: Sequence[_CameraFormatT],
     *,
-    preferred_fps: float | None = None,
+    preferred_fps: float = PREFERRED_720P_FPS,
 ) -> _CameraFormatT | None:
-    """Select an exact 1280x720 format without maximizing or fixing FPS.
+    """Select exact 1280x720 at approximately ``preferred_fps``.
 
-    With no usable cadence hint, the first valid 720p format in device order is
-    returned. With a hint, a format whose declared range contains that cadence
-    is preferred, then the smallest distance to its declared maximum, with
-    original device order as the deterministic final tie-breaker.
+    Only formats whose declared maximum cadence is within one frame per second
+    of the requested cadence are eligible. This deliberately rejects 720p/60
+    when 720p/30 is requested instead of silently increasing capture load.
+    Original device order is the deterministic final tie-breaker.
     """
 
-    candidates: list[tuple[int, _CameraFormatT, float | None, float | None]] = []
+    candidates: list[tuple[float, int, _CameraFormatT]] = []
     for index, camera_format in enumerate(formats):
         try:
             resolution = camera_format.resolution()  # type: ignore[attr-defined]
@@ -43,57 +47,39 @@ def select_exact_720p_format(
                 continue
         except Exception:  # noqa: BLE001 - malformed driver format is ignored
             continue
-        candidates.append(
-            (
-                index,
-                camera_format,
-                _safe_rate(camera_format, "minFrameRate"),
-                _safe_rate(camera_format, "maxFrameRate"),
-            )
-        )
+
+        maximum = _safe_rate(camera_format, "maxFrameRate")
+        comparison = maximum
+        if comparison is None:
+            comparison = _safe_rate(camera_format, "minFrameRate")
+        if comparison is None:
+            continue
+
+        distance = abs(comparison - preferred_fps)
+        if distance > _FPS_TOLERANCE:
+            continue
+        candidates.append((distance, index, camera_format))
 
     if not candidates:
         return None
-    if preferred_fps is None or preferred_fps <= 0:
-        return candidates[0][1]
-
-    def score(
-        candidate: tuple[int, _CameraFormatT, float | None, float | None],
-    ) -> tuple[int, float, int]:
-        index, _camera_format, minimum, maximum = candidate
-        contains = (
-            minimum is not None
-            and maximum is not None
-            and minimum <= preferred_fps <= maximum
-        )
-        comparison = maximum if maximum is not None else minimum
-        distance = abs(comparison - preferred_fps) if comparison is not None else float("inf")
-        return (0 if contains else 1, distance, index)
-
-    return min(candidates, key=score)[1]
+    return min(candidates, key=lambda candidate: (candidate[0], candidate[1]))[2]
 
 
 def apply_preferred_720p_format(camera: object, device: object) -> bool:
-    """Request exact 720p while preserving the default cadence when possible.
+    """Request exact 720p/~30 fps, otherwise retain auto-negotiation.
 
-    Returns ``True`` only when ``setCameraFormat`` succeeds. Any missing driver
-    method, malformed format metadata, or set failure falls back to Qt/driver
-    auto-negotiation without raising.
+    Returns ``True`` only when a suitable 720p format exists and
+    ``setCameraFormat`` succeeds. A 720p/60-only device is not accepted for this
+    low-load policy. Missing driver methods, malformed metadata, enumeration
+    failures, and set failures all fall back to Qt/driver auto-negotiation.
     """
-
-    preferred_fps: float | None = None
-    try:
-        current_format = camera.cameraFormat()  # type: ignore[attr-defined]
-        preferred_fps = _safe_rate(current_format, "maxFrameRate")
-    except Exception:  # noqa: BLE001 - absence of a default cadence is safe
-        preferred_fps = None
 
     try:
         formats = device.videoFormats()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 - driver enumeration failure is safe
         return False
 
-    selected = select_exact_720p_format(formats, preferred_fps=preferred_fps)
+    selected = select_exact_720p_format(formats)
     if selected is None:
         return False
     try:

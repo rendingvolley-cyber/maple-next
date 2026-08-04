@@ -32,7 +32,7 @@ def _normalized_pixel_bytes(image: QImage) -> bytes:
     """Return deterministic full-pixel bytes for exact duplicate identity."""
 
     normalized = image.convertToFormat(QImage.Format.Format_RGBA8888)
-    pixel_bytes = normalized.constBits().tobytes()
+    pixel_bytes = bytes(normalized.constBits())
     expected_size = normalized.width() * normalized.height() * 4
     if len(pixel_bytes) != expected_size:
         raise SelectionRoiError("selection ROI pixel buffer has unexpected padding")

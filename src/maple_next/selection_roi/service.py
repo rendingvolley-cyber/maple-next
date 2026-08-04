@@ -189,11 +189,11 @@ class SelectionRoiService:
         *,
         observation_id: str,
         opponent_names: tuple[str, str, str, str, str, str],
-        reviewed_selection_id: str,
+        reviewed_selection_id: str | None,
     ) -> FeedbackStoreResult:
         with self._lock:
             observation = self._observations.get(observation_id)
-            if observation is None:
+            if observation is None or reviewed_selection_id is None:
                 return FeedbackStoreResult(added_count=0, duplicate_count=0, conflict_count=0)
             added = 0
             duplicates = 0
@@ -378,7 +378,7 @@ class SelectionRoiService:
     def _save_png_atomic(image: QImage, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(f".{destination.name}.tmp.png")
-        if not image.save(str(temporary), "PNG"):
+        if not image.save(str(temporary), b"PNG"):
             raise OSError("image save failed")
         temporary.replace(destination)
 

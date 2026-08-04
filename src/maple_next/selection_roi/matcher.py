@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PySide6.QtGui import QImage
@@ -40,7 +40,7 @@ def _normalized_png_bytes(image: QImage) -> bytes:
             raise SelectionRoiError("selection ROI image encoding failed")
     finally:
         buffer.close()
-    return data.data()
+    return cast(bytes, data.data())
 
 
 @dataclass(frozen=True, slots=True)

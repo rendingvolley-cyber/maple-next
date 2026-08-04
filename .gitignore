@@ -8,3 +8,12 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+
+# Local selection ROI assets. Code/schema documentation stays tracked, while
+# copied historical images and future human-confirmed feedback remain local.
+data/ocr/selection/config/roi_config.json
+data/ocr/selection/reference/
+data/ocr/selection/captures/
+data/ocr/selection/quarantine/
+data/ocr/selection/feedback/
+data/ocr/selection/manifests/

@@ -55,9 +55,27 @@ from maple_next.ui.team_import import (
 )
 from maple_next.ui.trusted_input import TrustedSendButton
 
-#: Poll interval for capture status / OCR candidate refresh. Display-only:
-#: never triggers a Turn Advice send, a domain command, or a canonical write.
+#: OCR-only poll interval. Display-only: never triggers a Turn Advice send, a
+#: domain command, or a canonical write. Deliberately bounded to <=2fps - OCR
+#: sampling never needs to run any faster than this, and must never share a
+#: timer/processing path with the preview refresh below.
 _CAPTURE_POLL_INTERVAL_MS = 500
+
+#: Preview poll interval. This is a *sampling granularity*, not a target
+#: frame rate: it exists so a new incoming frame (whatever cadence the
+#: source actually produces - 25/30/60fps) is picked up promptly, with
+#: comfortable headroom above a 60fps source's ~16.7ms inter-frame gap.
+#: Each tick that finds no new frame is a cheap identity check (the backend
+#: caches conversions), so this does not add per-tick image-processing cost;
+#: it never forces, caps, or interpolates the source's own cadence.
+_PREVIEW_POLL_INTERVAL_MS = 10
+
+#: Index of the "バトルレコード" (Battle Record) tab within header_tabs. The
+#: "選出" (Selection) tab is index 0. Capture preview/OCR only run while the
+#: Battle Record tab is the visible one (issue #31 tab-lifecycle option A):
+#: the camera stays open, but polling pauses off-tab and resumes instantly
+#: on return.
+_BATTLE_RECORD_TAB_INDEX = 1
 
 _CAPTURE_STATUS_LABELS: dict[str, str] = {
     CaptureStatusCode.STOPPED: (
@@ -170,11 +188,20 @@ class MapleMainWindow(QMainWindow):
         self._latest_ocr_bundle: OcrCandidateBundle | None = None
         self._capture_preview_pixmap = QPixmap()
         self._capture_preview_frame_id: str | None = None
+        self._capture_preview_scaled_pixmap = QPixmap()
+        self._capture_preview_scale_cache_key: tuple[int, int, int] | None = None
+        self._preview_conversion_count = 0
+        # Fast, source-cadence pixel/status refresh. Never performs OCR work.
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setInterval(_PREVIEW_POLL_INTERVAL_MS)
+        self._preview_timer.timeout.connect(self._poll_capture_preview)
+        # Slow (<=2fps), OCR-only refresh. Never touches preview pixels.
         self._capture_timer = QTimer(self)
         self._capture_timer.setInterval(_CAPTURE_POLL_INTERVAL_MS)
-        self._capture_timer.timeout.connect(self._poll_capture_status)
+        self._capture_timer.timeout.connect(self._poll_capture_ocr)
 
         self._build_ui()
+        self.header_tabs.currentChanged.connect(self._on_header_tab_changed)
         self.render_view()
 
         if auto_start_capture:
@@ -190,22 +217,53 @@ class MapleMainWindow(QMainWindow):
 
         self._capture_polling_requested = True
         if not self._persistence_reads_allowed:
+            self._preview_timer.stop()
             self._capture_timer.stop()
             return
         self._resume_capture_polling()
 
     def _resume_capture_polling(self) -> None:
-        """Resume a previously requested capture poll after a safe render."""
+        """Resume a previously requested capture poll after a safe render.
+
+        The capture device connection (tab-lifecycle option A) is opened as
+        soon as it is requested and allowed, independent of which tab is
+        visible - it is never torn down just for a tab switch. Only the two
+        UI poll timers are gated on the Battle Record tab being the visible
+        one, since that is the only place a preview is ever drawn or an OCR
+        candidate is ever useful.
+        """
 
         if not self._persistence_reads_allowed or not self._capture_polling_requested:
+            self._preview_timer.stop()
             self._capture_timer.stop()
             return
         if not self._capture_service_started:
             self._capture_service.start()
             self._capture_service_started = True
+        if self.header_tabs.currentIndex() != _BATTLE_RECORD_TAB_INDEX:
+            self._preview_timer.stop()
+            self._capture_timer.stop()
+            return
         if not self._capture_timer.isActive():
             self._poll_capture_status()
+            self._preview_timer.start()
             self._capture_timer.start()
+
+    def _on_header_tab_changed(self, _index: int) -> None:
+        """Pause preview/OCR off the Battle Record tab; resume instantly back.
+
+        The capture device/camera is never stopped here - only the two UI
+        poll timers. Never reaches a domain command, a provider, or a
+        canonical write.
+        """
+
+        if not self._capture_lifecycle_initialized:
+            return
+        if self.header_tabs.currentIndex() == _BATTLE_RECORD_TAB_INDEX:
+            self._resume_capture_polling()
+        else:
+            self._preview_timer.stop()
+            self._capture_timer.stop()
 
     def _mutation_slots_allowed(self) -> bool:
         """Fail-closed contract for every mutation-reaching private slot.
@@ -225,6 +283,7 @@ class MapleMainWindow(QMainWindow):
         if not self._mutation_slots_allowed():
             return
         self._capture_polling_requested = True
+        self._preview_timer.stop()
         self._capture_timer.stop()
         self._capture_service.stop()
         self._capture_service_started = False
@@ -233,6 +292,7 @@ class MapleMainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
         """Clean shutdown: stop capture and release the device on app exit."""
 
+        self._preview_timer.stop()
         self._capture_timer.stop()
         self._capture_service.stop()
         self._capture_service_started = False
@@ -439,14 +499,43 @@ class MapleMainWindow(QMainWindow):
     # -- Lane B (issue #31): capture/OCR polling and human-only adoption --------
 
     def _poll_capture_status(self) -> None:
-        """Timer-driven, display-only refresh. Never a Turn Advice trigger."""
+        """Combined one-shot refresh (preview + OCR). Never a Turn Advice trigger.
+
+        Used for the single "catch up now" poll when polling (re)starts, and
+        directly by tests that want a deterministic, synchronous refresh.
+        Live operation instead runs _poll_capture_preview() and
+        _poll_capture_ocr() independently, on their own timers/cadences.
+        """
 
         if not self._persistence_reads_allowed:
             return
+        self._poll_capture_preview()
+        self._poll_capture_ocr()
 
-        status, frame = self._capture_service.latest_snapshot()
+    def _poll_capture_preview(self) -> None:
+        """Fast, source-cadence, display-only refresh. Never performs OCR work.
+
+        Pulls the raw (non-canonical) latest frame - no letterbox/pillarbox
+        resize here - so calling this frequently costs nothing beyond a
+        cheap identity check once the backend already converted a given
+        source frame.
+        """
+
+        if not self._persistence_reads_allowed:
+            return
+        status, frame = self._capture_service.latest_preview_snapshot()
         self._render_capture_status(status, frame)
 
+    def _poll_capture_ocr(self) -> None:
+        """Slow (<=2fps), OCR-only refresh. Never touches preview pixels.
+
+        Timer-driven, display-only refresh. Never a Turn Advice trigger, a
+        domain command, or a canonical write.
+        """
+
+        if not self._persistence_reads_allowed:
+            return
+        status, frame = self._capture_service.latest_snapshot()
         frame_for_ocr = frame if status.available else None
         context = OcrCandidateContext(
             self_active_candidates=self._loaded_applied_three,
@@ -500,6 +589,8 @@ class MapleMainWindow(QMainWindow):
     def _clear_capture_preview(self, *, placeholder: str) -> None:
         self._capture_preview_pixmap = QPixmap()
         self._capture_preview_frame_id = None
+        self._capture_preview_scaled_pixmap = QPixmap()
+        self._capture_preview_scale_cache_key = None
         self.capture_preview_label.clear()
         self.capture_preview_label.setText(placeholder)
 
@@ -509,21 +600,34 @@ class MapleMainWindow(QMainWindow):
         target_size = self.capture_preview_label.size()
         if target_size.width() <= 0 or target_size.height() <= 0:
             target_size = self.capture_preview_label.sizeHint()
-        source_size = self._capture_preview_pixmap.size()
-        target_contains_source = (
-            target_size.width() >= source_size.width()
-            and target_size.height() >= source_size.height()
+        cache_key = (
+            self._capture_preview_pixmap.cacheKey(),
+            target_size.width(),
+            target_size.height(),
         )
-        if target_contains_source:
-            scaled = self._capture_preview_pixmap
+        if (
+            cache_key == self._capture_preview_scale_cache_key
+            and not self._capture_preview_scaled_pixmap.isNull()
+        ):
+            scaled = self._capture_preview_scaled_pixmap
         else:
-            scaled = self._capture_preview_pixmap.scaled(
-                target_size,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+            source_size = self._capture_preview_pixmap.size()
+            target_contains_source = (
+                target_size.width() >= source_size.width()
+                and target_size.height() >= source_size.height()
             )
-        if scaled.isNull():
-            return False
+            if target_contains_source:
+                scaled = self._capture_preview_pixmap
+            else:
+                scaled = self._capture_preview_pixmap.scaled(
+                    target_size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            if scaled.isNull():
+                return False
+            self._capture_preview_scaled_pixmap = scaled
+            self._capture_preview_scale_cache_key = cache_key
         self.capture_preview_label.setText("")
         self.capture_preview_label.setPixmap(scaled)
         installed = self.capture_preview_label.pixmap()
@@ -532,7 +636,14 @@ class MapleMainWindow(QMainWindow):
     def _render_capture_snapshot(
         self, status: CaptureStatus, frame: object | None
     ) -> bool:
-        """Render pixels only when fresh metadata and the same frame are valid."""
+        """Render pixels only when fresh metadata and the same frame are valid.
+
+        A repeat call describing the exact same frame_id as what is already
+        on screen is a no-op (beyond re-affirming "installed"): it never
+        re-runs QPixmap.fromImage()/SmoothTransformation for pixels that are
+        already displayed, which matters because the fast preview timer can
+        poll faster than new source frames arrive.
+        """
 
         if not status.fresh or not isinstance(frame, FramePacket):
             if not status.fresh and status.status == CaptureStatusCode.FRAME_STALE:
@@ -547,6 +658,11 @@ class MapleMainWindow(QMainWindow):
         if status.frame_id != frame.frame_id:
             self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
             return False
+        if (
+            frame.frame_id == self._capture_preview_frame_id
+            and not self._capture_preview_pixmap.isNull()
+        ):
+            return True
         detached = self._detached_qimage(frame.image)
         if detached is None:
             self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
@@ -557,6 +673,7 @@ class MapleMainWindow(QMainWindow):
             return False
         self._capture_preview_pixmap = pixmap
         self._capture_preview_frame_id = frame.frame_id
+        self._preview_conversion_count += 1
         if not self._render_capture_preview():
             self._clear_capture_preview(placeholder=_PREVIEW_INVALID_LABEL)
             return False
@@ -1139,6 +1256,7 @@ class MapleMainWindow(QMainWindow):
         current = view if view is not None else self._controller.refresh()
         self._persistence_reads_allowed = current.persistence_reads_allowed
         if not self._persistence_reads_allowed:
+            self._preview_timer.stop()
             self._capture_timer.stop()
         projection = current.projection
         self._last_rendered_session_state = projection.session_state

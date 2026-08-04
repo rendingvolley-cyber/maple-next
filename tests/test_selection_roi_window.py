@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication
 from maple_next.application.match_service import MatchApplication
 from maple_next.capture.contracts import FrameKind, FramePacket
 from maple_next.persistence.sqlite import SQLiteRepository
+from maple_next.selection_roi.contracts import SelectionMatchBundle
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
 from maple_next.ui.match_controller import MatchFlowController
 from maple_next.ui.selection_roi_window import SelectionRoiMatchFlowWindow
@@ -125,6 +126,17 @@ def _build_window(
     return repository, window, root
 
 
+def _install_current_bundle(
+    window: SelectionRoiMatchFlowWindow,
+    bundle: SelectionMatchBundle,
+) -> None:
+    assert bundle.frame_id is not None
+    current = window._controller.refresh()  # noqa: SLF001
+    identity = window._selection_identity(current)  # noqa: SLF001
+    window._selection_roi_submitted_identities[bundle.frame_id] = identity  # noqa: SLF001
+    window._on_selection_roi_result(bundle)  # noqa: SLF001
+
+
 def test_candidates_never_auto_fill_and_human_buttons_control_adoption(
     tmp_path: Path,
 ) -> None:
@@ -135,7 +147,7 @@ def test_candidates_never_auto_fill_and_human_buttons_control_adoption(
         field.setText(value)
 
     bundle = window._selection_roi_service.process_frame(_frame(image))  # noqa: SLF001
-    window._on_selection_roi_result(bundle)  # noqa: SLF001
+    _install_current_bundle(window, bundle)
 
     assert [field.text() for field in window.opponent_team_inputs] == [""] * 6
     window.selection_roi_apply_all_button.click()
@@ -162,7 +174,7 @@ def test_feedback_is_written_only_after_successful_existing_confirm_button(
         field.setText(value)
 
     bundle = window._selection_roi_service.process_frame(_frame(image))  # noqa: SLF001
-    window._on_selection_roi_result(bundle)  # noqa: SLF001
+    _install_current_bundle(window, bundle)
     window.selection_roi_apply_all_button.click()
 
     feedback_path = root / "selection" / "feedback" / "selection_labels.jsonl"
@@ -189,7 +201,7 @@ def test_failed_confirmation_adds_no_feedback(tmp_path: Path) -> None:
         field.setText(value)
 
     bundle = window._selection_roi_service.process_frame(_frame(image))  # noqa: SLF001
-    window._on_selection_roi_result(bundle)  # noqa: SLF001
+    _install_current_bundle(window, bundle)
     for field in window.opponent_team_inputs:
         field.setText("Duplicate")
 
@@ -201,6 +213,36 @@ def test_failed_confirmation_adds_no_feedback(tmp_path: Path) -> None:
         window._controller.refresh().projection.current_reviewed_selection_id
     )
     assert reviewed_selection_id is None
+
+    window.close()
+    repository.close()
+
+
+def test_stale_match_identity_never_labels_old_crops(tmp_path: Path) -> None:
+    repository, window, root = _build_window(tmp_path)
+    image = _write_assets(root)
+    window.new_match_button.click()
+    for field, value in zip(window.self_team_inputs, SELF_TEAM, strict=True):
+        field.setText(value)
+
+    bundle = window._selection_roi_service.process_frame(_frame(image))  # noqa: SLF001
+    _install_current_bundle(window, bundle)
+    window._selection_roi_bundle_identity = (  # noqa: SLF001
+        "old-session",
+        "old-match",
+        99,
+    )
+    for field, value in zip(window.opponent_team_inputs, OPPONENT_TEAM, strict=True):
+        field.setText(value)
+
+    window.confirm_facts_button.click()
+
+    feedback_path = root / "selection" / "feedback" / "selection_labels.jsonl"
+    assert not feedback_path.exists()
+    reviewed_selection_id = (  # noqa: SLF001
+        window._controller.refresh().projection.current_reviewed_selection_id
+    )
+    assert reviewed_selection_id is not None
 
     window.close()
     repository.close()

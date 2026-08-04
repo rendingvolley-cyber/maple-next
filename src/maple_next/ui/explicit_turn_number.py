@@ -6,6 +6,7 @@ import time
 from collections.abc import Sequence
 
 from PySide6.QtCore import QTimer
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QFormLayout, QLabel, QLineEdit
 
 from maple_next.capture.contracts import (
@@ -180,9 +181,12 @@ class ExplicitTurnNumberWindow(MapleMainWindow):
         if hasattr(self, "capture_status_label"):
             self._set_capture_label_text_if_changed(self.capture_status_label, text)
 
-    def _reset_capture_telemetry_window(self) -> None:
+    def _reset_capture_telemetry_window(
+        self, *, clear_status_code: bool = True
+    ) -> None:
         self._source_fps_sampler.reset()
-        self._capture_telemetry_last_status_code = None
+        if clear_status_code:
+            self._capture_telemetry_last_status_code = None
 
     def _sync_capture_telemetry_timer(self, *, force_restart: bool = False) -> None:
         timer = self._capture_telemetry_timer
@@ -202,6 +206,10 @@ class ExplicitTurnNumberWindow(MapleMainWindow):
             timer.stop()
             self._reset_capture_telemetry_window()
             self._poll_capture_telemetry()
+            if self._capture_telemetry_status is not None:
+                self._capture_telemetry_last_status_code = (
+                    self._capture_telemetry_status.status
+                )
             timer.start()
 
     def _resume_capture_polling(self) -> None:
@@ -210,7 +218,9 @@ class ExplicitTurnNumberWindow(MapleMainWindow):
 
     def _on_header_tab_changed(self, index: int) -> None:
         super()._on_header_tab_changed(index)
-        self._sync_capture_telemetry_timer(force_restart=index == _BATTLE_RECORD_TAB_INDEX)
+        self._sync_capture_telemetry_timer(
+            force_restart=index == _BATTLE_RECORD_TAB_INDEX
+        )
 
     def _on_reconnect_capture(self, _checked: bool = False) -> None:
         timer = self._capture_telemetry_timer
@@ -227,12 +237,12 @@ class ExplicitTurnNumberWindow(MapleMainWindow):
         super()._on_reconnect_capture(_checked)
         self._sync_capture_telemetry_timer(force_restart=True)
 
-    def closeEvent(self, event: object) -> None:  # noqa: N802 - Qt override
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
         timer = self._capture_telemetry_timer
         if timer is not None:
             timer.stop()
         self._reset_capture_telemetry_window()
-        super().closeEvent(event)  # type: ignore[arg-type]
+        super().closeEvent(event)
 
     def render_view(self, view: OperatorView | None = None) -> None:
         super().render_view(view)

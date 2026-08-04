@@ -20,6 +20,12 @@ from maple_next.capture.format_policy import (
     select_exact_720p_format,
 )
 
+__all__ = [
+    "QtMultimediaUgreenBackend",
+    "select_exact_720p_format",
+    "select_ugreen_device",
+]
+
 try:  # pragma: no cover - exercised only when PySide6 Multimedia is importable
     from PySide6.QtCore import QObject
     from PySide6.QtMultimedia import QCamera, QMediaCaptureSession, QMediaDevices, QVideoSink

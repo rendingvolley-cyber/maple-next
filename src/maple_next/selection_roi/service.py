@@ -378,7 +378,7 @@ class SelectionRoiService:
     def _save_png_atomic(image: QImage, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(f".{destination.name}.tmp.png")
-        if not image.save(str(temporary), b"PNG"):
+        if not image.save(str(temporary)):
             raise OSError("image save failed")
         temporary.replace(destination)
 

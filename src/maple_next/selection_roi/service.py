@@ -7,7 +7,7 @@ import json
 import shutil
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
@@ -226,7 +226,7 @@ class SelectionRoiService:
                         "safe_label_directory": safe_label,
                         "crop_hash": crop_hash,
                         "disposition": disposition,
-                        "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "recorded_at_utc": datetime.now(UTC).isoformat(),
                     }
                 )
             self._append_jsonl(self.paths.feedback_file, feedback_rows)
@@ -281,7 +281,7 @@ class SelectionRoiService:
         observation_dir = self.paths.captures_root / observation_id
         observation_dir.mkdir(parents=True, exist_ok=True)
         slot_files: list[Path] = []
-        for match, fingerprint in zip(matches, fingerprints, strict=True):
+        for match in matches:
             destination = observation_dir / f"slot_{match.slot:02d}.png"
             if not destination.exists():
                 self._save_png_atomic(match.crop, destination)

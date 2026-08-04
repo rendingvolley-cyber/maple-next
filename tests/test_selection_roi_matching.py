@@ -29,7 +29,6 @@ from maple_next.selection_roi.matcher import (
 )
 from maple_next.selection_roi.service import SelectionRoiService
 
-
 ROI_RECTS = tuple(
     SelectionRoiRect(slot=index + 1, x=700, y=40 + index * 100, width=240, height=80)
     for index in range(6)

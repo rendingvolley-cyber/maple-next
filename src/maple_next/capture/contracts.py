@@ -58,6 +58,13 @@ class CaptureErrorCode(StrEnum):
     CAPTURE_FAILED = "CAPTURE_FAILED"
 
 
+class FrameKind(StrEnum):
+    """Explicit pixel-space identity carried by every frame packet."""
+
+    SOURCE = "SOURCE"
+    CANONICAL = "CANONICAL"
+
+
 #: Fixed, sanitized Japanese operator messages. Never concatenate raw exception
 #: text, device paths, or backend diagnostics into these strings.
 CAPTURE_OPERATOR_MESSAGES: dict[str, str] = {
@@ -135,33 +142,13 @@ class CaptureStatus:
 
 
 @dataclass(frozen=True, slots=True)
-class SourceFramePacket:
-    """One raw source frame for preview and canonicalization input.
-
-    ``width``/``height`` and ``image`` describe exactly what the capture backend
-    produced. This type deliberately has no canonical-content metadata, so a
-    source frame cannot be mistaken for the 1280x720 OCR working canvas.
-    Preview may render this packet directly; OCR must never consume it.
-    """
-
-    frame_id: str
-    source: str
-    captured_at_utc: datetime
-    captured_monotonic_ns: int
-    width: int
-    height: int
-    image: Any = None
-
-
-@dataclass(frozen=True, slots=True)
 class FramePacket:
     """A canonical 1280x720 OCR working frame.
 
     ``width``/``height`` describe the canonical canvas, never the raw capture
     dimensions. ``source_width``/``source_height`` preserve the source size and
     ``content_rect`` identifies the real pixels inside any letterbox/pillarbox
-    padding. OCR consumers accept this type only; preview uses
-    :class:`SourceFramePacket` and therefore does not pay canonical resize cost.
+    padding. OCR consumers accept packets whose ``frame_kind`` is CANONICAL.
     """
 
     frame_id: str
@@ -179,6 +166,20 @@ class FramePacket:
     #: pillarbox padding, not source content, and OCR/consumers must not treat
     #: it as captured pixels.
     content_rect: tuple[int, int, int, int] | None = None
+    frame_kind: FrameKind = FrameKind.CANONICAL
+
+
+@dataclass(frozen=True, slots=True)
+class SourceFramePacket(FramePacket):
+    """One raw source frame for preview and canonicalization input.
+
+    The distinct runtime type and SOURCE kind make the boundary explicit while
+    retaining ``FramePacket`` compatibility for existing display-only widgets.
+    ``width``/``height`` and ``image`` describe exactly what the capture backend
+    produced. OCR rejects SOURCE packets before backend recognition.
+    """
+
+    frame_kind: FrameKind = FrameKind.SOURCE
 
 
 @dataclass(frozen=True, slots=True)

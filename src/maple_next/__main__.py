@@ -26,7 +26,7 @@ from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
 from maple_next.ui.gemini_turn_advice import GeminiTurnAdviceAdapter
 from maple_next.ui.match_controller import MatchFlowController
-from maple_next.ui.selection_snapshot_window import SelectionSnapshotMatchFlowWindow
+from maple_next.ui.turn_snapshot_official_window import TurnSnapshotMatchFlowWindow
 
 
 def repository_root() -> Path:
@@ -108,7 +108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             turn_gemini_adapter=build_turn_gemini_adapter(),
         )
-        window = SelectionSnapshotMatchFlowWindow(
+        window = TurnSnapshotMatchFlowWindow(
             controller,
             ocr_data_directory=ocr_data_directory,
         )

@@ -1,13 +1,16 @@
 """Official fail-closed wrapper for the Turn snapshot OCR window.
 
 The base implementation owns the event-driven capture/OCR flow. This narrow
-wrapper tightens two operator-facing boundaries:
+wrapper tightens operator-facing boundaries:
 
 * every new capture or explicit retake immediately clears candidates and the
   previously frozen image, so stale controls cannot be used while the next
   immutable frame is being analysed;
 * the inherited generic OCR-adopt handler is reached only when the current
-  frozen bundle actually contains a candidate for that field.
+  frozen bundle actually contains a candidate for that field;
+* confirming Turn facts is one explicit human button action. The legacy
+  duplicate checkbox is hidden and is not part of the official flow, while
+  the separate Gemini send remains an independent trusted human action.
 """
 
 from __future__ import annotations
@@ -21,6 +24,15 @@ from maple_next.ui.turn_snapshot_window import (
 
 class TurnSnapshotMatchFlowWindow(_BaseTurnSnapshotMatchFlowWindow):
     """Official Turn screenshot window with stale-display protections."""
+
+    def _build_turn_facts_group(self) -> None:
+        super()._build_turn_facts_group()
+        # The save button itself is the explicit human confirmation. Requiring
+        # a checkbox immediately before the same action is redundant on every
+        # Turn and does not add a distinct safety boundary.
+        self.turn_facts_confirm_checkbox.setVisible(False)
+        self.turn_facts_confirm_checkbox.setChecked(False)
+        self.confirm_turn_facts_button.setText("Turn factsを確認して保存")
 
     def _clear_turn_snapshot_candidate_display(self, *, reset_origins: bool) -> None:
         self._latest_ocr_bundle = None
@@ -58,6 +70,32 @@ class TurnSnapshotMatchFlowWindow(_BaseTurnSnapshotMatchFlowWindow):
             message=message,
             reset_draft=False,
         )
+
+    def _update_turn_fact_button(self, _checked: bool = False) -> None:
+        self.turn_facts_confirm_checkbox.setVisible(False)
+        self.confirm_turn_facts_button.setEnabled(
+            self._persistence_reads_allowed
+            and getattr(self, "_turn_facts_editable", False)
+        )
+
+    def _on_confirm_turn_facts(self, _checked: bool = False) -> None:
+        if not self._mutation_slots_allowed():
+            return
+        moves = [field.text().strip() for field in self.move_inputs if field.text().strip()]
+        switches = [
+            checkbox.text() for checkbox in self.switch_checkboxes if checkbox.isChecked()
+        ]
+        view = self._controller.confirm_turn_facts(
+            self_active=self.self_active_box.currentText(),
+            opponent_active=self.opponent_active_input.text(),
+            self_hp=self.self_hp_box.currentText(),
+            opponent_hp=self.opponent_hp_box.currentText(),
+            legal_moves=moves,
+            legal_switches=switches,
+            human_note=self.turn_note_input.text(),
+            human_confirmed=True,
+        )
+        self.render_view(view)
 
     def _on_adopt_ocr_candidate(self, field_key: str) -> None:
         if not self._mutation_slots_allowed() or self._latest_ocr_bundle is None:

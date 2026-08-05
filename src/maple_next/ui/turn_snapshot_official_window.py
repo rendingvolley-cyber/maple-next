@@ -10,16 +10,26 @@ wrapper tightens operator-facing boundaries:
   frozen bundle actually contains a candidate for that field;
 * confirming Turn facts is one explicit human button action. The legacy
   duplicate checkbox is hidden and is not part of the official flow, while
-  the separate Gemini send remains an independent trusted human action.
+  the separate Gemini send remains an independent trusted human action;
+* an in-process Turn Gemini attempt owns the top-level provider status display,
+  so a current Turn failure never leaves an older Selection ``SUCCEEDED`` label.
 """
 
 from __future__ import annotations
 
 from maple_next.capture.contracts import FramePacket
 from maple_next.ocr.contracts import OcrFieldKey
+from maple_next.ui.controller import OperatorView
 from maple_next.ui.turn_snapshot_window import (
     TurnSnapshotMatchFlowWindow as _BaseTurnSnapshotMatchFlowWindow,
 )
+
+_TURN_PROVIDER_STATUS_LABELS = {
+    "PENDING": "PENDING",
+    "FAILED": "FAILED",
+    "SUCCESS": "SUCCEEDED",
+    "STALE_OR_INVALID": "STALE_OR_INVALID",
+}
 
 
 class TurnSnapshotMatchFlowWindow(_BaseTurnSnapshotMatchFlowWindow):
@@ -33,6 +43,16 @@ class TurnSnapshotMatchFlowWindow(_BaseTurnSnapshotMatchFlowWindow):
         self.turn_facts_confirm_checkbox.setVisible(False)
         self.turn_facts_confirm_checkbox.setChecked(False)
         self.confirm_turn_facts_button.setText("Turn factsを確認して保存")
+
+    def render_view(self, view: OperatorView | None = None) -> None:
+        super().render_view(view)
+        status_getter = getattr(self._controller, "turn_advice_gemini_status", None)
+        if not callable(status_getter):
+            return
+        status = status_getter()
+        current_turn_status = _TURN_PROVIDER_STATUS_LABELS.get(status.status)
+        if current_turn_status is not None:
+            self.provider_status_label.setText(current_turn_status)
 
     def _clear_turn_snapshot_candidate_display(self, *, reset_origins: bool) -> None:
         self._latest_ocr_bundle = None

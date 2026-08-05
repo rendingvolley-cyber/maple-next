@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from PySide6.QtGui import QColor, QImage
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QFont, QImage, QPainter
+from PySide6.QtWidgets import QApplication
 
 from maple_next.capture.contracts import FrameKind, FramePacket
 from maple_next.domain.enums import HpBucket
@@ -15,8 +21,18 @@ from maple_next.ocr.contracts import OcrFieldKey
 from maple_next.turn_ocr.config import load_turn_roi_config
 from maple_next.turn_ocr.contracts import TurnSnapshotIdentity, TurnSnapshotRequest
 from maple_next.turn_ocr.hp_reader import hp_bucket_from_ratio, read_hp_bar
-from maple_next.turn_ocr.name_recognizer import NameCandidateMatch
+from maple_next.turn_ocr.name_recognizer import (
+    NameCandidateMatch,
+    recognize_candidate_name,
+)
 from maple_next.turn_ocr.service import TurnSnapshotOcrService
+
+
+def _qt_application() -> QApplication:
+    existing = QApplication.instance()
+    if isinstance(existing, QApplication):
+        return existing
+    return QApplication([])
 
 
 def _write_config(path: Path) -> Path:
@@ -134,6 +150,61 @@ def test_hp_reader_detects_contiguous_green_fill() -> None:
     assert estimate.ratio is not None
     assert 0.70 <= estimate.ratio <= 0.80
     assert estimate.bucket is HpBucket.SEVENTY_ONE_TO_EIGHTY
+
+
+def test_hp_reader_detects_full_bar_despite_numeric_overlay() -> None:
+    image = QImage(160, 21, QImage.Format.Format_RGB32)
+    image.fill(QColor("#111827"))
+    for x in range(6, 159):
+        for y in range(4, 14):
+            image.setPixelColor(x, y, QColor("#7CFC00"))
+    # The real Champions HUD paints the white numeric HP value over the lower
+    # portion of the green bar. Those rows must not turn 100% into 91-99.
+    for x in range(86, 145):
+        for y in range(14, 21):
+            image.setPixelColor(x, y, QColor("white"))
+
+    estimate = read_hp_bar(image)
+
+    assert estimate.detected is True
+    assert estimate.ratio == 1.0
+    assert estimate.bucket is HpBucket.FULL
+    assert estimate.confidence >= 0.90
+
+
+def test_name_recognizer_ignores_colored_hud_plate() -> None:
+    _qt_application()
+    image = QImage(180, 40, QImage.Format.Format_RGB32)
+    image.fill(QColor("#4338ca"))
+    painter = QPainter(image)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        font = QFont("Sans Serif")
+        font.setBold(True)
+        font.setItalic(True)
+        font.setPixelSize(24)
+        painter.setFont(font)
+        painter.setPen(QColor("white"))
+        painter.drawText(
+            6,
+            0,
+            168,
+            40,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            "ガブリアス",
+        )
+    finally:
+        painter.end()
+
+    matches = recognize_candidate_name(
+        image,
+        ("ブリジュラス", "ハッサム", "ガブリアス", "マスカーニャ"),
+        top_k=3,
+    )
+
+    assert matches
+    assert matches[0].label == "ガブリアス"
+    assert matches[0].score >= 0.80
 
 
 def test_turn_service_uses_only_supplied_name_candidates(

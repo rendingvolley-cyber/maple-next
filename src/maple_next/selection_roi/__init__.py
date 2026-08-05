@@ -11,6 +11,8 @@ from maple_next.selection_roi.contracts import (
     SelectionRoiError,
     SelectionRoiRect,
     SelectionSlotMatch,
+    normalize_selection_label,
+    safe_label_directory,
 )
 from maple_next.selection_roi.input_policy import (
     AUTO_FILL_THRESHOLD,
@@ -64,6 +66,8 @@ __all__ = [
     "assign_unique_team_candidates",
     "fingerprint_similarity",
     "match_selection_crops",
+    "normalize_selection_label",
+    "safe_label_directory",
     "should_auto_fill",
     "visible_candidates",
 ]

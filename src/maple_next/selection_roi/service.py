@@ -1,4 +1,4 @@
-"""Selection ROI crop, capture, matching, and human-confirmed feedback storage."""
+"""Selection ROI crop, matching, and origin-aware feedback storage."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ from maple_next.selection_roi.contracts import (
     SelectionSlotMatch,
     safe_label_directory,
 )
+from maple_next.selection_roi.input_policy import SelectionInputOrigin
 from maple_next.selection_roi.matcher import (
     ImageFingerprint,
     ReferenceImageIndex,
@@ -37,6 +38,7 @@ from maple_next.selection_roi.matcher import (
 
 _CONFIG_RELATIVE_PATH: Final[Path] = Path("selection/config/roi_config.json")
 _LABELED_RELATIVE_PATH: Final[Path] = Path("selection/reference/labeled")
+_PROVISIONAL_RELATIVE_PATH: Final[Path] = Path("selection/reference/provisional")
 _UNLABELED_RELATIVE_PATH: Final[Path] = Path("selection/reference/unlabeled")
 _CAPTURES_RELATIVE_PATH: Final[Path] = Path("selection/captures")
 _QUARANTINE_RELATIVE_PATH: Final[Path] = Path("selection/quarantine")
@@ -45,6 +47,12 @@ _MANIFEST_RELATIVE_PATH: Final[Path] = Path(
     "selection/manifests/selection_roi_manifest.jsonl"
 )
 _NEAR_DUPLICATE_THRESHOLD: Final[float] = 0.995
+_PROMOTION_MIN_DISTINCT_MATCHES: Final[int] = 3
+_PROMOTION_TRUSTED_SIMILARITY: Final[float] = 0.85
+_PROMOTION_MIN_LABEL_MARGIN: Final[float] = 0.05
+_SUPPORTED_IMAGE_SUFFIXES: Final[frozenset[str]] = frozenset(
+    {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +60,7 @@ class SelectionRoiPaths:
     root: Path
     config_file: Path
     labeled_root: Path
+    provisional_root: Path
     unlabeled_root: Path
     captures_root: Path
     quarantine_root: Path
@@ -65,6 +74,7 @@ class SelectionRoiPaths:
             root=resolved,
             config_file=resolved / _CONFIG_RELATIVE_PATH,
             labeled_root=resolved / _LABELED_RELATIVE_PATH,
+            provisional_root=resolved / _PROVISIONAL_RELATIVE_PATH,
             unlabeled_root=resolved / _UNLABELED_RELATIVE_PATH,
             captures_root=resolved / _CAPTURES_RELATIVE_PATH,
             quarantine_root=resolved / _QUARANTINE_RELATIVE_PATH,
@@ -75,6 +85,7 @@ class SelectionRoiPaths:
     def ensure_runtime_directories(self) -> None:
         for directory in (
             self.labeled_root,
+            self.provisional_root,
             self.unlabeled_root,
             self.captures_root,
             self.quarantine_root,
@@ -97,14 +108,30 @@ class StoredSelectionObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class SelectionSlotFeedback:
+    """The editable value and its provenance at explicit Gemini send time."""
+
+    label: str
+    value_origin: SelectionInputOrigin
+    ocr_score: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class FeedbackStoreResult:
     added_count: int
     duplicate_count: int
     conflict_count: int
+    provisional_count: int = 0
+    promoted_count: int = 0
 
 
 class SelectionRoiService:
-    """Thread-safe, candidate-only image matcher and local feedback store."""
+    """Thread-safe candidate matcher and local feedback store.
+
+    Human-typed or candidate-chip values enter the trusted index immediately.
+    Untouched OCR auto-fill values remain provisional and can be promoted only
+    after repeated distinct-match evidence agrees with an existing trusted label.
+    """
 
     def __init__(
         self,
@@ -168,7 +195,7 @@ class SelectionRoiService:
             return SelectionMatchBundle(
                 status="CANDIDATES_READY",
                 operator_message=(
-                    "相手6枠の画像候補です。自動反映・自動確定は行いません。"
+                    "相手6枠の画像候補です。0.80以上は空欄へ仮入力され、いつでも修正できます。"
                 ),
                 frame_id=frame.frame_id,
                 observation_id=observation.observation_id,
@@ -191,62 +218,133 @@ class SelectionRoiService:
         opponent_names: tuple[str, str, str, str, str, str],
         reviewed_selection_id: str | None,
     ) -> FeedbackStoreResult:
+        """Compatibility path for the legacy explicit 6-team confirmation UI."""
+
+        feedback = tuple(
+            SelectionSlotFeedback(
+                label=label,
+                value_origin=SelectionInputOrigin.MANUAL_TEXT,
+            )
+            for label in opponent_names
+        )
+        return self.record_sent_observation(
+            observation_id=observation_id,
+            slot_feedback=feedback,
+            reviewed_selection_id=reviewed_selection_id,
+            session_id=None,
+            match_id=None,
+            generation=None,
+        )
+
+    def record_sent_observation(
+        self,
+        *,
+        observation_id: str,
+        slot_feedback: tuple[
+            SelectionSlotFeedback,
+            SelectionSlotFeedback,
+            SelectionSlotFeedback,
+            SelectionSlotFeedback,
+            SelectionSlotFeedback,
+            SelectionSlotFeedback,
+        ],
+        reviewed_selection_id: str | None,
+        session_id: str | None,
+        match_id: str | None,
+        generation: int | None,
+    ) -> FeedbackStoreResult:
+        """Store the six crops only after explicit send-time canonicalization."""
+
         with self._lock:
             observation = self._observations.get(observation_id)
             if observation is None or reviewed_selection_id is None:
-                return FeedbackStoreResult(added_count=0, duplicate_count=0, conflict_count=0)
+                return FeedbackStoreResult(0, 0, 0)
             added = 0
+            provisional = 0
             duplicates = 0
             conflicts = 0
             feedback_rows: list[dict[str, object]] = []
-            for slot, source_path, crop_hash, label in zip(
+            provisional_labels: set[str] = set()
+            for slot, source_path, crop_hash, item in zip(
                 range(1, SELECTION_SLOT_COUNT + 1),
                 observation.slot_files,
                 observation.slot_hashes,
-                opponent_names,
+                slot_feedback,
                 strict=True,
             ):
+                label = item.label.strip()
                 safe_label = safe_label_directory(label)
+                trust_state = (
+                    "TRUSTED"
+                    if item.value_origin
+                    in {
+                        SelectionInputOrigin.CANDIDATE_CLICK,
+                        SelectionInputOrigin.MANUAL_TEXT,
+                    }
+                    else "PROVISIONAL"
+                )
                 existing_labels = self._labels_for_hash(crop_hash)
                 if existing_labels and safe_label not in existing_labels:
                     conflicts += 1
-                    conflict_dir = self.paths.quarantine_root / "label_conflicts"
-                    conflict_dir.mkdir(parents=True, exist_ok=True)
-                    conflict_path = conflict_dir / f"{crop_hash}_slot_{slot:02d}.png"
-                    if not conflict_path.exists():
-                        shutil.copy2(source_path, conflict_path)
+                    self._quarantine_conflict(source_path, crop_hash, slot)
                     disposition = "CONFLICT"
                 else:
-                    label_dir = self.paths.labeled_root / safe_label
+                    target_root = (
+                        self.paths.labeled_root
+                        if trust_state == "TRUSTED"
+                        else self.paths.provisional_root
+                    )
+                    label_dir = target_root / safe_label
                     label_dir.mkdir(parents=True, exist_ok=True)
                     destination = label_dir / f"{crop_hash}.png"
-                    if destination.exists():
+                    fingerprint = observation.fingerprints[slot - 1]
+                    if destination.exists() or self._has_near_duplicate(
+                        fingerprint,
+                        label_dir,
+                    ):
                         duplicates += 1
                         disposition = "DUPLICATE"
                     else:
                         shutil.copy2(source_path, destination)
-                        added += 1
-                        disposition = "ADDED"
+                        if trust_state == "TRUSTED":
+                            added += 1
+                            disposition = "ADDED_TRUSTED"
+                        else:
+                            provisional += 1
+                            provisional_labels.add(safe_label)
+                            disposition = "ADDED_PROVISIONAL"
                 feedback_rows.append(
                     {
-                        "schema_version": "maple-selection-roi-feedback.v1",
+                        "schema_version": "maple-selection-roi-feedback.v2",
                         "reviewed_selection_id": reviewed_selection_id,
+                        "session_id": session_id,
+                        "match_id": match_id,
+                        "generation": generation,
                         "observation_id": observation_id,
                         "frame_id": observation.frame_id,
                         "slot": slot,
                         "label": label,
                         "safe_label_directory": safe_label,
                         "crop_hash": crop_hash,
+                        "value_origin": item.value_origin.value,
+                        "ocr_score": item.ocr_score,
+                        "trust_state": trust_state,
                         "disposition": disposition,
                         "recorded_at_utc": datetime.now(UTC).isoformat(),
                     }
                 )
             self._append_jsonl(self.paths.feedback_file, feedback_rows)
+            promoted = sum(
+                self._promote_eligible_provisional(label)
+                for label in sorted(provisional_labels)
+            )
             self._index.refresh()
             return FeedbackStoreResult(
                 added_count=added,
                 duplicate_count=duplicates,
                 conflict_count=conflicts,
+                provisional_count=provisional,
+                promoted_count=promoted,
             )
 
     def latest_observation(self, observation_id: str) -> StoredSelectionObservation | None:
@@ -345,6 +443,131 @@ class SelectionRoiService:
             manifest_marker.write_text("recorded\n", encoding="utf-8")
         return observation
 
+    def _promote_eligible_provisional(self, safe_label: str) -> int:
+        trusted_dir = self.paths.labeled_root / safe_label
+        provisional_dir = self.paths.provisional_root / safe_label
+        if not trusted_dir.is_dir() or not provisional_dir.is_dir():
+            return 0
+        distinct_matches = self._provisional_match_ids(safe_label)
+        if len(distinct_matches) < _PROMOTION_MIN_DISTINCT_MATCHES:
+            return 0
+        promoted = 0
+        promotion_rows: list[dict[str, object]] = []
+        for source_path in sorted(provisional_dir.glob("*.png")):
+            image = QImage(str(source_path))
+            if image.isNull():
+                continue
+            fingerprint = ImageFingerprint.from_image(image)
+            same_score, other_score = self._best_trusted_scores(
+                fingerprint,
+                safe_label,
+            )
+            if (
+                same_score < _PROMOTION_TRUSTED_SIMILARITY
+                or same_score - other_score < _PROMOTION_MIN_LABEL_MARGIN
+            ):
+                continue
+            destination = trusted_dir / source_path.name
+            if destination.exists() or self._has_near_duplicate(
+                fingerprint,
+                trusted_dir,
+            ):
+                continue
+            shutil.copy2(source_path, destination)
+            promoted += 1
+            promotion_rows.append(
+                {
+                    "schema_version": "maple-selection-roi-feedback.v2",
+                    "safe_label_directory": safe_label,
+                    "crop_hash": fingerprint.exact_hash,
+                    "trust_state": "TRUSTED",
+                    "disposition": "PROMOTED_FROM_PROVISIONAL",
+                    "same_label_similarity": round(same_score, 6),
+                    "other_label_similarity": round(other_score, 6),
+                    "distinct_match_count": len(distinct_matches),
+                    "recorded_at_utc": datetime.now(UTC).isoformat(),
+                }
+            )
+        if promotion_rows:
+            self._append_jsonl(self.paths.feedback_file, promotion_rows)
+        return promoted
+
+    def _provisional_match_ids(self, safe_label: str) -> set[str]:
+        if not self.paths.feedback_file.exists():
+            return set()
+        match_ids: set[str] = set()
+        try:
+            lines = self.paths.feedback_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return set()
+        for line in lines:
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if (
+                payload.get("safe_label_directory") == safe_label
+                and payload.get("trust_state") == "PROVISIONAL"
+                and isinstance(payload.get("match_id"), str)
+                and payload["match_id"]
+            ):
+                match_ids.add(str(payload["match_id"]))
+        return match_ids
+
+    def _best_trusted_scores(
+        self,
+        fingerprint: ImageFingerprint,
+        safe_label: str,
+    ) -> tuple[float, float]:
+        same_score = 0.0
+        other_score = 0.0
+        for path in self.paths.labeled_root.glob("*/*"):
+            if not path.is_file() or path.suffix.casefold() not in _SUPPORTED_IMAGE_SUFFIXES:
+                continue
+            image = QImage(str(path))
+            if image.isNull():
+                continue
+            try:
+                score = fingerprint_similarity(
+                    fingerprint,
+                    ImageFingerprint.from_image(image),
+                )
+            except SelectionRoiError:
+                continue
+            if path.parent.name == safe_label:
+                same_score = max(same_score, score)
+            else:
+                other_score = max(other_score, score)
+        return same_score, other_score
+
+    def _has_near_duplicate(
+        self,
+        fingerprint: ImageFingerprint,
+        label_dir: Path,
+    ) -> bool:
+        for path in label_dir.glob("*"):
+            if not path.is_file() or path.suffix.casefold() not in _SUPPORTED_IMAGE_SUFFIXES:
+                continue
+            image = QImage(str(path))
+            if image.isNull():
+                continue
+            try:
+                existing = ImageFingerprint.from_image(image)
+            except SelectionRoiError:
+                continue
+            if fingerprint_similarity(fingerprint, existing) >= _NEAR_DUPLICATE_THRESHOLD:
+                return True
+        return False
+
+    def _quarantine_conflict(self, source_path: Path, crop_hash: str, slot: int) -> None:
+        conflict_dir = self.paths.quarantine_root / "label_conflicts"
+        conflict_dir.mkdir(parents=True, exist_ok=True)
+        conflict_path = conflict_dir / f"{crop_hash}_slot_{slot:02d}.png"
+        if not conflict_path.exists():
+            shutil.copy2(source_path, conflict_path)
+
     @staticmethod
     def _near_duplicate(
         current: tuple[ImageFingerprint, ...],
@@ -369,9 +592,10 @@ class SelectionRoiService:
 
     def _labels_for_hash(self, crop_hash: str) -> set[str]:
         labels: set[str] = set()
-        for candidate in self.paths.labeled_root.glob(f"*/{crop_hash}.png"):
-            if candidate.is_file():
-                labels.add(candidate.parent.name)
+        for root in (self.paths.labeled_root, self.paths.provisional_root):
+            for candidate in root.glob(f"*/{crop_hash}.png"):
+                if candidate.is_file():
+                    labels.add(candidate.parent.name)
         return labels
 
     @staticmethod

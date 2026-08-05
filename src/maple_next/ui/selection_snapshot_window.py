@@ -23,6 +23,7 @@ from maple_next.selection_roi.contracts import (
     SELECTION_SLOT_COUNT,
     SelectionMatchBundle,
 )
+from maple_next.ui.match_controller import MatchFlowController
 from maple_next.ui.selection_roi_window import SelectionRoiMatchFlowWindow
 
 _SELECTION_TAB_INDEX = 0
@@ -33,12 +34,12 @@ class SelectionSnapshotMatchFlowWindow(SelectionRoiMatchFlowWindow):
 
     def __init__(
         self,
-        controller: object,
+        controller: MatchFlowController,
         *,
         ocr_data_directory: Path,
     ) -> None:
         self._new_match_snapshot_counter = 0
-        super().__init__(controller, ocr_data_directory=ocr_data_directory)  # type: ignore[arg-type]
+        super().__init__(controller, ocr_data_directory=ocr_data_directory)
         self._stop_selection_roi_timer()
         self._set_selection_roi_status(
             "NEW MATCHを押した瞬間の1枚を固定し、その画像だけで相手6体を解析します。"

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "maple-selection-roi.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "canonical_width",
+    "canonical_height",
+    "source_provenance",
+    "slots"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "maple-selection-roi.v1"
+    },
+    "canonical_width": {
+      "const": 1280
+    },
+    "canonical_height": {
+      "const": 720
+    },
+    "source_provenance": {
+      "type": "string"
+    },
+    "slots": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slot", "x", "y", "width", "height"],
+        "properties": {
+          "slot": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,22 +1,24 @@
 """Candidate-constrained active-name recognition without unrestricted text output.
 
-This initial implementation renders each already-confirmed candidate name into
-several Windows/Japanese font variants and compares polarity-independent edge
-signatures. It deliberately cannot invent a Pokemon name outside the supplied
-candidate pool. Repository-owned labeled active-name reference images can be
-added later without changing the surrounding Turn snapshot contract.
+The live Pokémon Champions HUD uses bright italic text on saturated team-color
+plates. Comparing raw edge maps lets those plates dominate the score, so this
+module first isolates the low-saturation bright glyph interior, normalizes the
+glyph bounding box, and then compares it with several Windows/Japanese font
+variants. The recognizer still cannot invent a name outside the supplied,
+human-confirmed candidate pool.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import sqrt
 from typing import Final
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter
 
-_SIGNATURE_WIDTH: Final[int] = 160
-_SIGNATURE_HEIGHT: Final[int] = 32
+_MASK_WIDTH: Final[int] = 128
+_MASK_HEIGHT: Final[int] = 32
 _FONT_FAMILIES: Final[tuple[str, ...]] = (
     "Yu Gothic UI",
     "Meiryo UI",
@@ -24,6 +26,8 @@ _FONT_FAMILIES: Final[tuple[str, ...]] = (
     "MS Gothic",
     "Sans Serif",
 )
+_FONT_STRETCHES: Final[tuple[int, ...]] = (85, 100, 115)
+Mask = tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,70 +37,148 @@ class NameCandidateMatch:
     rank: int
 
 
-def _edge_signature(image: QImage) -> tuple[int, ...]:
-    grayscale = image.convertToFormat(QImage.Format.Format_Grayscale8).scaled(
-        _SIGNATURE_WIDTH,
-        _SIGNATURE_HEIGHT,
-        Qt.AspectRatioMode.IgnoreAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
+def _is_bright_glyph(red: int, green: int, blue: int) -> bool:
+    maximum = max(red, green, blue)
+    minimum = min(red, green, blue)
+    brightness = (red + green + blue) // 3
+    return maximum >= 145 and brightness >= 130 and maximum - minimum <= 85
+
+
+def _normalize_glyph_mask(image: QImage) -> Mask:
+    source = image.convertToFormat(QImage.Format.Format_RGB32)
+    width = source.width()
+    height = source.height()
+    points: list[tuple[int, int]] = []
+    source_mask = [[False for _x in range(width)] for _y in range(height)]
+    for y in range(height):
+        for x in range(width):
+            color = source.pixelColor(x, y)
+            if _is_bright_glyph(color.red(), color.green(), color.blue()):
+                source_mask[y][x] = True
+                points.append((x, y))
+    if len(points) < 8:
+        return (0,) * (_MASK_WIDTH * _MASK_HEIGHT)
+
+    x_min = min(point[0] for point in points)
+    x_max = max(point[0] for point in points)
+    y_min = min(point[1] for point in points)
+    y_max = max(point[1] for point in points)
+    glyph_width = x_max - x_min + 1
+    glyph_height = y_max - y_min + 1
+    if glyph_width <= 0 or glyph_height <= 0:
+        return (0,) * (_MASK_WIDTH * _MASK_HEIGHT)
+
+    scale = min(
+        (_MASK_WIDTH - 4) / glyph_width,
+        (_MASK_HEIGHT - 4) / glyph_height,
     )
-    values = [
-        grayscale.pixelColor(x, y).red()
-        for y in range(_SIGNATURE_HEIGHT)
-        for x in range(_SIGNATURE_WIDTH)
-    ]
-    edges: list[int] = []
-    for y in range(_SIGNATURE_HEIGHT):
-        for x in range(_SIGNATURE_WIDTH):
-            index = y * _SIGNATURE_WIDTH + x
-            current = values[index]
-            right = values[index + 1] if x + 1 < _SIGNATURE_WIDTH else current
-            down = (
-                values[index + _SIGNATURE_WIDTH]
-                if y + 1 < _SIGNATURE_HEIGHT
-                else current
+    target_width = max(1, min(_MASK_WIDTH - 4, round(glyph_width * scale)))
+    target_height = max(1, min(_MASK_HEIGHT - 4, round(glyph_height * scale)))
+    x_offset = 2
+    y_offset = (_MASK_HEIGHT - target_height) // 2
+    normalized = [0] * (_MASK_WIDTH * _MASK_HEIGHT)
+    for target_y in range(target_height):
+        source_y = y_min + min(
+            glyph_height - 1,
+            ((2 * target_y + 1) * glyph_height) // (2 * target_height),
+        )
+        for target_x in range(target_width):
+            source_x = x_min + min(
+                glyph_width - 1,
+                ((2 * target_x + 1) * glyph_width) // (2 * target_width),
             )
-            edges.append(1 if abs(current - right) + abs(current - down) >= 42 else 0)
-    return tuple(edges)
+            if source_mask[source_y][source_x]:
+                normalized[(y_offset + target_y) * _MASK_WIDTH + x_offset + target_x] = 1
+    return _dilate(tuple(normalized))
 
 
-def _signature_similarity(left: tuple[int, ...], right: tuple[int, ...]) -> float:
+def _dilate(mask: Mask) -> Mask:
+    output = [0] * len(mask)
+    for y in range(_MASK_HEIGHT):
+        for x in range(_MASK_WIDTH):
+            if not mask[y * _MASK_WIDTH + x]:
+                continue
+            for neighbour_y in range(max(0, y - 1), min(_MASK_HEIGHT, y + 2)):
+                for neighbour_x in range(max(0, x - 1), min(_MASK_WIDTH, x + 2)):
+                    output[neighbour_y * _MASK_WIDTH + neighbour_x] = 1
+    return tuple(output)
+
+
+def _profile_cosine(left: Mask, right: Mask, *, horizontal: bool) -> float:
+    length = _MASK_WIDTH if horizontal else _MASK_HEIGHT
+    left_profile = [0.0] * length
+    right_profile = [0.0] * length
+    for y in range(_MASK_HEIGHT):
+        for x in range(_MASK_WIDTH):
+            index = y * _MASK_WIDTH + x
+            profile_index = x if horizontal else y
+            left_profile[profile_index] += float(left[index])
+            right_profile[profile_index] += float(right[index])
+    dot = sum(a * b for a, b in zip(left_profile, right_profile, strict=True))
+    left_norm = sqrt(sum(value * value for value in left_profile))
+    right_norm = sqrt(sum(value * value for value in right_profile))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+def _glyph_similarity(left: Mask, right: Mask) -> float:
     left_count = sum(left)
     right_count = sum(right)
-    if left_count < 6 or right_count < 6:
+    if left_count < 12 or right_count < 12:
         return 0.0
-    intersection = sum(1 for a, b in zip(left, right, strict=True) if a and b)
-    union = sum(1 for a, b in zip(left, right, strict=True) if a or b)
-    jaccard = intersection / union if union else 0.0
-    density_score = 1.0 - abs(left_count - right_count) / max(left_count, right_count)
-    return max(0.0, min(1.0, 0.82 * jaccard + 0.18 * density_score))
-
-
-def _render_candidate(label: str, *, family: str, pixel_size: int) -> QImage:
-    image = QImage(
-        _SIGNATURE_WIDTH,
-        _SIGNATURE_HEIGHT,
-        QImage.Format.Format_RGB32,
+    left_dilated = _dilate(left)
+    right_dilated = _dilate(right)
+    left_covered = sum(
+        1
+        for left_pixel, right_pixel in zip(left, right_dilated, strict=True)
+        if left_pixel and right_pixel
+    ) / left_count
+    right_covered = sum(
+        1
+        for left_pixel, right_pixel in zip(left_dilated, right, strict=True)
+        if left_pixel and right_pixel
+    ) / right_count
+    coverage = (
+        0.0
+        if left_covered + right_covered == 0.0
+        else 2.0 * left_covered * right_covered / (left_covered + right_covered)
     )
+    horizontal = _profile_cosine(left, right, horizontal=True)
+    vertical = _profile_cosine(left, right, horizontal=False)
+    return max(0.0, min(1.0, 0.75 * coverage + 0.15 * horizontal + 0.10 * vertical))
+
+
+def _render_candidate(
+    label: str,
+    *,
+    family: str,
+    italic: bool,
+    stretch: int,
+) -> QImage:
+    image = QImage(256, 64, QImage.Format.Format_RGB32)
     image.fill(QColor("black"))
     painter = QPainter(image)
     try:
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         font = QFont(family)
         font.setBold(True)
+        font.setItalic(italic)
+        font.setStretch(stretch)
+        pixel_size = 30
         font.setPixelSize(pixel_size)
         metrics = QFontMetrics(font)
-        while pixel_size > 8 and metrics.horizontalAdvance(label) > _SIGNATURE_WIDTH - 4:
+        while pixel_size > 10 and metrics.horizontalAdvance(label) > image.width() - 8:
             pixel_size -= 1
             font.setPixelSize(pixel_size)
             metrics = QFontMetrics(font)
         painter.setFont(font)
         painter.setPen(QColor("white"))
         painter.drawText(
-            2,
+            4,
             0,
-            _SIGNATURE_WIDTH - 4,
-            _SIGNATURE_HEIGHT,
+            image.width() - 8,
+            image.height(),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             label,
         )
@@ -111,28 +193,42 @@ def recognize_candidate_name(
     *,
     top_k: int = 3,
 ) -> tuple[NameCandidateMatch, ...]:
-    """Rank only the supplied candidate names against one frozen name ROI."""
+    """Rank only supplied names after isolating the bright game-text glyphs."""
 
     normalized = tuple(dict.fromkeys(name.strip() for name in candidates if name.strip()))
     if crop.isNull() or not normalized or top_k <= 0:
         return ()
-    crop_signature = _edge_signature(crop)
-    scored: list[tuple[str, float]] = []
+    crop_mask = _normalize_glyph_mask(crop)
+    if sum(crop_mask) < 12:
+        return ()
+
+    raw_scores: list[tuple[str, float]] = []
     for label in normalized:
         best = 0.0
         for family in _FONT_FAMILIES:
-            for size in (12, 14, 16, 18, 20):
-                candidate_signature = _edge_signature(
-                    _render_candidate(label, family=family, pixel_size=size)
-                )
-                best = max(best, _signature_similarity(crop_signature, candidate_signature))
-        # The recognizer is deliberately conservative. A near-perfect template
-        # match may approach 0.95, but weak visual overlap must remain below the
-        # 0.50 display threshold rather than becoming an invented certainty.
-        calibrated = min(0.95, best * 1.18)
-        scored.append((label, calibrated))
-    scored.sort(key=lambda item: (-item[1], item[0].casefold(), item[0]))
-    return tuple(
-        NameCandidateMatch(label=label, score=score, rank=index + 1)
-        for index, (label, score) in enumerate(scored[:top_k])
+            for italic in (True, False):
+                for stretch in _FONT_STRETCHES:
+                    candidate_mask = _normalize_glyph_mask(
+                        _render_candidate(
+                            label,
+                            family=family,
+                            italic=italic,
+                            stretch=stretch,
+                        )
+                    )
+                    best = max(best, _glyph_similarity(crop_mask, candidate_mask))
+        raw_scores.append((label, best))
+    raw_scores.sort(key=lambda item: (-item[1], item[0].casefold(), item[0]))
+
+    top_margin = (
+        raw_scores[0][1] - raw_scores[1][1]
+        if len(raw_scores) > 1
+        else raw_scores[0][1]
     )
+    ranked: list[NameCandidateMatch] = []
+    for index, (label, raw_score) in enumerate(raw_scores[:top_k]):
+        calibrated = min(0.96, max(0.0, raw_score * 1.03))
+        if index == 0 and top_margin < 0.03:
+            calibrated = min(calibrated, 0.79)
+        ranked.append(NameCandidateMatch(label=label, score=calibrated, rank=index + 1))
+    return tuple(ranked)

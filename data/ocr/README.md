@@ -1,6 +1,6 @@
-# Maple Next selection ROI data
+# Maple Next Selection ROI data
 
-This directory is the only supported storage root for selection ROI assets in the
+This directory is the only supported storage root for Selection ROI assets in the
 official local checkout.
 
 Runtime root:
@@ -16,19 +16,39 @@ selection/config/roi_config.json
 selection/reference/labeled/<pokemon-name>/*.png
 ```
 
-The application writes only candidate/feedback assets under:
+The application writes local runtime data under:
 
 ```text
+selection/reference/provisional/
 selection/captures/
 selection/feedback/
 selection/manifests/
 selection/quarantine/
 ```
 
-`roi_config.json` and all runtime images/manifests are local data and are ignored
-by Git. Copy the validated historical ROI config and labeled images from
-`C:\pokemon_ai` into this tree. Maple Next must not retain a runtime dependency
-on the old path.
+`roi_config.json` and runtime images/manifests are ignored by Git. Historical ROI
+config and labeled images are copied from `C:\pokemon_ai` into this tree by a
+separate verified local operation. Maple Next has no runtime dependency on the
+old path and never deletes the source assets.
 
-OCR/ROI candidates never update canonical Selection facts automatically. A human
-must use the existing input controls and successfully press `6体を確認`.
+## Operator flow
+
+- a unique-assignment score of at least `0.80` may fill an empty opponent slot once
+- scores of at least `0.60` appear as clickable candidate chips
+- candidate clicks and direct typing lock that slot against later OCR overwrites
+- the operator may correct any value before pressing `現在の6体でGeminiに送る`
+- that trusted action saves the current six as the canonical Selection snapshot,
+  then reuses the existing explicit Gemini send path
+- no OCR timer, matcher result, or feedback task sends to Gemini automatically
+
+## Learning boundary
+
+- candidate click or direct typing is stored as trusted feedback
+- untouched OCR auto-fill is stored as provisional feedback
+- exact and perceptual duplicates are suppressed
+- cross-label conflicts are quarantined
+- provisional promotion requires evidence from three distinct matches plus an
+  existing trusted-label similarity and margin gate
+
+Historical label-folder spacing variants are normalized by the matcher without
+renaming or deleting the source directories.

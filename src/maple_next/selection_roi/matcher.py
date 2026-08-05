@@ -18,6 +18,7 @@ from maple_next.selection_roi.contracts import (
     SelectionRoiCrop,
     SelectionRoiError,
     SelectionSlotMatch,
+    normalize_selection_label,
 )
 
 _SIGNATURE_SIZE: Final[int] = 16
@@ -110,7 +111,12 @@ def fingerprint_similarity(left: ImageFingerprint, right: ImageFingerprint) -> f
 
 
 class ReferenceImageIndex:
-    """Read-only index of human-confirmed labeled ROI images."""
+    """Read-only index of trusted labeled ROI images.
+
+    Directory labels are normalized on read so harmless historical variants,
+    especially spaces around form parentheses, contribute to one candidate
+    rather than competing as separate team members.
+    """
 
     def __init__(self, labeled_root: Path) -> None:
         self._labeled_root = labeled_root
@@ -147,9 +153,12 @@ class ReferenceImageIndex:
         examples: list[ReferenceExample] = []
         for relative_path, _size, _mtime_ns in signature:
             path = self._labeled_root / relative_path
-            label = path.parent.name.strip()
+            try:
+                label = normalize_selection_label(path.parent.name)
+            except SelectionRoiError:
+                continue
             image = QImage(str(path))
-            if not label or image.isNull():
+            if image.isNull():
                 continue
             try:
                 fingerprint = ImageFingerprint.from_image(image)

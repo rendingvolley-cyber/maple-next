@@ -50,6 +50,7 @@ def test_reference_index_combines_historical_folder_variants(tmp_path: Path) -> 
     assert second.save(str(second_path))
 
     index = ReferenceImageIndex(root)
+    index.refresh()
     crop = SelectionRoiCrop(
         slot=1,
         image=first,

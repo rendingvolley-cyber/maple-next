@@ -31,15 +31,22 @@ config and labeled images are copied from `C:\pokemon_ai` into this tree by a
 separate verified local operation. Maple Next has no runtime dependency on the
 old path and never deletes the source assets.
 
-## Operator flow
+## Screenshot and operator flow
 
+- pressing `NEW MATCH` copies the freshest available canonical 1280x720 UGREEN
+  frame into one immutable screenshot before the canonical new-match command
+- only after the new Selection identity is created successfully are the six ROIs
+  cropped and matched from that screenshot
+- Selection ROI has no polling timer and does not consume later live frames
+- when no fresh screenshot is available, the match still opens and manual entry
+  remains available; Maple does not keep retrying automatically
 - a unique-assignment score of at least `0.80` may fill an empty opponent slot once
 - scores of at least `0.60` appear as clickable candidate chips
-- candidate clicks and direct typing lock that slot against later OCR overwrites
+- candidate clicks and direct typing lock that slot against later changes
 - the operator may correct any value before pressing `現在の6体でGeminiに送る`
 - that trusted action saves the current six as the canonical Selection snapshot,
   then reuses the existing explicit Gemini send path
-- no OCR timer, matcher result, or feedback task sends to Gemini automatically
+- screenshot capture, matching, and feedback never send to Gemini automatically
 
 ## Learning boundary
 

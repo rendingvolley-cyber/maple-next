@@ -21,11 +21,16 @@ from maple_next.providers.turn_transport import (
     GeminiTurnAdviceTransport,
     load_authorized_turn_provider_config_from_env,
 )
+from maple_next.runtime_env import bootstrap_repo_root_dotenv
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
 from maple_next.ui.gemini_turn_advice import GeminiTurnAdviceAdapter
 from maple_next.ui.match_controller import MatchFlowController
 from maple_next.ui.selection_snapshot_window import SelectionSnapshotMatchFlowWindow
+
+
+def repository_root() -> Path:
+    return Path(__file__).resolve().parents[2]
 
 
 def default_database_path() -> Path:
@@ -45,7 +50,7 @@ def default_export_directory() -> Path:
 def default_ocr_data_directory() -> Path:
     """Keep every OCR/ROI asset inside the official local repository root."""
 
-    return Path(__file__).resolve().parents[2] / "data" / "ocr"
+    return repository_root() / "data" / "ocr"
 
 
 def build_turn_gemini_adapter() -> GeminiTurnAdviceAdapter:
@@ -58,6 +63,11 @@ def build_turn_gemini_adapter() -> GeminiTurnAdviceAdapter:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # Load only allowlisted values from this checkout's .env. Existing process
+    # injection wins, parent directories are never searched, and no values are
+    # logged or returned to the UI.
+    bootstrap_repo_root_dotenv(repository_root())
+
     parser = argparse.ArgumentParser(description="Maple Next Battle Record desktop app")
     parser.add_argument("--database", type=Path, default=default_database_path())
     parser.add_argument(

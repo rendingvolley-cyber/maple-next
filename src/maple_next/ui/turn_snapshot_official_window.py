@@ -1,6 +1,6 @@
 """Official fail-closed wrapper for the Turn snapshot OCR window.
 
-The base implementation owns the event-driven capture/OCR flow.  This narrow
+The base implementation owns the event-driven capture/OCR flow. This narrow
 wrapper tightens two operator-facing boundaries:
 
 * every new capture or explicit retake immediately clears candidates and the
@@ -12,6 +12,7 @@ wrapper tightens two operator-facing boundaries:
 
 from __future__ import annotations
 
+from maple_next.capture.contracts import FramePacket
 from maple_next.ocr.contracts import OcrFieldKey
 from maple_next.ui.turn_snapshot_window import (
     TurnSnapshotMatchFlowWindow as _BaseTurnSnapshotMatchFlowWindow,
@@ -42,17 +43,17 @@ class TurnSnapshotMatchFlowWindow(_BaseTurnSnapshotMatchFlowWindow):
     def _submit_frozen_turn_frame(
         self,
         *,
-        frame: object,
+        frame: FramePacket | None,
         status: str,
         message: str,
         reset_draft: bool,
     ) -> None:
         # Clear stale candidate controls before assigning the next identity or
-        # displaying the next frame.  A retake preserves human field locks and
+        # displaying the next frame. A retake preserves human field locks and
         # typed values, while a genuinely new Turn resets origin/lock metadata.
         self._clear_turn_snapshot_candidate_display(reset_origins=reset_draft)
         super()._submit_frozen_turn_frame(
-            frame=frame,  # type: ignore[arg-type]
+            frame=frame,
             status=status,
             message=message,
             reset_draft=False,

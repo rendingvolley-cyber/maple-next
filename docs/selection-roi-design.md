@@ -2,15 +2,35 @@
 
 The Selection recognizer is image-based, not full-frame text OCR.
 
+## NEW MATCH screenshot boundary
+
+Selection ROI matching is event-driven rather than continuously sampled.
+
+1. The human presses `NEW MATCH`.
+2. Before the canonical new-match command runs, Maple copies the freshest available
+   canonical 1280x720 UGREEN frame into an immutable in-memory screenshot.
+3. The canonical new-match command creates the new Selection identity.
+4. Only when that command succeeds and the new state is `SELECTION_OPEN` is the
+   frozen screenshot bound to the new session, match, and generation.
+5. The six configured opponent ROIs are cropped from that one screenshot.
+6. The six crops are matched once and rendered as assisted input.
+
+There is no Selection ROI polling timer, repeated recapture, or background stream
+of new Selection candidates. Later live frames cannot change the six crops,
+candidates, auto-filled values, or their training provenance for that match.
+
+If no fresh canonical frame exists at the instant `NEW MATCH` is pressed, the new
+match still opens safely and the operator enters the opponent six manually. Maple
+does not keep polling for a later frame.
+
 ## Capture and matching
 
-1. Accept only the canonical 1280x720 UGREEN frame.
-2. Crop the six configured opponent slots.
+1. Accept only the frozen canonical 1280x720 NEW MATCH screenshot.
+2. Crop the six configured opponent slots in top-to-bottom order.
 3. Save one distinct six-slot observation under `data/ocr/selection/captures`.
 4. Compare each crop with trusted images under
    `data/ocr/selection/reference/labeled/<pokemon-name>`.
 5. Resolve the six slots as one unique-team assignment.
-6. Run latest-only at no more than 2 fps; never queue a matching backlog.
 
 Historical label-directory variants are normalized on read. For example,
 `イダイトウ (オス)` and `イダイトウ(オス)` contribute to one visible matcher
@@ -22,7 +42,7 @@ label without renaming or deleting either source directory.
 - candidate score `>= 0.60`: show as one of up to three clickable chips
 - candidate click: set `candidate_click` and lock the slot
 - direct typing: set `manual_text` and lock the slot
-- a locked slot is never overwritten by a later matcher result
+- a locked slot is never overwritten by any later operation
 - a new match identity starts with empty opponent fields unless canonical values
   already exist for that identity
 
@@ -39,11 +59,12 @@ That action performs this order:
 1. validate six non-empty unique editable names
 2. create the existing immutable canonical Selection snapshot
 3. reuse the existing explicit Gemini Selection send path
-4. record origin-aware ROI feedback for the same Selection identity
+4. record origin-aware ROI feedback for the same Selection identity and frozen
+   NEW MATCH screenshot
 
-Failure to create the canonical snapshot yields provider send 0. The matcher,
-OCR timer, and feedback storage never trigger a provider request. No Selection
-Advice is applied to the game automatically.
+Failure to create the canonical snapshot yields provider send 0. Screenshot
+capture, ROI matching, and feedback storage never trigger a provider request. No
+Selection Advice is applied to the game automatically.
 
 ## Feedback and learning
 

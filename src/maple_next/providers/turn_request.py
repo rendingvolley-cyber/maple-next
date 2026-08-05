@@ -35,6 +35,7 @@ CONTRACT_VERSION: Final[str] = "maple-turn-advice.v1"
 CONTRACT_VERSION_V2: Final[str] = "maple-turn-advice.v2"
 TURN_ADVICE_CONTRACT_VERSION_V1: Final[str] = CONTRACT_VERSION
 TURN_ADVICE_CONTRACT_VERSION_V2: Final[str] = CONTRACT_VERSION_V2
+TURN_PROMPT_VERSION: Final[str] = "maple-turn-prompt.v1"
 JOB_TYPE: Final[str] = "TURN_ADVICE"
 
 #: Fixed and deterministic. Never derived from a live provider schema.
@@ -81,6 +82,52 @@ REQUESTED_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
     "required": ["recommended_action", "reasons", "warnings", "opponent_prediction"],
     "additionalProperties": False,
 }
+
+_TURN_INITIAL_PROMPT: Final[str] = (
+    """You are advising a human Pokémon Champions player for exactly one reviewed turn.
+
+The request contains canonical facts confirmed by Maple.
+HP values are buckets, not exact percentages. Do not convert a bucket to exact HP.
+
+Only the current active Pokémon's HP and status are confirmed.
+Do not assume the current HP or status of a benched switch target.
+
+The opponent's build and remaining selected Pokémon are not confirmed.
+Do not state opponent moves, item, ability, nature, stat allocation, speed relation,
+damage range, or remaining team members as confirmed facts.
+
+You may use general Pokémon Champions knowledge to interpret confirmed names,
+but uncertainty must not be presented as confirmed fact.
+
+Before choosing, silently compare every legal_actions entry.
+For each action, consider:
+1. Immediate value in the confirmed current board state.
+2. Risk of losing the current active Pokémon or a necessary team resource.
+3. Robustness against plausible opponent categories: MOVE, SWITCH,
+   and STATUS_OR_SETUP.
+4. Confirmed HP buckets, status, stat stages, weather, terrain, and side effects.
+5. Confirmed player build details when present.
+6. Whether a SWITCH is justified despite unknown bench HP/status.
+7. Whether missing opponent information could change the conclusion.
+
+Do not automatically prefer a broadly useful utility move, the highest apparent
+damage move, staying in, switching, or an action recommended previously.
+The same action may still be correct repeatedly when the confirmed board supports it.
+
+Choose exactly one action from legal_actions with the best expected match value
+across plausible opponent action categories supported by confirmed information.
+Copy action_id, action_type, and action_name exactly.
+
+Give 1-3 concise reasons based on decisive confirmed factors.
+Give 0-5 concise warnings when uncertainty could materially change the recommendation.
+Do not expose hidden chain-of-thought.
+
+Predict the opponent conservatively. Use UNKNOWN when evidence is insufficient.
+Set predicted_action to null unless a specific action is sufficiently supported.
+
+The human alone decides and operates the game.
+Follow requested_output_schema exactly and return strict JSON only."""
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +280,9 @@ def build_turn_advice_request(
     """
 
     return TurnAdviceRequest(
-        contract_version=(CONTRACT_VERSION_V2 if self_team_build is not None else CONTRACT_VERSION),
+        contract_version=(
+            CONTRACT_VERSION_V2 if self_team_build is not None else CONTRACT_VERSION
+        ),
         job_type=JOB_TYPE,
         session_id=session_id,
         match_id=match_id,
@@ -322,7 +371,7 @@ def request_payload_hash(request: TurnAdviceRequest) -> str:
 
 
 def build_provider_prompt(request: TurnAdviceRequest) -> str:
-    """Build the deterministic, secret-free prompt for one Turn Advice call."""
+    """Build the deterministic, secret-free Initial Prompt v1."""
 
     canonical = json.dumps(
         canonical_request_dict(request),
@@ -330,17 +379,7 @@ def build_provider_prompt(request: TurnAdviceRequest) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-    return (
-        "You are advising a human Pokemon Champions player for exactly one reviewed turn.\n"
-        "Recommend exactly one action from legal_actions. Copy its action_id, action_type, "
-        "and action_name exactly; never invent, translate, or normalize an action.\n"
-        "Give 1 to 3 concise reasons, 0 to 5 concise warnings, and one opponent prediction.\n"
-        "Do not execute a move, switch, keyboard input, controller input, or any other game "
-        "action. The human alone decides and operates the game.\n"
-        "Respond with strict JSON only, matching requested_output_schema exactly. Do not add "
-        "markdown, code fences, source_type, model, or any additional field.\n"
-        f"Canonical reviewed turn request:\n{canonical}"
-    )
+    return f"{_TURN_INITIAL_PROMPT}\n\nCanonical request:\n{canonical}"
 
 
 def build_provider_request_body(request: TurnAdviceRequest) -> dict[str, Any]:

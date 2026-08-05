@@ -23,6 +23,7 @@ from maple_next.selection_roi.contracts import (
     SELECTION_SLOT_COUNT,
     SelectionMatchBundle,
 )
+from maple_next.ui.controller import OperatorView
 from maple_next.ui.match_controller import MatchFlowController
 from maple_next.ui.selection_roi_window import SelectionRoiMatchFlowWindow
 
@@ -41,9 +42,58 @@ class SelectionSnapshotMatchFlowWindow(SelectionRoiMatchFlowWindow):
         self._new_match_snapshot_counter = 0
         super().__init__(controller, ocr_data_directory=ocr_data_directory)
         self._stop_selection_roi_timer()
+        self._hide_legacy_selection_controls()
+        self._autoload_last_used_self_team_preset()
         self._set_selection_roi_status(
             "NEW MATCHを押した瞬間の1枚を固定し、その画像だけで相手6体を解析します。"
         )
+        self.render_view()
+
+    def render_view(self, view: OperatorView | None = None) -> None:
+        current = view if view is not None else self._controller.refresh()
+        super().render_view(current)
+        self._hide_legacy_selection_controls()
+        if current.projection.session_state == "SELECTION_OPEN":
+            self.primary_cta_label.setText("現在の6体をGeminiに送る")
+            self.guidance_label.setText(
+                "NEW MATCH時の固定画像から相手6体を確認し、必要なら修正してから"
+                "Geminiへ送信してください。"
+            )
+
+    def _hide_legacy_selection_controls(self) -> None:
+        """The official operator surface never shows MOCK Selection controls."""
+
+        if hasattr(self, "mock_group"):
+            self.mock_group.setVisible(False)
+        if hasattr(self, "gemini_group"):
+            self.gemini_group.setVisible(False)
+        if hasattr(self, "confirm_facts_button"):
+            self.confirm_facts_button.setVisible(False)
+
+    def _autoload_last_used_self_team_preset(self) -> None:
+        """Populate the last-used team once without overwriting operator edits.
+
+        Presets already live in runtime SQLite with a persistent last-used id.
+        Auto-load only when there is no canonical/current team and all six editor
+        fields are empty.  After that the fields stay visible and editable; NEW
+        MATCH snapshots whatever the operator currently sees rather than silently
+        reapplying the preset.
+        """
+
+        if not self._mutation_slots_allowed():
+            return
+        current = self._controller.refresh()
+        if current.self_team or any(field.text().strip() for field in self.self_team_inputs):
+            return
+        preset = self._controller.last_used_self_team_preset()
+        if preset is None:
+            return
+        self._copy_self_team_to_inputs(preset.self_team)
+        self.self_team_preset_name.setText(preset.name)
+        self._staged_self_team_build = preset.team_build
+        self._controller.stage_self_team_build(preset.team_build)
+        self.team_build_status_label.setText(preset.status)
+        self._refresh_self_team_presets(preset.preset_id)
 
     def _stop_selection_roi_timer(self) -> None:
         timer = self._selection_roi_timer
@@ -145,6 +195,7 @@ class SelectionSnapshotMatchFlowWindow(SelectionRoiMatchFlowWindow):
     def _on_new_match(self, _checked: bool = False) -> None:
         if not self._mutation_slots_allowed():
             return
+        self._autoload_last_used_self_team_preset()
         frozen, message = self._freeze_frame_at_new_match()
         previous_identity = self._selection_identity(self._controller.refresh())
         super()._on_new_match(_checked)
@@ -157,6 +208,7 @@ class SelectionSnapshotMatchFlowWindow(SelectionRoiMatchFlowWindow):
     def _on_new_match_after_export(self, _checked: bool = False) -> None:
         if not self._mutation_slots_allowed():
             return
+        self._autoload_last_used_self_team_preset()
         frozen, message = self._freeze_frame_at_new_match()
         previous_identity = self._selection_identity(self._controller.refresh())
         super()._on_new_match_after_export(_checked)

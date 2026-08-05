@@ -1,4 +1,4 @@
-"""Contracts for human-confirmed opponent-team ROI image matching."""
+"""Contracts for opponent-team ROI image matching and assisted input."""
 
 from __future__ import annotations
 
@@ -19,9 +19,21 @@ from maple_next.capture.contracts import (
 ROI_CONFIG_SCHEMA: Final[str] = "maple-selection-roi.v1"
 SELECTION_SLOT_COUNT: Final[int] = 6
 UNKNOWN_LABEL: Final[str] = "UNKNOWN"
-_SAFE_LABEL_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"[^\w\-\u3040-\u30ff\u3400-\u9fff]+",
-    re.UNICODE,
+_UNSAFE_LABEL_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r'[<>:"/\\|?*\x00-\x1f]'
+)
+_WHITESPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+")
+_OPEN_PAREN_SPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s*\(\s*")
+_CLOSE_PAREN_SPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s*\)\s*")
+_WINDOWS_RESERVED_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{index}" for index in range(1, 10)),
+        *(f"LPT{index}" for index in range(1, 10)),
+    }
 )
 
 
@@ -149,12 +161,36 @@ class SelectionMatchBundle:
         return True
 
 
-def safe_label_directory(label: str) -> str:
+def normalize_selection_label(label: str) -> str:
+    """Normalize harmless corpus naming drift without changing the species name.
+
+    Historical assets contain directory variants such as ``イダイトウ (オス)``
+    and ``イダイトウ(オス)``. Treat those as one matcher label while preserving
+    ordinary spaces and parentheses in the operator-visible name.
+    """
+
     normalized = unicodedata.normalize("NFKC", label).strip()
+    normalized = _WHITESPACE_PATTERN.sub(" ", normalized)
+    normalized = _OPEN_PAREN_SPACE_PATTERN.sub("(", normalized)
+    normalized = _CLOSE_PAREN_SPACE_PATTERN.sub(")", normalized)
     if not normalized or normalized in {".", ".."}:
         raise SelectionRoiError("selection label is empty")
-    normalized = normalized.replace("/", "_").replace("\\", "_")
-    safe = _SAFE_LABEL_PATTERN.sub("_", normalized).strip("._ ")
-    if not safe:
+    return normalized
+
+
+def safe_label_directory(label: str) -> str:
+    """Return a Windows-safe directory while retaining the display label.
+
+    Unlike the earlier broad sanitizer, this keeps legitimate Pokémon-form
+    punctuation such as parentheses. That prevents newly learned images from
+    creating underscore labels that the matcher would later show to the user.
+    """
+
+    normalized = normalize_selection_label(label)
+    safe = _UNSAFE_LABEL_PATH_PATTERN.sub("_", normalized).rstrip(" .")
+    safe = safe[:80].rstrip(" .")
+    if not safe or safe in {".", ".."}:
         raise SelectionRoiError("selection label is invalid")
-    return safe[:80]
+    if safe.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+        raise SelectionRoiError("selection label is reserved")
+    return safe

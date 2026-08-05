@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import pytest
 from PySide6.QtGui import QColor, QImage
 
 from maple_next.selection_roi.contracts import SelectionSlotMatch
@@ -117,7 +118,7 @@ def test_exact_cross_label_conflict_is_found_even_with_legacy_filename(
 
 def test_duplicate_provisional_evidence_still_runs_promotion_check(
     tmp_path: Path,
-    monkeypatch: object,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "data" / "ocr"
     service = SelectionRoiService(root)
@@ -133,7 +134,7 @@ def test_duplicate_provisional_evidence_still_runs_promotion_check(
         called.append(label)
         return 0
 
-    monkeypatch.setattr(service, "_promote_eligible_provisional", fake_promote)  # type: ignore[attr-defined]
+    monkeypatch.setattr(service, "_promote_eligible_provisional", fake_promote)
     result = service.record_sent_observation(
         observation_id=observation.observation_id,
         slot_feedback=_feedback(_LABELS, SelectionInputOrigin.OCR_AUTO),

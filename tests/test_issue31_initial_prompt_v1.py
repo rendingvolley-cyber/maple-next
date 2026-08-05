@@ -15,8 +15,6 @@ from maple_next.domain.team_build import (
 )
 from maple_next.providers.selection_request import (
     REQUESTED_OUTPUT_SCHEMA as SELECTION_OUTPUT_SCHEMA,
-)
-from maple_next.providers.selection_request import (
     SELECTION_PROMPT_VERSION,
     build_provider_prompt as build_selection_prompt,
     build_selection_advice_request,
@@ -30,8 +28,6 @@ from maple_next.providers.transport import (
 )
 from maple_next.providers.turn_request import (
     REQUESTED_OUTPUT_SCHEMA as TURN_OUTPUT_SCHEMA,
-)
-from maple_next.providers.turn_request import (
     TURN_PROMPT_VERSION,
     LegalAction,
     build_provider_prompt as build_turn_prompt,

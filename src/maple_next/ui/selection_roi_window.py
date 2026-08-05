@@ -237,7 +237,9 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
         if current_identity != self._selection_roi_render_identity:
             self._clear_selection_roi_candidates()
             self._selection_roi_render_identity = current_identity
-        self._sync_restored_input_states()
+            self._sync_opponent_inputs_for_identity(current)
+        else:
+            self._sync_restored_input_states()
 
         selection_open = current.projection.session_state == "SELECTION_OPEN"
         self._selection_roi_facts_editable = (
@@ -247,6 +249,40 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
         self.selection_roi_group.setVisible(selection_open)
         self._update_selection_roi_buttons(current)
         self._sync_selection_roi_timer()
+
+    def _sync_opponent_inputs_for_identity(self, current: OperatorView) -> None:
+        """Replace, never inherit, editable opponent values across matches.
+
+        The base renderer historically repopulates opponent fields only when the
+        self-team tuple changes. Reusing the same self team in a new match could
+        therefore leave the previous opponent six visible and mark them as
+        restored, which would also block OCR auto-fill. Bind fields explicitly to
+        the new Selection identity: canonical values are restored; otherwise all
+        six start empty.
+        """
+
+        values: tuple[str, ...]
+        if len(current.opponent_team) == SELECTION_SLOT_COUNT:
+            values = current.opponent_team
+        else:
+            values = ("",) * SELECTION_SLOT_COUNT
+        for slot, (field, value) in enumerate(
+            zip(self.opponent_team_inputs, values, strict=True),
+            start=1,
+        ):
+            normalized = value.strip()
+            field.setText(normalized)
+            self._selection_roi_input_states[slot] = (
+                SelectionSlotInputState(
+                    value=normalized,
+                    origin=SelectionInputOrigin.RESTORED,
+                    user_locked=True,
+                )
+                if normalized
+                else SelectionSlotInputState()
+            )
+            self._render_selection_input_origin(slot)
+            self._refresh_candidate_checks(slot)
 
     def _on_header_tab_changed(self, index: int) -> None:
         super()._on_header_tab_changed(index)
@@ -723,6 +759,7 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
         self._selection_roi_submitted_identities.clear()
         self._selection_roi_slot_matches.clear()
         self._selection_roi_candidate_values.clear()
+        self._selection_roi_feedback_recorded_ids.clear()
         self._selection_roi_input_states = {
             slot: SelectionSlotInputState()
             for slot in range(1, SELECTION_SLOT_COUNT + 1)

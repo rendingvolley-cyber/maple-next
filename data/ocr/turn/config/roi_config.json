@@ -1,0 +1,33 @@
+{
+  "contract_version": "maple-turn-roi.v1",
+  "canvas_width": 1280,
+  "canvas_height": 720,
+  "layout": "pokemon-champions-battle-standard",
+  "provisional": true,
+  "rois": {
+    "self_active": {
+      "x": 106,
+      "y": 627,
+      "width": 113,
+      "height": 20
+    },
+    "opponent_active": {
+      "x": 1064,
+      "y": 39,
+      "width": 116,
+      "height": 21
+    },
+    "self_hp": {
+      "x": 113,
+      "y": 662,
+      "width": 160,
+      "height": 24
+    },
+    "opponent_hp": {
+      "x": 1074,
+      "y": 75,
+      "width": 160,
+      "height": 21
+    }
+  }
+}

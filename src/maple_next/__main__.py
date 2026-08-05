@@ -26,7 +26,7 @@ from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
 from maple_next.ui.gemini_turn_advice import GeminiTurnAdviceAdapter
 from maple_next.ui.match_controller import MatchFlowController
-from maple_next.ui.turn_snapshot_window import TurnSnapshotMatchFlowWindow
+from maple_next.ui.turn_snapshot_official_window import TurnSnapshotMatchFlowWindow
 
 
 def repository_root() -> Path:

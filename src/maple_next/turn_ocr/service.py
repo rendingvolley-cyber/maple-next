@@ -158,7 +158,19 @@ class TurnSnapshotOcrService:
             "self_hp": _crop(frozen, self._config.self_hp),
             "opponent_hp": _crop(frozen, self._config.opponent_hp),
         }
-        if min(_contrast_span(crop) for crop in crops.values()) < 7:
+        self_hp_estimate = read_hp_bar(crops["self_hp"])
+        opponent_hp_estimate = read_hp_bar(crops["opponent_hp"])
+        name_regions_ready = (
+            _contrast_span(crops["self_active"]) >= 7
+            and _contrast_span(crops["opponent_active"]) >= 7
+        )
+        hp_regions_ready = (
+            self_hp_estimate.detected or _contrast_span(crops["self_hp"]) >= 7
+        ) and (
+            opponent_hp_estimate.detected
+            or _contrast_span(crops["opponent_hp"]) >= 7
+        )
+        if not name_regions_ready or not hp_regions_ready:
             bundle = _bundle(
                 status=TurnSnapshotStatus.SCENE_NOT_READY,
                 frame_id=frame.frame_id,
@@ -199,11 +211,10 @@ class TurnSnapshotOcrService:
                     )
                 )
 
-        for field_key, crop_key in (
-            ("self_hp", "self_hp"),
-            ("opponent_hp", "opponent_hp"),
+        for field_key, estimate in (
+            ("self_hp", self_hp_estimate),
+            ("opponent_hp", opponent_hp_estimate),
         ):
-            estimate = read_hp_bar(crops[crop_key])
             candidates.append(
                 OcrCandidate(
                     field_key=field_key,

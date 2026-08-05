@@ -24,7 +24,7 @@ _UNSAFE_LABEL_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 _WHITESPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+")
 _OPEN_PAREN_SPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s*\(\s*")
-_CLOSE_PAREN_SPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s*\)\s*")
+_CLOSE_PAREN_SPACE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s*\)")
 _WINDOWS_RESERVED_NAMES: Final[frozenset[str]] = frozenset(
     {
         "CON",

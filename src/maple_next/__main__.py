@@ -25,7 +25,7 @@ from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
 from maple_next.ui.gemini_turn_advice import GeminiTurnAdviceAdapter
 from maple_next.ui.match_controller import MatchFlowController
-from maple_next.ui.selection_roi_window import SelectionRoiMatchFlowWindow
+from maple_next.ui.selection_snapshot_window import SelectionSnapshotMatchFlowWindow
 
 
 def default_database_path() -> Path:
@@ -98,7 +98,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             turn_gemini_adapter=build_turn_gemini_adapter(),
         )
-        window = SelectionRoiMatchFlowWindow(
+        window = SelectionSnapshotMatchFlowWindow(
             controller,
             ocr_data_directory=ocr_data_directory,
         )

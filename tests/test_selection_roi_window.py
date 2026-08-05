@@ -1,4 +1,4 @@
-"""Selection ROI UI remains candidate-only until human confirmation."""
+"""Selection ROI UI assisted-input and feedback behavior."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from maple_next.application.match_service import MatchApplication
 from maple_next.capture.contracts import FrameKind, FramePacket
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.selection_roi.contracts import SelectionMatchBundle
+from maple_next.selection_roi.input_policy import SelectionInputOrigin
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
 from maple_next.ui.match_controller import MatchFlowController
 from maple_next.ui.selection_roi_window import SelectionRoiMatchFlowWindow
@@ -93,9 +94,9 @@ def _write_assets(root: Path) -> QImage:
     return image
 
 
-def _frame(image: QImage) -> FramePacket:
+def _frame(image: QImage, *, frame_id: str = "selection-ui-frame") -> FramePacket:
     return FramePacket(
-        frame_id="selection-ui-frame",
+        frame_id=frame_id,
         source="UGREEN_DIRECT",
         captured_at_utc=datetime.now(UTC),
         captured_monotonic_ns=time.monotonic_ns(),
@@ -137,7 +138,7 @@ def _install_current_bundle(
     window._on_selection_roi_result(bundle)  # noqa: SLF001
 
 
-def test_candidates_never_auto_fill_and_human_buttons_control_adoption(
+def test_high_confidence_candidates_auto_fill_once_and_human_changes_lock(
     tmp_path: Path,
 ) -> None:
     repository, window, root = _build_window(tmp_path)
@@ -149,22 +150,56 @@ def test_candidates_never_auto_fill_and_human_buttons_control_adoption(
     bundle = window._selection_roi_service.process_frame(_frame(image))  # noqa: SLF001
     _install_current_bundle(window, bundle)
 
-    assert [field.text() for field in window.opponent_team_inputs] == [""] * 6
-    window.selection_roi_apply_all_button.click()
     assert tuple(field.text() for field in window.opponent_team_inputs) == OPPONENT_TEAM
+    assert {
+        state.origin for state in window._selection_roi_input_states.values()  # noqa: SLF001
+    } == {SelectionInputOrigin.OCR_AUTO}
 
     window.opponent_team_inputs[0].setText("ManualOverride")
-    window.selection_roi_apply_all_button.click()
+    window._on_opponent_text_edited(1, "ManualOverride")  # noqa: SLF001
+    match = window._selection_roi_slot_matches[1]  # noqa: SLF001
+    window._auto_fill_selection_roi_slot(1, match)  # noqa: SLF001
     assert window.opponent_team_inputs[0].text() == "ManualOverride"
+    assert (
+        window._selection_roi_input_states[1].origin  # noqa: SLF001
+        is SelectionInputOrigin.MANUAL_TEXT
+    )
 
-    window._apply_selection_roi_slot(1)  # noqa: SLF001 - explicit human-slot path
+    window._apply_candidate_chip(1, 0)  # noqa: SLF001
     assert window.opponent_team_inputs[0].text() == "Alpha"
+    assert (
+        window._selection_roi_input_states[1].origin  # noqa: SLF001
+        is SelectionInputOrigin.CANDIDATE_CLICK
+    )
 
     window.close()
     repository.close()
 
 
-def test_feedback_is_written_only_after_successful_existing_confirm_button(
+def test_candidate_chips_are_visible_and_confirm_button_is_not_supported_ui(
+    tmp_path: Path,
+) -> None:
+    repository, window, root = _build_window(tmp_path)
+    image = _write_assets(root)
+    window.new_match_button.click()
+    bundle = window._selection_roi_service.process_frame(_frame(image))  # noqa: SLF001
+    _install_current_bundle(window, bundle)
+
+    assert not window.confirm_facts_button.isVisible()
+    assert all(
+        window._selection_roi_candidate_buttons[slot][0].isVisible()  # noqa: SLF001
+        for slot in range(1, 7)
+    )
+    assert all(
+        "参照" in window._selection_roi_candidate_buttons[slot][0].text()  # noqa: SLF001
+        for slot in range(1, 7)
+    )
+
+    window.close()
+    repository.close()
+
+
+def test_feedback_is_written_after_successful_compatibility_confirm(
     tmp_path: Path,
 ) -> None:
     repository, window, root = _build_window(tmp_path)
@@ -175,7 +210,6 @@ def test_feedback_is_written_only_after_successful_existing_confirm_button(
 
     bundle = window._selection_roi_service.process_frame(_frame(image))  # noqa: SLF001
     _install_current_bundle(window, bundle)
-    window.selection_roi_apply_all_button.click()
 
     feedback_path = root / "selection" / "feedback" / "selection_labels.jsonl"
     assert not feedback_path.exists()
@@ -183,11 +217,39 @@ def test_feedback_is_written_only_after_successful_existing_confirm_button(
     window.confirm_facts_button.click()
 
     assert feedback_path.exists()
-    assert len(feedback_path.read_text(encoding="utf-8").splitlines()) == 6
+    rows = [json.loads(line) for line in feedback_path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 6
+    assert {row["schema_version"] for row in rows} == {
+        "maple-selection-roi-feedback.v2"
+    }
+    assert {row["value_origin"] for row in rows} == {"ocr_auto"}
+    assert {row["trust_state"] for row in rows} == {"PROVISIONAL"}
     reviewed_selection_id = (  # noqa: SLF001
         window._controller.refresh().projection.current_reviewed_selection_id
     )
     assert reviewed_selection_id is not None
+
+    window.close()
+    repository.close()
+
+
+def test_candidate_click_is_stored_as_trusted_feedback(tmp_path: Path) -> None:
+    repository, window, root = _build_window(tmp_path)
+    image = _write_assets(root)
+    window.new_match_button.click()
+    for field, value in zip(window.self_team_inputs, SELF_TEAM, strict=True):
+        field.setText(value)
+    bundle = window._selection_roi_service.process_frame(_frame(image))  # noqa: SLF001
+    _install_current_bundle(window, bundle)
+
+    for slot in range(1, 7):
+        window._apply_candidate_chip(slot, 0)  # noqa: SLF001
+    window.confirm_facts_button.click()
+
+    feedback_path = root / "selection" / "feedback" / "selection_labels.jsonl"
+    rows = [json.loads(line) for line in feedback_path.read_text(encoding="utf-8").splitlines()]
+    assert {row["value_origin"] for row in rows} == {"candidate_click"}
+    assert {row["trust_state"] for row in rows} == {"TRUSTED"}
 
     window.close()
     repository.close()
@@ -232,8 +294,6 @@ def test_stale_match_identity_never_labels_old_crops(tmp_path: Path) -> None:
         "old-match",
         99,
     )
-    for field, value in zip(window.opponent_team_inputs, OPPONENT_TEAM, strict=True):
-        field.setText(value)
 
     window.confirm_facts_button.click()
 
@@ -243,6 +303,27 @@ def test_stale_match_identity_never_labels_old_crops(tmp_path: Path) -> None:
         window._controller.refresh().projection.current_reviewed_selection_id
     )
     assert reviewed_selection_id is not None
+
+    window.close()
+    repository.close()
+
+
+def test_send_handler_without_gemini_adapter_does_not_confirm_or_send(
+    tmp_path: Path,
+) -> None:
+    repository, window, root = _build_window(tmp_path)
+    image = _write_assets(root)
+    window.new_match_button.click()
+    for field, value in zip(window.self_team_inputs, SELF_TEAM, strict=True):
+        field.setText(value)
+    bundle = window._selection_roi_service.process_frame(_frame(image))  # noqa: SLF001
+    _install_current_bundle(window, bundle)
+
+    window._on_send_current_selection_to_gemini()  # noqa: SLF001
+
+    current = window._controller.refresh()  # noqa: SLF001
+    assert current.projection.current_reviewed_selection_id is None
+    assert window._controller.network_call_count == 0  # noqa: SLF001
 
     window.close()
     repository.close()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -369,8 +369,12 @@ def migrate(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS rich_action_completions (
             transaction_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
             turn_id TEXT NOT NULL UNIQUE,
             turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            battle_revision INTEGER NOT NULL CHECK (battle_revision >= 0),
+            based_on_confirmed_state_id TEXT NOT NULL,
             own_action_type TEXT NOT NULL,
             own_action_name TEXT NOT NULL,
             opponent_action_type TEXT NOT NULL,
@@ -378,10 +382,12 @@ def migrate(connection: sqlite3.Connection) -> None:
             action_order TEXT NOT NULL,
             delta_id TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL,
-            FOREIGN KEY(delta_id) REFERENCES action_result_deltas(delta_id)
+            FOREIGN KEY(delta_id) REFERENCES action_result_deltas(delta_id),
+            FOREIGN KEY(based_on_confirmed_state_id)
+                REFERENCES confirmed_turn_states(confirmed_state_id)
         );
 
-        UPDATE schema_meta SET schema_version = 13 WHERE singleton_id = 1;
+        UPDATE schema_meta SET schema_version = 14 WHERE singleton_id = 1;
         """
     )
     _ensure_column(
@@ -461,6 +467,15 @@ def migrate(connection: sqlite3.Connection) -> None:
         "self_team_presets",
         "team_build_sha256",
         "TEXT NULL",
+    )
+    # Additive migration for existing candidate DBs whose rich_action_completions
+    # table predates these columns. No backfill: historical rows keep NULL for
+    # values that were never recorded, rather than guessing them.
+    _ensure_column(connection, "rich_action_completions", "match_id", "TEXT NULL")
+    _ensure_column(connection, "rich_action_completions", "generation", "INTEGER NULL")
+    _ensure_column(connection, "rich_action_completions", "battle_revision", "INTEGER NULL")
+    _ensure_column(
+        connection, "rich_action_completions", "based_on_confirmed_state_id", "TEXT NULL"
     )
     _sanitize_async_job_result_payloads(connection)
     connection.execute(

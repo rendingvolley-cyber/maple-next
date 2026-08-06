@@ -7,6 +7,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from maple_next.domain.enums import ActionOrder, ActionType
+from maple_next.domain.turn_state import ActionResultDelta, TurnIdentity
 from maple_next.persistence.attempt_ledger_store import AttemptLedgerStoreMixin
 from maple_next.persistence.job_store import JobStoreMixin
 from maple_next.persistence.match_store import MatchStoreMixin
@@ -51,6 +53,39 @@ class SQLiteRepository(
             raise
         else:
             self.connection.commit()
+
+    def record_rich_action_completion(
+        self,
+        *,
+        transaction_id: str,
+        identity: TurnIdentity,
+        own_action_type: ActionType,
+        own_action_name: str,
+        opponent_action_type: ActionType,
+        opponent_action_name: str,
+        action_order: ActionOrder,
+        delta: ActionResultDelta,
+    ) -> None:
+        """Public transaction owner for the rich action completion write.
+
+        Owns transaction begin/commit/rollback, binding validation, the
+        delta INSERT, and the completion INSERT as a single unit: any
+        failure (binding mismatch, missing confirmed state, constraint
+        violation) leaves neither the delta nor the completion committed.
+        Callers must not wrap this in their own ``transaction()`` block.
+        """
+
+        with self.transaction():
+            self._record_rich_action_completion_row(
+                transaction_id=transaction_id,
+                identity=identity,
+                own_action_type=own_action_type,
+                own_action_name=own_action_name,
+                opponent_action_type=opponent_action_type,
+                opponent_action_name=opponent_action_name,
+                action_order=action_order,
+                delta=delta,
+            )
 
     def close(self) -> None:
         self.connection.close()

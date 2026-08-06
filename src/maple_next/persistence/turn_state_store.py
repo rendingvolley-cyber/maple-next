@@ -26,6 +26,8 @@ from maple_next.domain.turn_state import (
     SideDelta,
     SideState,
     TurnIdentity,
+    TurnStateIdentityError,
+    TurnStateStaleError,
     field_delta_from_json,
     field_delta_to_json,
     known_from_json,
@@ -447,15 +449,18 @@ class TurnStateStoreMixin(StoreBase):
             source_prefill_id=row["source_prefill_id"],
         )
 
-    # --- Rich action completion transaction --------------------------------
+    # --- Rich action completion row write (private helper) -----------------
+    #
+    # Transaction ownership lives in ``SQLiteRepository.record_rich_action_
+    # completion`` (see ``persistence/sqlite.py``); this mixin method only
+    # validates binding and writes rows. It must never be called outside an
+    # already-open transaction.
 
-    def record_rich_action_completion(
+    def _record_rich_action_completion_row(
         self,
         *,
         transaction_id: str,
-        session_id: str,
-        turn_id: str,
-        turn_number: int,
+        identity: TurnIdentity,
         own_action_type: ActionType,
         own_action_name: str,
         opponent_action_type: ActionType,
@@ -463,27 +468,44 @@ class TurnStateStoreMixin(StoreBase):
         action_order: ActionOrder,
         delta: ActionResultDelta,
     ) -> None:
-        """Persist own+opponent action, order, and the confirmed delta atomically.
+        """Validate full identity binding, then write the delta + completion rows.
 
-        Callers must invoke this inside ``SQLiteRepository.transaction()`` so
-        that a failure anywhere in the sequence leaves neither the delta nor
-        the completion row committed.
+        Binding requires ``identity`` to exactly match both ``delta.identity``
+        and the identity of the ``ConfirmedTurnState`` referenced by
+        ``delta.based_on_confirmed_state_id`` (session_id, match_id,
+        generation, turn_id, turn_number, battle_revision). Any mismatch, or
+        a missing based-on confirmed state, fails closed before any row is
+        written.
         """
+
+        if delta.identity != identity:
+            raise TurnStateIdentityError("ACTION_COMPLETION_DELTA_IDENTITY_MISMATCH")
+        try:
+            based_on_state = self.get_confirmed_turn_state(delta.based_on_confirmed_state_id)
+        except KeyError as exc:
+            raise TurnStateStaleError("BASED_ON_CONFIRMED_STATE_NOT_FOUND") from exc
+        if based_on_state.identity != identity:
+            raise TurnStateIdentityError("ACTION_COMPLETION_CONFIRMED_STATE_IDENTITY_MISMATCH")
 
         self.append_action_result_delta(delta)
         self.connection.execute(
             """
             INSERT INTO rich_action_completions (
-                transaction_id, session_id, turn_id, turn_number, own_action_type,
-                own_action_name, opponent_action_type, opponent_action_name,
-                action_order, delta_id, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                transaction_id, session_id, match_id, generation, turn_id,
+                turn_number, battle_revision, based_on_confirmed_state_id,
+                own_action_type, own_action_name, opponent_action_type,
+                opponent_action_name, action_order, delta_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 transaction_id,
-                session_id,
-                turn_id,
-                turn_number,
+                identity.session_id,
+                identity.match_id,
+                identity.generation,
+                identity.turn_id,
+                identity.turn_number,
+                identity.battle_revision,
+                delta.based_on_confirmed_state_id,
                 own_action_type.value,
                 own_action_name,
                 opponent_action_type.value,
@@ -504,8 +526,12 @@ class TurnStateStoreMixin(StoreBase):
         return {
             "transaction_id": str(row["transaction_id"]),
             "session_id": str(row["session_id"]),
+            "match_id": row["match_id"],
+            "generation": row["generation"],
             "turn_id": str(row["turn_id"]),
             "turn_number": int(row["turn_number"]),
+            "battle_revision": row["battle_revision"],
+            "based_on_confirmed_state_id": row["based_on_confirmed_state_id"],
             "own_action_type": ActionType(str(row["own_action_type"])),
             "own_action_name": str(row["own_action_name"]),
             "opponent_action_type": ActionType(str(row["opponent_action_type"])),

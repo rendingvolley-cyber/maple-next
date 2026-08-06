@@ -17,10 +17,51 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePath
 from uuid import uuid4
 
 from maple_next.domain.turn_state import FixedEvidenceMetadata
+
+_UNSAFE_PATH_CHARACTERS = ("/", "\\", ":")
+
+
+class EvidencePathError(ValueError):
+    """A path/filename failed root-confinement validation. Fail closed."""
+
+
+def _validate_safe_filename_component(value: str, *, label: str) -> None:
+    """Reject anything that is not a single, safe filename component.
+
+    Rejects: empty/blank strings, ``.``/``..``, any path separator or drive
+    marker (covers absolute POSIX paths, Windows drive paths, and UNC
+    paths), and any value ``PurePath`` itself considers absolute.
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        raise EvidencePathError(f"{label}_EMPTY")
+    if value in (".", ".."):
+        raise EvidencePathError(f"{label}_DOT_SEGMENT")
+    if any(character in value for character in _UNSAFE_PATH_CHARACTERS):
+        raise EvidencePathError(f"{label}_UNSAFE_CHARACTER")
+    if PurePath(value).is_absolute():
+        raise EvidencePathError(f"{label}_ABSOLUTE_NOT_ALLOWED")
+
+
+def _resolve_confined_path(runtime_root: Path, filename: str, *, label: str) -> Path:
+    """Resolve ``filename`` under ``runtime_root``, failing closed on escape.
+
+    ``filename`` must be a single safe component (validated first). The
+    resolved target is then required to sit inside the resolved runtime
+    root -- resolution follows symlinks, so a symlink inside the root that
+    points outside it is rejected too, not just literal ``..`` traversal.
+    """
+
+    _validate_safe_filename_component(filename, label=label)
+    resolved_root = runtime_root.resolve()
+    resolved_target = (resolved_root / filename).resolve()
+    if resolved_target != resolved_root and resolved_root not in resolved_target.parents:
+        raise EvidencePathError(f"{label}_ESCAPES_RUNTIME_ROOT")
+    return resolved_target
 
 
 class EvidenceValidationStatus(StrEnum):
@@ -55,10 +96,15 @@ class FixedEvidenceRuntime:
     def write_evidence(
         self, content: bytes, *, evidence_id: str | None = None
     ) -> FixedEvidenceMetadata:
-        resolved_id = evidence_id or str(uuid4())
+        resolved_id = evidence_id if evidence_id is not None else str(uuid4())
+        _validate_safe_filename_component(resolved_id, label="EVIDENCE_ID")
         digest = hashlib.sha256(content).hexdigest()
-        destination = self.runtime_root / f"{resolved_id}.bin"
-        temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+        filename = f"{resolved_id}.bin"
+        destination = _resolve_confined_path(self.runtime_root, filename, label="EVIDENCE_PATH")
+        temporary_name = f".{filename}.{uuid4().hex}.tmp"
+        temporary = _resolve_confined_path(
+            self.runtime_root, temporary_name, label="EVIDENCE_TMP_PATH"
+        )
         try:
             with temporary.open("xb") as handle:
                 handle.write(content)
@@ -70,13 +116,15 @@ class FixedEvidenceRuntime:
                 temporary.unlink()
         return FixedEvidenceMetadata(
             evidence_id=resolved_id,
-            relative_path=str(destination.relative_to(self.runtime_root)),
+            relative_path=filename,
             sha256=digest,
             recorded_at_utc=datetime.now(UTC).isoformat(),
         )
 
     def validate(self, metadata: FixedEvidenceMetadata) -> EvidenceValidationResult:
-        path = self.runtime_root / metadata.relative_path
+        path = _resolve_confined_path(
+            self.runtime_root, metadata.relative_path, label="EVIDENCE_PATH"
+        )
         try:
             content = path.read_bytes()
         except FileNotFoundError:

@@ -74,6 +74,24 @@ class KnowledgeStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class ProvenanceStep(StrEnum):
+    """One step in a field value's ordered provenance chain."""
+
+    HUMAN_INPUT = "HUMAN_INPUT"
+    OCR_CANDIDATE = "OCR_CANDIDATE"
+    HUMAN_CORRECTION = "HUMAN_CORRECTION"
+    PREVIOUS_CONFIRMED_CARRY_FORWARD = "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+    UNKNOWN = "UNKNOWN"
+
+
+def _validate_provenance_chain(chain: object) -> None:
+    if not isinstance(chain, tuple) or not chain:
+        raise ValueError("provenance_chain must be a non-empty tuple")
+    for step in chain:
+        if not isinstance(step, ProvenanceStep):
+            raise ValueError("provenance_chain entries must be ProvenanceStep values")
+
+
 @dataclass(frozen=True, slots=True)
 class Known(Generic[T]):
     """Per-field knowledge: CONFIRMED carries a value, UNKNOWN carries none.
@@ -83,24 +101,35 @@ class Known(Generic[T]):
     That is distinct from this wrapper's own ``UNKNOWN`` status, which means
     no human confirmation exists for the field at all (never a silent
     default such as stat stage 0, status ``NONE``, or an empty collection).
+
+    ``provenance_chain`` is a non-empty, ordered record of how this value was
+    arrived at (e.g. an OCR candidate a human then corrected). It is separate
+    from -- and never a substitute for -- the record-level
+    :class:`ConfirmationMeta`.
     """
 
     status: KnowledgeStatus
     value: T | None = None
+    provenance_chain: tuple[ProvenanceStep, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status is KnowledgeStatus.CONFIRMED and self.value is None:
             raise ValueError("CONFIRMED knowledge requires an explicit value")
         if self.status is KnowledgeStatus.UNKNOWN and self.value is not None:
             raise ValueError("UNKNOWN knowledge must not carry a value")
+        _validate_provenance_chain(self.provenance_chain)
 
     @classmethod
-    def confirmed(cls, value: T) -> Known[T]:
-        return cls(KnowledgeStatus.CONFIRMED, value)
+    def confirmed(cls, value: T, *, provenance_chain: tuple[ProvenanceStep, ...]) -> Known[T]:
+        return cls(KnowledgeStatus.CONFIRMED, value, provenance_chain)
 
     @classmethod
-    def unknown(cls) -> Known[T]:
-        return cls(KnowledgeStatus.UNKNOWN, None)
+    def unknown(
+        cls,
+        *,
+        provenance_chain: tuple[ProvenanceStep, ...] = (ProvenanceStep.UNKNOWN,),
+    ) -> Known[T]:
+        return cls(KnowledgeStatus.UNKNOWN, None, provenance_chain)
 
     @property
     def is_confirmed(self) -> bool:
@@ -127,24 +156,36 @@ class FieldDelta(Generic[T]):
 
     observation: ChangeObservation
     after_value: T | None = None
+    provenance_chain: tuple[ProvenanceStep, ...] = ()
 
     def __post_init__(self) -> None:
         if self.observation is ChangeObservation.CHANGED and self.after_value is None:
             raise ValueError("CHANGED delta requires an explicit resulting value")
         if self.observation is not ChangeObservation.CHANGED and self.after_value is not None:
             raise ValueError("only a CHANGED delta may carry a resulting value")
+        _validate_provenance_chain(self.provenance_chain)
 
     @classmethod
-    def changed(cls, value: T) -> FieldDelta[T]:
-        return cls(ChangeObservation.CHANGED, value)
+    def changed(cls, value: T, *, provenance_chain: tuple[ProvenanceStep, ...]) -> FieldDelta[T]:
+        return cls(ChangeObservation.CHANGED, value, provenance_chain)
 
     @classmethod
-    def unchanged(cls) -> FieldDelta[T]:
-        return cls(ChangeObservation.UNCHANGED, None)
+    def unchanged(
+        cls,
+        *,
+        provenance_chain: tuple[ProvenanceStep, ...] = (
+            ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD,
+        ),
+    ) -> FieldDelta[T]:
+        return cls(ChangeObservation.UNCHANGED, None, provenance_chain)
 
     @classmethod
-    def unknown(cls) -> FieldDelta[T]:
-        return cls(ChangeObservation.UNKNOWN, None)
+    def unknown(
+        cls,
+        *,
+        provenance_chain: tuple[ProvenanceStep, ...] = (ProvenanceStep.UNKNOWN,),
+    ) -> FieldDelta[T]:
+        return cls(ChangeObservation.UNKNOWN, None, provenance_chain)
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,15 +424,46 @@ def _bind_next_identity(previous_identity: TurnIdentity, next_identity: TurnIden
         raise TurnStateIdentityError("TURN_MISMATCH")
     if next_identity.battle_revision != previous_identity.battle_revision + 1:
         raise TurnStateIdentityError("REVISION_MISMATCH")
+    if next_identity.turn_id == previous_identity.turn_id:
+        raise TurnStateIdentityError("TURN_ID_NOT_ADVANCED")
+
+
+def validate_turn_state_full_chain(
+    confirmed: ConfirmedTurnState,
+    delta: ActionResultDelta,
+    draft: NextTurnStateDraft,
+) -> None:
+    """Pure full-chain validation: confirmed state -> confirmed delta -> draft.
+
+    Shared by hydration (restart recovery) and promotion
+    (:func:`confirm_next_turn_state`) so both paths reject the same set of
+    corruption/staleness cases: wrong delta, wrong source delta id, wrong
+    session/match/generation, wrong Turn id/number, wrong battle revision,
+    and a superseded confirmed state. Fails closed on any mismatch.
+    """
+
+    _bind_delta_to_confirmed_state(confirmed, delta)
+    if draft.based_on_confirmed_state_id != confirmed.confirmed_state_id:
+        raise TurnStateStaleError("DRAFT_NOT_BASED_ON_CONFIRMED_STATE")
+    if draft.source_delta_id != delta.delta_id:
+        raise TurnStateStaleError("DRAFT_SOURCE_DELTA_MISMATCH")
+    _bind_next_identity(confirmed.identity, draft.identity)
 
 
 def _derive_field(previous: Known[T], delta: FieldDelta[T]) -> Known[T]:
     if delta.observation is ChangeObservation.CHANGED:
         assert delta.after_value is not None
-        return Known.confirmed(delta.after_value)
+        return Known.confirmed(delta.after_value, provenance_chain=delta.provenance_chain)
     if delta.observation is ChangeObservation.UNCHANGED:
-        return previous
-    return Known.unknown()
+        return Known(
+            status=previous.status,
+            value=previous.value,
+            provenance_chain=(
+                *previous.provenance_chain,
+                ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD,
+            ),
+        )
+    return Known.unknown(provenance_chain=(ProvenanceStep.UNKNOWN,))
 
 
 def _derive_side(previous: SideState, delta: SideDelta) -> SideState:
@@ -448,18 +520,22 @@ def confirm_next_turn_state(
     draft: NextTurnStateDraft,
     *,
     new_confirmed_state_id: str,
-    latest_confirmed_state_id: str,
+    latest_confirmed_state: ConfirmedTurnState,
+    source_delta: ActionResultDelta,
     confirmation: ConfirmationMeta,
     evidence_id: str | None = None,
 ) -> ConfirmedTurnState:
     """Human confirmation that promotes a draft into a new confirmed state.
 
-    Fails closed if the draft is stale: i.e. it was not derived from the
-    current latest confirmed state for this session/turn chain.
+    Validates the full ``latest_confirmed_state -> source_delta -> draft``
+    chain (not just a state-id string comparison) and fails closed on stale
+    state, wrong delta, wrong source delta id, wrong session/match/
+    generation, wrong Turn id/number, wrong battle revision, or a superseded
+    confirmed state. The promoted state's identity always equals the draft's
+    identity.
     """
 
-    if draft.based_on_confirmed_state_id != latest_confirmed_state_id:
-        raise TurnStateStaleError("STALE_DRAFT_CONFIRMATION")
+    validate_turn_state_full_chain(latest_confirmed_state, source_delta, draft)
     return ConfirmedTurnState(
         confirmed_state_id=new_confirmed_state_id,
         identity=draft.identity,
@@ -562,15 +638,28 @@ def confirm_legal_action_selection(
 # never be read back as UNCHANGED).
 
 
+def _provenance_chain_to_json(chain: tuple[ProvenanceStep, ...]) -> list[str]:
+    return [step.value for step in chain]
+
+
+def _provenance_chain_from_json(payload: dict[str, object]) -> tuple[ProvenanceStep, ...]:
+    # Fail closed: a missing provenance_chain key is never silently defaulted.
+    raw = _require(payload, "provenance_chain")
+    if not isinstance(raw, list) or not raw:
+        raise TurnStateError("PROVENANCE_CHAIN_MUST_BE_A_NON_EMPTY_LIST")
+    return tuple(ProvenanceStep(str(item)) for item in raw)
+
+
 def known_to_json(known: Known[Any]) -> dict[str, object]:
+    provenance_chain = _provenance_chain_to_json(known.provenance_chain)
     if known.status is KnowledgeStatus.UNKNOWN:
-        return {"status": "UNKNOWN"}
+        return {"status": "UNKNOWN", "provenance_chain": provenance_chain}
     value = known.value
     if isinstance(value, tuple):
         value = list(value)
     elif isinstance(value, StrEnum):
         value = value.value
-    return {"status": "CONFIRMED", "value": value}
+    return {"status": "CONFIRMED", "value": value, "provenance_chain": provenance_chain}
 
 
 def known_from_json(
@@ -579,17 +668,21 @@ def known_from_json(
     decode_value: Callable[[Any], Any] = str,
 ) -> Known[Any]:
     status = str(_require(payload, "status"))
+    provenance_chain = _provenance_chain_from_json(payload)
     if status == "UNKNOWN":
-        return Known.unknown()
+        return Known(KnowledgeStatus.UNKNOWN, None, provenance_chain)
     if status != "CONFIRMED":
         raise TurnStateError(f"UNKNOWN_KNOWLEDGE_STATUS:{status}")
     raw_value = _require(payload, "value")
     decoded = decode_value(raw_value) if callable(decode_value) else raw_value
-    return Known.confirmed(decoded)
+    return Known(KnowledgeStatus.CONFIRMED, decoded, provenance_chain)
 
 
 def field_delta_to_json(delta: FieldDelta[Any]) -> dict[str, object]:
-    payload: dict[str, object] = {"observation": delta.observation.value}
+    payload: dict[str, object] = {
+        "observation": delta.observation.value,
+        "provenance_chain": _provenance_chain_to_json(delta.provenance_chain),
+    }
     if delta.observation is ChangeObservation.CHANGED:
         value = delta.after_value
         if isinstance(value, tuple):
@@ -606,11 +699,12 @@ def field_delta_from_json(
     decode_value: Callable[[Any], Any] = str,
 ) -> FieldDelta[Any]:
     observation = ChangeObservation(str(_require(payload, "observation")))
+    provenance_chain = _provenance_chain_from_json(payload)
     if observation is not ChangeObservation.CHANGED:
-        return FieldDelta(observation)
+        return FieldDelta(observation, None, provenance_chain)
     raw_value = _require(payload, "after_value")
     decoded = decode_value(raw_value) if callable(decode_value) else raw_value
-    return FieldDelta.changed(decoded)
+    return FieldDelta(ChangeObservation.CHANGED, decoded, provenance_chain)
 
 
 def _decode_side_effects(raw: object) -> tuple[str, ...]:

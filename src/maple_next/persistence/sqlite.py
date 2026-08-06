@@ -14,6 +14,7 @@ from maple_next.persistence.schema import migrate
 from maple_next.persistence.selection_store import SelectionStoreMixin
 from maple_next.persistence.session_store import SessionStoreMixin
 from maple_next.persistence.team_preset_store import TeamPresetStoreMixin
+from maple_next.persistence.turn_state_store import TurnStateStoreMixin
 from maple_next.persistence.turn_store import TurnStoreMixin
 
 
@@ -25,6 +26,7 @@ class SQLiteRepository(
     MatchStoreMixin,
     AttemptLedgerStoreMixin,
     TeamPresetStoreMixin,
+    TurnStateStoreMixin,
 ):
     """The only component allowed to hold a writable SQLite connection."""
 

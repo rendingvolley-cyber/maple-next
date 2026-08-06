@@ -126,6 +126,7 @@ Predict the opponent conservatively. Use UNKNOWN when evidence is insufficient.
 Set predicted_action to null unless a specific action is sufficiently supported.
 
 The human alone decides and operates the game.
+Do not execute a move, switch, keyboard input, controller input, or any other game action.
 Follow requested_output_schema exactly and return strict JSON only."""
 )
 

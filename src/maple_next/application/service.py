@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from maple_next.application.projection import DomainProjection, project
+from maple_next.application.turn_legal_action_boundary import build_confirmed_legal_actions_input
 from maple_next.domain.enums import (
     ActionOrder,
     ActionType,
@@ -29,6 +30,13 @@ from maple_next.domain.models import (
     TurnFactsSnapshot,
 )
 from maple_next.domain.team_build import ChampionsTeamBuild
+from maple_next.domain.turn_state import (
+    TurnIdentity,
+    TurnStateIdentityError,
+    TurnStateStaleError,
+    validate_turn_state_full_chain,
+)
+from maple_next.domain.turn_state_projection import ProviderReadyGateError
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers.selection_request import (
     SelectionAdviceRequest,
@@ -36,6 +44,10 @@ from maple_next.providers.selection_request import (
 )
 from maple_next.providers.selection_request import (
     request_payload_hash as compute_selection_request_payload_hash,
+)
+from maple_next.providers.turn_advice_rich_state import (
+    RichStateTurnAdviceRequest,
+    build_rich_state_turn_advice_request,
 )
 from maple_next.providers.turn_boundary import DispatchTrigger, decide_turn_advice_dispatch
 from maple_next.providers.turn_request import (
@@ -760,6 +772,185 @@ class BattleApplication:
             self.repository.insert_job(job)
         return job
 
+    def request_rich_turn_advice(self, command_id: str) -> JobEnvelope:
+        """Forge-resistant durable application API for a rich-state Turn Advice request.
+
+        Accepts no externally supplied ``BattleState``, legal actions, latest
+        pointers, attempt status, pending-job status, or ``DispatchDecision``
+        -- ``command_id`` is the only caller-supplied value. Every durable
+        fact (session, current turn, latest ``ConfirmedTurnState``, final
+        confirmed legal actions, any unresolved ``NextTurnStateDraft`` and
+        its full chain, fixed evidence metadata) is loaded and validated
+        from the repository inside one transaction, exactly like the legacy
+        :meth:`request_turn_advice`. Reuses the existing
+        ``turn_advice_attempt_ledger`` (no second ledger/dispatch policy)
+        and the existing ``JobType.TURN_ADVICE`` job lane -- a rich request
+        and a legacy request for the same session share the same pending-
+        job/one-attempt binding slot.
+        """
+
+        job_id = str(uuid4())
+        with self.repository.transaction():
+            session = self._require_session(BattleState.TURN_REVIEWED)
+            if session.current_turn_id is None:
+                raise DomainError("CURRENT_TURN_REQUIRED")
+            if session.current_applied_selection_id is None:
+                raise DomainError("APPLIED_SELECTION_REQUIRED")
+
+            turn = self.repository.get_turn(session.current_turn_id)
+            current_identity = TurnIdentity(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                turn_id=turn.turn_id,
+                turn_number=turn.turn_number,
+                battle_revision=session.battle_revision,
+            )
+
+            latest_state = self.repository.get_latest_confirmed_turn_state_for_identity(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+            )
+            if latest_state is None:
+                raise DomainError("NO_CONFIRMED_TURN_STATE")
+            if latest_state.identity != current_identity:
+                raise DomainError("CONFIRMED_STATE_NOT_CURRENT_BINDING")
+
+            confirmed_legal_actions = (
+                self.repository.list_confirmed_legal_action_selections_for_identity(
+                    current_identity
+                )
+            )
+            # Accepted Bundle A boundary: proves every selection is a
+            # ConfirmedLegalActionSelection bound to this exact identity,
+            # non-blank, non-duplicate, and MOVE/SWITCH-valid. Its return
+            # value is not used further -- passing the boundary is the proof.
+            build_confirmed_legal_actions_input(current_identity, confirmed_legal_actions)
+
+            latest_open_draft = self.repository.get_latest_next_turn_state_draft_for_identity(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+            )
+            latest_open_draft_turn_number: int | None = None
+            latest_open_draft_battle_revision: int | None = None
+            if latest_open_draft is not None:
+                if (
+                    latest_open_draft.identity.session_id != session.session_id
+                    or latest_open_draft.identity.match_id != session.match_id
+                    or latest_open_draft.identity.generation != session.generation
+                ):
+                    raise DomainError("FOREIGN_OPEN_DRAFT_REJECTED")
+                try:
+                    source_delta = self.repository.get_action_result_delta(
+                        latest_open_draft.source_delta_id
+                    )
+                except KeyError as exc:
+                    raise DomainError("OPEN_DRAFT_SOURCE_DELTA_MISSING") from exc
+                try:
+                    validate_turn_state_full_chain(latest_state, source_delta, latest_open_draft)
+                except (TurnStateIdentityError, TurnStateStaleError) as exc:
+                    raise DomainError(f"OPEN_DRAFT_CHAIN_INVALID:{exc}") from exc
+                latest_open_draft_turn_number = latest_open_draft.identity.turn_number
+                latest_open_draft_battle_revision = latest_open_draft.identity.battle_revision
+
+            evidence = None
+            if latest_state.evidence_id is not None:
+                try:
+                    evidence = self.repository.get_fixed_evidence_metadata(
+                        latest_state.evidence_id
+                    )
+                except KeyError as exc:
+                    raise DomainError("EVIDENCE_METADATA_MISSING") from exc
+
+            applied = self.repository.get_applied_selection(session.current_applied_selection_id)
+            self_team_build_sha256: str | None = None
+            if session.current_reviewed_selection_id is not None:
+                selection_facts = self.repository.get_selection_facts(
+                    session.current_reviewed_selection_id
+                )
+                self_team_build_sha256 = selection_facts.self_team_build_sha256
+
+            self_active_known = latest_state.self_side.active
+            if (
+                not self_active_known.is_confirmed
+                or not self_active_known.value
+                or self_active_known.value == "UNKNOWN"
+            ):
+                raise DomainError("SELF_ACTIVE_UNKNOWN")
+
+            try:
+                request = build_rich_state_turn_advice_request(
+                    confirmed_state=latest_state,
+                    confirmed_legal_actions=confirmed_legal_actions,
+                    current_identity=current_identity,
+                    latest_confirmed_state_id=latest_state.confirmed_state_id,
+                    latest_open_draft_turn_number=latest_open_draft_turn_number,
+                    latest_open_draft_battle_revision=latest_open_draft_battle_revision,
+                    selected_three=applied.selected_three,
+                    self_active=self_active_known.value,
+                    evidence=evidence,
+                    self_team_build_sha256=self_team_build_sha256,
+                )
+            except ProviderReadyGateError as exc:
+                raise DomainError("PROVIDER_READY_GATE_DENIED") from exc
+
+            latest_job = self.repository.latest_job_by_type(
+                session.session_id, JobType.TURN_ADVICE
+            )
+            has_pending_job = latest_job is not None and latest_job.status in {
+                JobStatus.QUEUED,
+                JobStatus.IN_FLIGHT,
+            }
+            attempt_consumed = self.repository.turn_advice_attempt_reserved(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                turn_number=current_identity.turn_number,
+                reviewed_snapshot_id=latest_state.confirmed_state_id,
+            )
+            decision = decide_turn_advice_dispatch(
+                trigger=DispatchTrigger.TRUSTED_HUMAN_ACTIVATION,
+                is_current_binding=True,
+                has_pending_job=has_pending_job,
+                attempt_consumed=attempt_consumed,
+            )
+            if not decision.allowed:
+                raise DomainError(decision.reason_code)
+
+            reserved = self.repository.reserve_turn_advice_attempt(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                turn_number=current_identity.turn_number,
+                battle_revision=current_identity.battle_revision,
+                reviewed_snapshot_id=latest_state.confirmed_state_id,
+                request_payload_hash=request.request_hash,
+                job_id=job_id,
+            )
+            if not reserved:
+                raise DomainError("TURN_ADVICE_ATTEMPT_CONSUMED")
+
+            job = JobEnvelope(
+                contract_version="maple-worker.v1",
+                job_id=job_id,
+                command_id=command_id,
+                job_type=JobType.TURN_ADVICE,
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                turn_number=current_identity.turn_number,
+                base_battle_revision=session.battle_revision,
+                expected_state=BattleState.TURN_REVIEWED,
+                input_snapshot_id=latest_state.confirmed_state_id,
+                request_payload_hash=request.request_hash,
+                human_authorized_at=datetime.now(UTC),
+                status=JobStatus.QUEUED,
+            )
+            self.repository.insert_job(job)
+        return job
+
     def turn_advice_attempt_consumed(self) -> bool:
         """Durable, restart-safe check for the session's current Turn identity.
 
@@ -809,6 +1000,105 @@ class BattleApplication:
             selected_three=applied.selected_three,
         )
         if compute_turn_request_payload_hash(request) != job.request_payload_hash:
+            raise DomainError("REQUEST_PAYLOAD_HASH_MISMATCH")
+        return request
+
+    def build_rich_turn_advice_transport_request(
+        self, job: JobEnvelope
+    ) -> RichStateTurnAdviceRequest:
+        """Offline rebuild of the exact rich-state request for a job.
+
+        Reloads every source value from durable repository state, rebuilds
+        the same canonical rich request, and recomputes its hash against
+        ``job.request_payload_hash``. Never reserves another attempt, never
+        inserts another job, never marks dispatched, never sends. If durable
+        state changed after job creation such that the rebuild would produce
+        different bytes (or would no longer pass the provider-ready gate),
+        this fails closed with :class:`DomainError` rather than silently
+        rebuilding something different from what was authorized.
+        """
+
+        if job.job_type is not JobType.TURN_ADVICE:
+            raise DomainError("JOB_TYPE_NOT_TURN_ADVICE")
+        if not self.repository.match_uses_rich_state_contract(
+            session_id=job.session_id, match_id=job.match_id, generation=job.generation
+        ):
+            raise DomainError("JOB_NOT_RICH_STATE_CONTRACT")
+
+        try:
+            confirmed_state = self.repository.get_confirmed_turn_state(job.input_snapshot_id)
+        except KeyError as exc:
+            raise DomainError("REBUILD_CONFIRMED_STATE_NOT_FOUND") from exc
+
+        current_identity = TurnIdentity(
+            session_id=job.session_id,
+            match_id=job.match_id,
+            generation=job.generation,
+            turn_id=confirmed_state.identity.turn_id,
+            turn_number=confirmed_state.identity.turn_number,
+            battle_revision=job.base_battle_revision,
+        )
+        if confirmed_state.identity != current_identity:
+            raise DomainError("REBUILD_STATE_IDENTITY_MISMATCH")
+
+        confirmed_legal_actions = (
+            self.repository.list_confirmed_legal_action_selections_for_identity(current_identity)
+        )
+        build_confirmed_legal_actions_input(current_identity, confirmed_legal_actions)
+
+        latest_open_draft = self.repository.get_latest_next_turn_state_draft_for_identity(
+            session_id=job.session_id, match_id=job.match_id, generation=job.generation
+        )
+        latest_open_draft_turn_number = (
+            latest_open_draft.identity.turn_number if latest_open_draft is not None else None
+        )
+        latest_open_draft_battle_revision = (
+            latest_open_draft.identity.battle_revision if latest_open_draft is not None else None
+        )
+
+        evidence = None
+        if confirmed_state.evidence_id is not None:
+            try:
+                evidence = self.repository.get_fixed_evidence_metadata(confirmed_state.evidence_id)
+            except KeyError as exc:
+                raise DomainError("EVIDENCE_METADATA_MISSING") from exc
+
+        session = self._require_active_session()
+        if session.current_applied_selection_id is None:
+            raise DomainError("APPLIED_SELECTION_REQUIRED")
+        applied = self.repository.get_applied_selection(session.current_applied_selection_id)
+        self_team_build_sha256: str | None = None
+        if session.current_reviewed_selection_id is not None:
+            selection_facts = self.repository.get_selection_facts(
+                session.current_reviewed_selection_id
+            )
+            self_team_build_sha256 = selection_facts.self_team_build_sha256
+
+        self_active_known = confirmed_state.self_side.active
+        if (
+            not self_active_known.is_confirmed
+            or not self_active_known.value
+            or self_active_known.value == "UNKNOWN"
+        ):
+            raise DomainError("SELF_ACTIVE_UNKNOWN")
+
+        try:
+            request = build_rich_state_turn_advice_request(
+                confirmed_state=confirmed_state,
+                confirmed_legal_actions=confirmed_legal_actions,
+                current_identity=current_identity,
+                latest_confirmed_state_id=confirmed_state.confirmed_state_id,
+                latest_open_draft_turn_number=latest_open_draft_turn_number,
+                latest_open_draft_battle_revision=latest_open_draft_battle_revision,
+                selected_three=applied.selected_three,
+                self_active=self_active_known.value,
+                evidence=evidence,
+                self_team_build_sha256=self_team_build_sha256,
+            )
+        except ProviderReadyGateError as exc:
+            raise DomainError("REBUILD_STATE_NO_LONGER_PROVIDER_READY") from exc
+
+        if request.request_hash != job.request_payload_hash:
             raise DomainError("REQUEST_PAYLOAD_HASH_MISMATCH")
         return request
 

@@ -11,6 +11,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from maple_next.application.match_export_v3 import (
+    ConfirmedTurnRecord,
+    MatchExportV3Error,
+    build_integrated_match_export_v3_payload,
+    parse_match_export_v3,
+    validate_confirmed_states_for_export,
+)
 from maple_next.application.projection import DomainProjection
 from maple_next.application.service import BattleApplication, DomainError
 from maple_next.domain.enums import BattleState, MatchOutcome
@@ -120,8 +127,23 @@ class MatchApplication(BattleApplication):
         outcome = self.repository.get_match_outcome(session.session_id)
         if outcome is None:
             raise DomainError("MATCH_OUTCOME_REQUIRED")
-        payload = self._build_export_payload(session, outcome)
-        encoded = self._encode_payload(payload)
+        legacy_payload = self._build_export_payload(session, outcome)
+
+        uses_rich_state = self.repository.match_uses_rich_state_contract(
+            session_id=session.session_id,
+            match_id=session.match_id,
+            generation=session.generation,
+        )
+        if uses_rich_state:
+            payload = self._build_export_payload_v3(session, outcome, legacy_payload)
+            encoded = self._encode_payload(payload)
+            try:
+                parse_match_export_v3(encoded)
+            except MatchExportV3Error as exc:
+                raise DomainError(f"V3_EXPORT_PRE_WRITE_PARSE_FAILED:{exc}") from exc
+        else:
+            payload = legacy_payload
+            encoded = self._encode_payload(payload)
         digest = hashlib.sha256(encoded).hexdigest()
         export_path = self.export_directory / f"maple-match-{session.match_id}.json"
 
@@ -141,6 +163,17 @@ class MatchApplication(BattleApplication):
             raise
         except OSError as exc:
             raise DomainError("EXPORT_WRITE_FAILED") from exc
+
+        if uses_rich_state:
+            try:
+                read_back = export_path.read_bytes()
+                parse_match_export_v3(read_back)
+            except OSError as exc:
+                raise DomainError("V3_EXPORT_READ_BACK_FAILED") from exc
+            except MatchExportV3Error as exc:
+                raise DomainError(f"V3_EXPORT_READ_BACK_PARSE_FAILED:{exc}") from exc
+            if hashlib.sha256(read_back).hexdigest() != digest:
+                raise DomainError("V3_EXPORT_READ_BACK_HASH_MISMATCH")
 
         record = MatchExportRecord(
             session_id=session.session_id,
@@ -308,6 +341,71 @@ class MatchApplication(BattleApplication):
             "turns": turns,
             "action_history": action_history,
         }
+
+    def _build_export_payload_v3(
+        self,
+        session: BattleSession,
+        outcome: MatchOutcomeRecord,
+        legacy_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Additively upgrade the legacy payload to ``maple-match.v3``.
+
+        Only reached when :meth:`match_uses_rich_state_contract` is true for
+        this exact session/match/generation -- every other match keeps using
+        ``legacy_payload`` (schema v1/v2) completely unchanged.
+        """
+
+        confirmed_states = self.repository.list_confirmed_turn_states_for_match(
+            session_id=session.session_id,
+            match_id=session.match_id,
+            generation=session.generation,
+        )
+        try:
+            validate_confirmed_states_for_export(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                outcome=outcome,
+                confirmed_states=confirmed_states,
+            )
+        except MatchExportV3Error as exc:
+            raise DomainError(f"V3_EXPORT_STATE_VALIDATION_FAILED:{exc}") from exc
+
+        deltas_by_identity = {
+            delta.identity: delta
+            for delta in self.repository.list_action_result_deltas_for_match(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+            )
+        }
+
+        rich_turns: dict[int, ConfirmedTurnRecord] = {}
+        for state in confirmed_states:
+            legal_actions = self.repository.list_confirmed_legal_action_selections_for_identity(
+                state.identity
+            )
+            evidence = None
+            if state.evidence_id is not None:
+                try:
+                    evidence = self.repository.get_fixed_evidence_metadata(state.evidence_id)
+                except KeyError as exc:
+                    raise DomainError("V3_EXPORT_EVIDENCE_METADATA_MISSING") from exc
+            # Latest battle_revision for a given turn_number wins -- states
+            # are already ordered ascending by (turn_number, battle_revision).
+            rich_turns[state.identity.turn_number] = ConfirmedTurnRecord(
+                confirmed_state=state,
+                source_delta=deltas_by_identity.get(state.identity),
+                confirmed_legal_actions=legal_actions,
+                evidence=evidence,
+            )
+
+        try:
+            return build_integrated_match_export_v3_payload(
+                legacy_payload=legacy_payload, rich_turns=rich_turns
+            )
+        except MatchExportV3Error as exc:
+            raise DomainError(f"V3_EXPORT_BUILD_FAILED:{exc}") from exc
 
     @staticmethod
     def _encode_payload(payload: dict[str, Any]) -> bytes:

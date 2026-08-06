@@ -4,39 +4,50 @@ This module builds a strict, hashable, provider-ready request object out of
 :mod:`maple_next.domain.turn_state_projection`. It performs no I/O, sends
 nothing over the network, and does not touch:
 
-- ``providers/turn_request.py`` (Initial Prompt v1 text, legacy
-  ``maple-turn-advice.v1``/``.v2`` contract, response schema) -- not
-  imported, not modified;
 - ``providers/turn_response.py`` (response schema validation) -- not
   imported, not modified;
 - ``providers/turn_transport.py`` (model routing / real HTTP transport) --
   not imported, not modified;
 - the operator UI.
 
-It reuses (imports, never modifies) the existing
-:func:`maple_next.providers.turn_boundary.decide_turn_advice_dispatch` and
-:class:`maple_next.providers.turn_boundary.DispatchDecision` so this
-additive contract shares -- rather than reimplements -- the existing
-trusted-human-activation / one-attempt / no-retry dispatch policy. A caller
-must compute that ``DispatchDecision`` itself (exactly as the legacy lane
-already requires) and pass it in; this module never decides dispatch on its
-own.
+It reuses (imports, never modifies) ``_TURN_INITIAL_PROMPT`` indirectly via
+the shared renderer functions in ``providers/turn_request.py``
+(``_render_provider_prompt_from_canonical_request`` /
+``_render_provider_request_body_from_prompt``), plus
+``TURN_PROMPT_VERSION`` and ``REQUESTED_OUTPUT_SCHEMA`` from that same
+module, so this additive contract never copies or re-implements the
+Initial Prompt v1 text or the legacy response schema.
+
+This module intentionally does not accept or manufacture a
+``DispatchDecision``. Dispatch authorization (trusted-human-activation,
+current binding, no pending job, attempt not yet consumed) is exclusively
+the responsibility of the durable application-layer API in
+``application/service.py`` (``BattleApplication.request_rich_turn_advice``).
+A pure request builder that trusted an externally supplied
+``DispatchDecision`` was a forge-resistance hole -- any caller could
+construct ``DispatchDecision(allowed=True, ...)`` and obtain a
+provider-ready request without ever touching durable state. This module's
+public builder therefore only re-checks the *domain-source* gate
+(:func:`maple_next.domain.turn_state_projection.evaluate_provider_ready_gate`)
+as defense in depth; it never decides dispatch.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from maple_next.domain.enums import ActionType
 from maple_next.domain.turn_state import (
+    ConfirmationMeta,
     ConfirmedLegalActionSelection,
     ConfirmedTurnState,
+    FixedEvidenceMetadata,
     TurnIdentity,
 )
 from maple_next.domain.turn_state_projection import (
-    RICH_STATE_PROJECTION_CONTRACT_VERSION,
     ProviderReadyGateError,
     RichStateProjection,
     build_rich_state_projection,
@@ -44,20 +55,115 @@ from maple_next.domain.turn_state_projection import (
     evaluate_provider_ready_gate,
     projection_to_canonical_dict,
 )
-from maple_next.providers.turn_boundary import DispatchDecision
+from maple_next.providers.turn_request import (
+    REQUESTED_OUTPUT_SCHEMA,
+    TURN_PROMPT_VERSION,
+    _render_provider_prompt_from_canonical_request,
+    _render_provider_request_body_from_prompt,
+)
 
-#: Additive versioned request contract. Distinct from, and never a
-#: replacement for, ``maple-turn-advice.v1``/``.v2`` in ``turn_request.py``.
-RICH_STATE_REQUEST_CONTRACT_VERSION = RICH_STATE_PROJECTION_CONTRACT_VERSION
+#: Additive, versioned request contract. Distinct from the legacy
+#: ``maple-turn-advice.v1``/``.v2`` contracts in ``turn_request.py`` *and*
+#: from the projection contract version
+#: (``RICH_STATE_PROJECTION_CONTRACT_VERSION``, ``maple-turn-advice-rich-
+#: state.v1``) that it embeds.
+RICH_STATE_REQUEST_CONTRACT_VERSION = "maple-turn-advice.v3"
+
+#: Fixed job type, matching the legacy Turn Advice job lane exactly. Rich
+#: requests are dispatched through the same ``TURN_ADVICE`` job type as the
+#: legacy lane; ``contract_version`` is what distinguishes a rich request's
+#: job envelope from a legacy one.
+RICH_STATE_JOB_TYPE = "TURN_ADVICE"
+
+
+class RichStateRequestError(Exception):
+    """Fail-closed base error for rich-state request assembly."""
+
+
+@dataclass(frozen=True, slots=True)
+class RichLegalAction:
+    """One canonical legal action derived from a confirmed human selection.
+
+    ``action_id`` is always the source ``ConfirmedLegalActionSelection.
+    confirmation_id`` -- never a freshly minted or re-derived identifier.
+    ``owner_active``/``switch_target`` are derived deterministically from
+    ``action_type`` (MOVE carries ``owner_active``, SWITCH carries
+    ``switch_target``), mirroring the legacy ``LegalAction`` convention.
+    """
+
+    action_id: str
+    action_type: ActionType
+    action_name: str
+    confirmed_at_utc: str
+    provenance: str
+    source_prefill_id: str | None
+    owner_active: str | None = None
+    switch_target: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.action_type is ActionType.MOVE:
+            if not self.owner_active:
+                raise RichStateRequestError("RICH_MOVE_ACTION_REQUIRES_OWNER_ACTIVE")
+            if self.switch_target is not None:
+                raise RichStateRequestError("RICH_MOVE_ACTION_MUST_NOT_CARRY_SWITCH_TARGET")
+        elif self.action_type is ActionType.SWITCH:
+            if not self.switch_target:
+                raise RichStateRequestError("RICH_SWITCH_ACTION_REQUIRES_SWITCH_TARGET")
+            if self.owner_active is not None:
+                raise RichStateRequestError("RICH_SWITCH_ACTION_MUST_NOT_CARRY_OWNER_ACTIVE")
+        else:  # pragma: no cover - ActionType is exhaustive today
+            raise RichStateRequestError("UNSUPPORTED_ACTION_TYPE")
+
+
+def _map_confirmed_selection_to_rich_legal_action(
+    selection: ConfirmedLegalActionSelection, *, self_active_name: str
+) -> RichLegalAction:
+    """Map one accepted ``ConfirmedLegalActionSelection`` to a ``RichLegalAction``.
+
+    Never derives an action from notes, OCR, deltas, prior advice, or a
+    prefill draft -- the only accepted source is a confirmed selection that
+    has already passed the Bundle A legal-action boundary.
+    """
+
+    if selection.action_type is ActionType.MOVE:
+        owner_active: str | None = self_active_name
+        switch_target: str | None = None
+    elif selection.action_type is ActionType.SWITCH:
+        owner_active = None
+        switch_target = selection.action_name
+    else:  # pragma: no cover - ActionType is exhaustive today
+        raise RichStateRequestError("UNSUPPORTED_ACTION_TYPE")
+    return RichLegalAction(
+        action_id=selection.confirmation_id,
+        action_type=selection.action_type,
+        action_name=selection.action_name,
+        confirmed_at_utc=selection.confirmation.confirmed_at_utc,
+        provenance=selection.confirmation.provenance,
+        source_prefill_id=selection.source_prefill_id,
+        owner_active=owner_active,
+        switch_target=switch_target,
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class RichStateTurnAdviceRequest:
-    """A provider-ready rich-state Turn Advice request. Never sent by this module."""
+    """A complete, provider-ready rich-state Turn Advice request. Never sent by this module."""
 
     contract_version: str
+    prompt_version: str
+    job_type: str
+    identity: TurnIdentity
+    reviewed_confirmed_state_id: str
+    previous_confirmed_state_id: str | None
     projection: RichStateProjection
     reviewed_snapshot_hash: str
+    selected_three: tuple[str, str, str]
+    self_active: str
+    legal_actions: tuple[RichLegalAction, ...]
+    requested_output_schema: dict[str, Any]
+    state_confirmation: ConfirmationMeta
+    evidence: FixedEvidenceMetadata | None
+    self_team_build_sha256: str | None
     request_hash: str
 
 
@@ -65,6 +171,97 @@ def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
+
+
+def _canonical_legal_action_dict(action: RichLegalAction) -> dict[str, Any]:
+    return {
+        "action_id": action.action_id,
+        "action_type": action.action_type.value,
+        "action_name": action.action_name,
+        "confirmed_at_utc": action.confirmed_at_utc,
+        "provenance": action.provenance,
+        "source_prefill_id": action.source_prefill_id,
+        "owner_active": action.owner_active,
+        "switch_target": action.switch_target,
+    }
+
+
+def canonical_rich_request_dict(request: RichStateTurnAdviceRequest) -> dict[str, Any]:
+    """Deterministic, JSON-compatible dict of the complete rich request.
+
+    Sort keys, no whitespace, fixed separators, deterministic legal-action
+    ordering (``(action_type, action_id, action_name)``) -- identical input
+    always yields identical bytes. Never includes a model name, endpoint,
+    header, or credential.
+    """
+
+    sorted_actions = sorted(
+        request.legal_actions,
+        key=lambda action: (action.action_type.value, action.action_id, action.action_name),
+    )
+    payload: dict[str, Any] = {
+        "contract_version": request.contract_version,
+        "prompt_version": request.prompt_version,
+        "job_type": request.job_type,
+        "session_id": request.identity.session_id,
+        "match_id": request.identity.match_id,
+        "generation": request.identity.generation,
+        "turn_id": request.identity.turn_id,
+        "turn_number": request.identity.turn_number,
+        "battle_revision": request.identity.battle_revision,
+        "reviewed_confirmed_state_id": request.reviewed_confirmed_state_id,
+        "previous_confirmed_state_id": request.previous_confirmed_state_id,
+        "reviewed_snapshot_hash": request.reviewed_snapshot_hash,
+        "reviewed_state": projection_to_canonical_dict(request.projection),
+        "selected_three": list(request.selected_three),
+        "self_active": request.self_active,
+        "legal_actions": [_canonical_legal_action_dict(a) for a in sorted_actions],
+        "requested_output_schema": request.requested_output_schema,
+        "state_confirmation": {
+            "confirmed_by_human": request.state_confirmation.confirmed_by_human,
+            "confirmed_at_utc": request.state_confirmation.confirmed_at_utc,
+            "provenance": request.state_confirmation.provenance,
+        },
+        "evidence": (
+            {
+                "evidence_id": request.evidence.evidence_id,
+                "relative_path": request.evidence.relative_path,
+                "sha256": request.evidence.sha256,
+                "recorded_at_utc": request.evidence.recorded_at_utc,
+            }
+            if request.evidence is not None
+            else None
+        ),
+        "self_team_build_sha256": request.self_team_build_sha256,
+    }
+    return payload
+
+
+def encode_canonical_rich_request(request: RichStateTurnAdviceRequest) -> bytes:
+    return _canonical_json_bytes(canonical_rich_request_dict(request))
+
+
+def rich_request_payload_hash(request: RichStateTurnAdviceRequest) -> str:
+    return hashlib.sha256(encode_canonical_rich_request(request)).hexdigest()
+
+
+def build_rich_provider_prompt(request: RichStateTurnAdviceRequest) -> str:
+    """Build the rich request's prompt via the shared Initial Prompt v1 renderer.
+
+    Delegates to the same private renderer the legacy
+    ``turn_request.build_provider_prompt`` uses -- ``_TURN_INITIAL_PROMPT``
+    is never copied or independently reimplemented here.
+    """
+
+    return _render_provider_prompt_from_canonical_request(canonical_rich_request_dict(request))
+
+
+def build_rich_provider_request_body(request: RichStateTurnAdviceRequest) -> dict[str, Any]:
+    """Build the rich request's provider body via the shared body renderer."""
+
+    return _render_provider_request_body_from_prompt(
+        build_rich_provider_prompt(request), request.requested_output_schema
+    )
 
 
 def build_rich_state_turn_advice_request(
@@ -75,22 +272,23 @@ def build_rich_state_turn_advice_request(
     latest_confirmed_state_id: str,
     latest_open_draft_turn_number: int | None,
     latest_open_draft_battle_revision: int | None,
-    dispatch_decision: DispatchDecision,
+    selected_three: tuple[str, str, str],
+    self_active: str,
+    evidence: FixedEvidenceMetadata | None = None,
+    self_team_build_sha256: str | None = None,
 ) -> RichStateTurnAdviceRequest:
-    """Build a provider-ready rich-state request, or fail closed.
+    """Build a complete, provider-ready rich-state request, or fail closed.
 
-    Requires an already-computed, already-allowed ``dispatch_decision`` from
-    :func:`maple_next.providers.turn_boundary.decide_turn_advice_dispatch`
-    (trusted-human-activation, current binding, no pending job, attempt not
-    yet consumed) *and* an allowed
-    :func:`maple_next.domain.turn_state_projection.evaluate_provider_ready_gate`
-    outcome. Raises :class:`ProviderReadyGateError` if either check fails --
-    this function never builds a request for a denied dispatch or a denied
-    gate, and never retries.
+    This is a **pure builder, not an authorization API**. It re-validates
+    the domain-source provider-ready gate
+    (:func:`evaluate_provider_ready_gate`) as defense in depth, but it does
+    not accept, compute, or manufacture a ``DispatchDecision`` -- dispatch
+    authorization (trusted-human-activation / current-binding / no-pending-
+    job / one-attempt) is exclusively
+    ``application.service.BattleApplication.request_rich_turn_advice``'s
+    responsibility. Calling this function alone never creates a job and
+    never reserves an attempt.
     """
-
-    if not dispatch_decision.allowed:
-        raise ProviderReadyGateError(f"DISPATCH_NOT_ALLOWED:{dispatch_decision.reason_code}")
 
     gate = evaluate_provider_ready_gate(
         confirmed_state=confirmed_state,
@@ -104,18 +302,44 @@ def build_rich_state_turn_advice_request(
         reason_text = ",".join(reason.value for reason in gate.denial_reasons)
         raise ProviderReadyGateError(f"PROVIDER_READY_GATE_DENIED:{reason_text}")
 
-    projection = build_rich_state_projection(confirmed_state, confirmed_legal_actions)
-    snapshot_hash = compute_projection_hash(projection)
-    request_payload = {
-        "contract_version": RICH_STATE_REQUEST_CONTRACT_VERSION,
-        "reviewed_snapshot_hash": snapshot_hash,
-        "projection": projection_to_canonical_dict(projection),
-    }
-    request_hash = hashlib.sha256(_canonical_json_bytes(request_payload)).hexdigest()
+    if self_active not in selected_three:
+        raise RichStateRequestError("SELF_ACTIVE_NOT_IN_SELECTED_THREE")
+    if len(set(selected_three)) != 3:
+        raise RichStateRequestError("SELECTED_THREE_MUST_BE_DISTINCT")
 
-    return RichStateTurnAdviceRequest(
-        contract_version=RICH_STATE_REQUEST_CONTRACT_VERSION,
-        projection=projection,
-        reviewed_snapshot_hash=snapshot_hash,
-        request_hash=request_hash,
+    projection = build_rich_state_projection(
+        confirmed_state, confirmed_legal_actions, evidence=evidence
     )
+    projection_hash = compute_projection_hash(projection)
+
+    legal_actions = tuple(
+        sorted(
+            (
+                _map_confirmed_selection_to_rich_legal_action(
+                    selection, self_active_name=self_active
+                )
+                for selection in confirmed_legal_actions
+            ),
+            key=lambda action: (action.action_type.value, action.action_id, action.action_name),
+        )
+    )
+
+    request = RichStateTurnAdviceRequest(
+        contract_version=RICH_STATE_REQUEST_CONTRACT_VERSION,
+        prompt_version=TURN_PROMPT_VERSION,
+        job_type=RICH_STATE_JOB_TYPE,
+        identity=current_identity,
+        reviewed_confirmed_state_id=projection.reviewed_confirmed_state_id,
+        previous_confirmed_state_id=projection.previous_confirmed_state_id,
+        projection=projection,
+        reviewed_snapshot_hash=projection_hash,
+        selected_three=selected_three,
+        self_active=self_active,
+        legal_actions=legal_actions,
+        requested_output_schema=REQUESTED_OUTPUT_SCHEMA,
+        state_confirmation=confirmed_state.confirmation,
+        evidence=evidence,
+        self_team_build_sha256=self_team_build_sha256,
+        request_hash="",
+    )
+    return replace(request, request_hash=rich_request_payload_hash(request))

@@ -46,6 +46,10 @@ from maple_next.domain.turn_state import (
 
 MATCH_EXPORT_SCHEMA_VERSION_V3 = "maple-match.v3"
 
+#: Distinct from the Bundle B request/projection contract versions -- this
+#: is what an exported rich turn's ``rich_state`` block advertises.
+RICH_STATE_EXPORT_CONTRACT_VERSION = "maple-match-rich-state.v1"
+
 _REQUIRED_TOP_LEVEL_KEYS = frozenset(
     {
         "schema_version",
@@ -56,6 +60,37 @@ _REQUIRED_TOP_LEVEL_KEYS = frozenset(
         "ended_at_utc",
         "final_battle_revision",
         "turns",
+    }
+)
+
+#: Nested keys that must never appear anywhere in a v3 export -- a raw
+#: provider request/response, prompt text, HTTP header, or credential.
+_FORBIDDEN_KEYS = frozenset(
+    {
+        "api_key",
+        "authorization",
+        "headers",
+        "endpoint",
+        "prompt",
+        "provider_request",
+        "provider_response",
+        "raw_request",
+        "raw_response",
+        "image_base64",
+        "image_bytes",
+        "base64",
+        "generationConfig",
+        "contents",
+    }
+)
+
+_REQUIRED_RICH_STATE_KEYS = frozenset(
+    {
+        "contract_version",
+        "confirmed_turn_state",
+        "source_action_result_delta",
+        "confirmed_legal_actions",
+        "evidence",
     }
 )
 
@@ -218,6 +253,101 @@ def build_match_export_v3_payload(
     }
 
 
+def validate_confirmed_states_for_export(
+    *,
+    session_id: str,
+    match_id: str,
+    generation: int,
+    outcome: MatchOutcomeRecord,
+    confirmed_states: tuple[ConfirmedTurnState, ...],
+) -> None:
+    """Fail-closed identity/chain validation before any v3 payload is built.
+
+    Requires: the outcome's own identity matches the export session exactly;
+    every confirmed state belongs to the exact session/match/generation;
+    unique state ids; unique (turn_number, battle_revision) pairs; a
+    strictly non-decreasing (turn_number, battle_revision) ordering; and no
+    state whose ``battle_revision`` exceeds ``outcome.final_battle_revision``.
+    """
+
+    if outcome.session_id != session_id or outcome.match_id != match_id:
+        raise MatchExportV3Error("V3_EXPORT_OUTCOME_SESSION_MATCH_MISMATCH")
+    if outcome.generation != generation:
+        raise MatchExportV3Error("V3_EXPORT_OUTCOME_GENERATION_MISMATCH")
+
+    seen_state_ids: set[str] = set()
+    seen_turn_revisions: set[tuple[int, int]] = set()
+    previous_key: tuple[int, int] | None = None
+    for state in confirmed_states:
+        identity = state.identity
+        if (
+            identity.session_id != session_id
+            or identity.match_id != match_id
+            or identity.generation != generation
+        ):
+            raise MatchExportV3Error("V3_EXPORT_STATE_FOREIGN_IDENTITY")
+        if state.confirmed_state_id in seen_state_ids:
+            raise MatchExportV3Error("V3_EXPORT_DUPLICATE_STATE_ID")
+        seen_state_ids.add(state.confirmed_state_id)
+        key = (identity.turn_number, identity.battle_revision)
+        if key in seen_turn_revisions:
+            raise MatchExportV3Error("V3_EXPORT_DUPLICATE_TURN_REVISION")
+        seen_turn_revisions.add(key)
+        if previous_key is not None and key < previous_key:
+            raise MatchExportV3Error("V3_EXPORT_STATE_ORDER_NOT_INCREASING")
+        previous_key = key
+        if identity.battle_revision > outcome.final_battle_revision:
+            raise MatchExportV3Error("V3_EXPORT_STATE_BEYOND_FINAL_REVISION")
+
+
+def _rich_state_block(record: ConfirmedTurnRecord) -> dict[str, Any]:
+    state = record.confirmed_state
+    return {
+        "contract_version": RICH_STATE_EXPORT_CONTRACT_VERSION,
+        "confirmed_turn_state": _confirmed_state_to_json(state),
+        "source_action_result_delta": (
+            _delta_to_json(record.source_delta) if record.source_delta is not None else None
+        ),
+        "confirmed_legal_actions": [
+            _legal_action_to_json(s) for s in record.confirmed_legal_actions
+        ],
+        "evidence": (
+            _evidence_to_json(record.evidence) if record.evidence is not None else None
+        ),
+    }
+
+
+def build_integrated_match_export_v3_payload(
+    *,
+    legacy_payload: dict[str, Any],
+    rich_turns: dict[int, ConfirmedTurnRecord],
+) -> dict[str, Any]:
+    """Additively upgrade an already-built legacy export payload to v3.
+
+    ``legacy_payload`` must be exactly what the unmodified legacy exporter
+    (``application/match_service.py``) would build for this match (schema
+    v1 or v2) -- every legacy top-level and per-turn field is retained
+    verbatim. Only ``schema_version`` is overridden to
+    :data:`MATCH_EXPORT_SCHEMA_VERSION_V3`, and each turn whose
+    ``turn_number`` has a matching entry in ``rich_turns`` gains one
+    additional ``rich_state`` key. Turns without a matching rich record are
+    left completely untouched -- this function never backfills a missing
+    legacy turn with a guessed rich value.
+    """
+
+    payload = dict(legacy_payload)
+    payload["schema_version"] = MATCH_EXPORT_SCHEMA_VERSION_V3
+    new_turns: list[dict[str, Any]] = []
+    for turn_payload in legacy_payload["turns"]:
+        turn_payload = dict(turn_payload)
+        record = rich_turns.get(int(turn_payload["turn_number"]))
+        if record is not None:
+            turn_payload["rich_state"] = _rich_state_block(record)
+        new_turns.append(turn_payload)
+    payload["turns"] = new_turns
+    return payload
+
+
 def _encode_payload(payload: dict[str, Any]) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode(
         "utf-8"
@@ -228,8 +358,141 @@ def compute_payload_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(_encode_payload(payload)).hexdigest()
 
 
+def _find_forbidden_key(node: Any, *, path: str = "$") -> str | None:
+    """Recursively search for any secret/provider/prompt/header field name.
+
+    ``advice.source_type``/``advice.model`` are legitimate legacy fields and
+    are not in :data:`_FORBIDDEN_KEYS`, so they are never falsely rejected.
+    """
+
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _FORBIDDEN_KEYS:
+                return f"{path}.{key}"
+            found = _find_forbidden_key(value, path=f"{path}.{key}")
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            found = _find_forbidden_key(item, path=f"{path}[{index}]")
+            if found is not None:
+                return found
+    return None
+
+
+def _validate_rich_state_block(block: Any, *, turn_number: object) -> None:
+    if not isinstance(block, dict):
+        raise MatchExportV3Error(f"V3_EXPORT_RICH_STATE_MUST_BE_OBJECT:turn={turn_number}")
+    missing = _REQUIRED_RICH_STATE_KEYS - block.keys()
+    if missing:
+        raise MatchExportV3Error(
+            f"V3_EXPORT_RICH_STATE_MISSING_KEYS:turn={turn_number}:{sorted(missing)}"
+        )
+    if block["contract_version"] != RICH_STATE_EXPORT_CONTRACT_VERSION:
+        raise MatchExportV3Error(
+            f"V3_EXPORT_RICH_STATE_CONTRACT_VERSION_MISMATCH:turn={turn_number}"
+        )
+    state = block["confirmed_turn_state"]
+    if not isinstance(state, dict):
+        raise MatchExportV3Error(f"V3_EXPORT_RICH_STATE_STATE_MUST_BE_OBJECT:turn={turn_number}")
+    required_state_keys = {
+        "confirmed_state_id",
+        "previous_confirmed_state_id",
+        "identity",
+        "self_side",
+        "opponent_side",
+        "weather",
+        "terrain",
+        "confirmation",
+        "evidence_id",
+    }
+    missing_state = required_state_keys - state.keys()
+    if missing_state:
+        raise MatchExportV3Error(
+            f"V3_EXPORT_RICH_STATE_STATE_MISSING_KEYS:turn={turn_number}:{sorted(missing_state)}"
+        )
+    for known_field in ("weather", "terrain"):
+        known = state[known_field]
+        if not isinstance(known, dict) or "status" not in known:
+            raise MatchExportV3Error(
+                f"V3_EXPORT_RICH_STATE_INVALID_KNOWLEDGE:turn={turn_number}:{known_field}"
+            )
+        if known["status"] not in {"CONFIRMED", "UNKNOWN"}:
+            raise MatchExportV3Error(
+                f"V3_EXPORT_RICH_STATE_INVALID_KNOWLEDGE_STATUS:turn={turn_number}:{known_field}"
+            )
+        if known["status"] == "UNKNOWN" and known.get("value") is not None:
+            raise MatchExportV3Error(
+                f"V3_EXPORT_RICH_STATE_UNKNOWN_CARRIES_VALUE:turn={turn_number}:{known_field}"
+            )
+        if known["status"] == "CONFIRMED" and not known.get("provenance_chain"):
+            raise MatchExportV3Error(
+                f"V3_EXPORT_RICH_STATE_MISSING_PROVENANCE:turn={turn_number}:{known_field}"
+            )
+    delta = block["source_action_result_delta"]
+    if delta is not None:
+        if not isinstance(delta, dict) or "based_on_confirmed_state_id" not in delta:
+            raise MatchExportV3Error(
+                f"V3_EXPORT_RICH_STATE_INVALID_DELTA:turn={turn_number}"
+            )
+        for field_delta_field in ("weather", "terrain"):
+            field_delta = delta.get(field_delta_field)
+            if not isinstance(field_delta, dict) or "observation" not in field_delta:
+                raise MatchExportV3Error(
+                    f"V3_EXPORT_RICH_STATE_INVALID_FIELD_DELTA:turn={turn_number}:{field_delta_field}"
+                )
+            observation = field_delta["observation"]
+            if observation not in {"CHANGED", "UNCHANGED", "UNKNOWN"}:
+                raise MatchExportV3Error(
+                    f"V3_EXPORT_RICH_STATE_INVALID_OBSERVATION:turn={turn_number}:{field_delta_field}"
+                )
+            if observation == "CHANGED" and field_delta.get("after_value") is None:
+                raise MatchExportV3Error(
+                    f"V3_EXPORT_RICH_STATE_CHANGED_WITHOUT_VALUE:turn={turn_number}:{field_delta_field}"
+                )
+            if observation != "CHANGED" and field_delta.get("after_value") is not None:
+                raise MatchExportV3Error(
+                    f"V3_EXPORT_RICH_STATE_UNCHANGED_CARRIES_VALUE:turn={turn_number}:{field_delta_field}"
+                )
+    legal_actions = block["confirmed_legal_actions"]
+    if not isinstance(legal_actions, list):
+        raise MatchExportV3Error(
+            f"V3_EXPORT_RICH_STATE_LEGAL_ACTIONS_MUST_BE_LIST:turn={turn_number}"
+        )
+    seen_confirmation_ids: set[object] = set()
+    for action in legal_actions:
+        if not isinstance(action, dict) or not action.get("confirmation_id"):
+            raise MatchExportV3Error(
+                f"V3_EXPORT_RICH_STATE_MALFORMED_LEGAL_ACTION:turn={turn_number}"
+            )
+        if action["confirmation_id"] in seen_confirmation_ids:
+            raise MatchExportV3Error(
+                f"V3_EXPORT_RICH_STATE_DUPLICATE_LEGAL_ACTION:turn={turn_number}"
+            )
+        seen_confirmation_ids.add(action["confirmation_id"])
+    evidence = block["evidence"]
+    if evidence is not None:
+        if state["evidence_id"] != evidence.get("evidence_id"):
+            raise MatchExportV3Error(
+                f"V3_EXPORT_RICH_STATE_EVIDENCE_ID_MISMATCH:turn={turn_number}"
+            )
+        sha256 = evidence.get("sha256")
+        if not isinstance(sha256, str) or len(sha256) != 64:
+            raise MatchExportV3Error(
+                f"V3_EXPORT_RICH_STATE_INVALID_EVIDENCE_HASH:turn={turn_number}"
+            )
+
+
 def parse_match_export_v3(raw: bytes) -> dict[str, Any]:
-    """Strict parse: valid JSON object, all required keys, correct schema_version."""
+    """Strict parse: valid JSON object, all required keys, correct schema_version.
+
+    When any turn carries a ``rich_state`` block, that block is validated
+    recursively (required sub-keys, knowledge/delta invariants, evidence
+    hash shape, no duplicate legal actions). The full payload is also
+    scanned recursively for a forbidden provider/prompt/header/credential
+    key -- a raw provider request/response, prompt text, or embedded image
+    bytes/base64 fails the parse closed.
+    """
 
     try:
         payload = json.loads(raw.decode("utf-8"))
@@ -242,6 +505,18 @@ def parse_match_export_v3(raw: bytes) -> dict[str, Any]:
         raise MatchExportV3Error(f"V3_EXPORT_MISSING_KEYS:{sorted(missing)}")
     if payload["schema_version"] != MATCH_EXPORT_SCHEMA_VERSION_V3:
         raise MatchExportV3Error("V3_EXPORT_SCHEMA_VERSION_MISMATCH")
+
+    forbidden = _find_forbidden_key(payload)
+    if forbidden is not None:
+        raise MatchExportV3Error(f"V3_EXPORT_FORBIDDEN_KEY:{forbidden}")
+
+    for turn_payload in payload["turns"]:
+        if not isinstance(turn_payload, dict):
+            raise MatchExportV3Error("V3_EXPORT_TURN_MUST_BE_OBJECT")
+        if "rich_state" in turn_payload:
+            _validate_rich_state_block(
+                turn_payload["rich_state"], turn_number=turn_payload.get("turn_number")
+            )
     return payload
 
 

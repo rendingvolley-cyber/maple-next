@@ -38,8 +38,10 @@ from enum import StrEnum
 from typing import Any
 
 from maple_next.domain.turn_state import (
+    ConfirmationMeta,
     ConfirmedLegalActionSelection,
     ConfirmedTurnState,
+    FixedEvidenceMetadata,
     Known,
     SideState,
     TurnIdentity,
@@ -83,10 +85,13 @@ class RichStateProjection:
     contract_version: str
     identity: TurnIdentity
     reviewed_confirmed_state_id: str
+    previous_confirmed_state_id: str | None
     self_side: SideState
     opponent_side: SideState
     weather: Known[str]
     terrain: Known[str]
+    state_confirmation: ConfirmationMeta
+    evidence: FixedEvidenceMetadata | None
     confirmed_legal_actions: tuple[ConfirmedLegalActionSelection, ...]
 
     def __post_init__(self) -> None:
@@ -106,6 +111,8 @@ class RichStateProjection:
 def build_rich_state_projection(
     confirmed_state: ConfirmedTurnState,
     confirmed_legal_actions: tuple[ConfirmedLegalActionSelection, ...],
+    *,
+    evidence: FixedEvidenceMetadata | None = None,
 ) -> RichStateProjection:
     """Build the strict projection. The only accepted source is exactly this pair.
 
@@ -115,6 +122,11 @@ def build_rich_state_projection(
     against a caller passing a ``NextTurnStateDraft``, an OCR candidate
     dict, a raw ``ActionResultDelta``, or an unconfirmed
     ``LegalActionPrefillDraft`` by duck-typing.
+
+    ``evidence`` must be the caller-loaded ``FixedEvidenceMetadata`` whose
+    ``evidence_id`` matches ``confirmed_state.evidence_id`` exactly (or
+    ``None`` when the state carries no evidence reference at all) -- this
+    function never hashes only ``evidence_id``, it hashes the full metadata.
     """
 
     if not isinstance(confirmed_state, ConfirmedTurnState):
@@ -126,15 +138,24 @@ def build_rich_state_projection(
     for selection in confirmed_legal_actions:
         if not isinstance(selection, ConfirmedLegalActionSelection):
             raise ProjectionSourceError("UNCONFIRMED_LEGAL_ACTION_REJECTED")
+    if confirmed_state.evidence_id is None:
+        if evidence is not None:
+            raise ProjectionSourceError("UNEXPECTED_EVIDENCE_FOR_STATE_WITHOUT_EVIDENCE_ID")
+    else:
+        if evidence is None or evidence.evidence_id != confirmed_state.evidence_id:
+            raise ProjectionSourceError("EVIDENCE_METADATA_MISMATCH")
 
     return RichStateProjection(
         contract_version=RICH_STATE_PROJECTION_CONTRACT_VERSION,
         identity=confirmed_state.identity,
         reviewed_confirmed_state_id=confirmed_state.confirmed_state_id,
+        previous_confirmed_state_id=confirmed_state.previous_confirmed_state_id,
         self_side=confirmed_state.self_side,
         opponent_side=confirmed_state.opponent_side,
         weather=confirmed_state.weather,
         terrain=confirmed_state.terrain,
+        state_confirmation=confirmed_state.confirmation,
+        evidence=evidence,
         confirmed_legal_actions=tuple(confirmed_legal_actions),
     )
 
@@ -289,18 +310,35 @@ def projection_to_canonical_dict(projection: RichStateProjection) -> dict[str, A
         projection.confirmed_legal_actions,
         key=lambda selection: (
             selection.action_type.value,
-            selection.action_name,
             selection.confirmation_id,
+            selection.action_name,
         ),
     )
+    evidence = projection.evidence
     return {
         "contract_version": projection.contract_version,
         "identity": _identity_to_json(projection.identity),
         "reviewed_confirmed_state_id": projection.reviewed_confirmed_state_id,
+        "previous_confirmed_state_id": projection.previous_confirmed_state_id,
         "self_side": side_state_to_json(projection.self_side),
         "opponent_side": side_state_to_json(projection.opponent_side),
         "weather": known_to_json(projection.weather),
         "terrain": known_to_json(projection.terrain),
+        "state_confirmation": {
+            "confirmed_by_human": projection.state_confirmation.confirmed_by_human,
+            "confirmed_at_utc": projection.state_confirmation.confirmed_at_utc,
+            "provenance": projection.state_confirmation.provenance,
+        },
+        "evidence": (
+            {
+                "evidence_id": evidence.evidence_id,
+                "relative_path": evidence.relative_path,
+                "sha256": evidence.sha256,
+                "recorded_at_utc": evidence.recorded_at_utc,
+            }
+            if evidence is not None
+            else None
+        ),
         "confirmed_legal_actions": [_legal_action_to_json(s) for s in sorted_actions],
     }
 

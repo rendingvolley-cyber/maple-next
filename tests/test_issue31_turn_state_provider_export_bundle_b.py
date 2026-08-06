@@ -25,7 +25,7 @@ from maple_next.application.match_export_v3 import (
     parse_match_export_v3,
 )
 from maple_next.application.turn_provider_export_bridge import (
-    build_provider_ready_rich_state_request,
+    build_pure_rich_state_request_from_loaded_state,
 )
 from maple_next.domain.enums import ActionType, HpBucket, MatchOutcome
 from maple_next.domain.match_models import MatchOutcomeRecord
@@ -55,6 +55,7 @@ from maple_next.domain.turn_state_projection import (
     projection_to_canonical_dict,
 )
 from maple_next.providers import turn_request, turn_response, turn_transport
+from maple_next.providers.turn_advice_rich_state import RICH_STATE_REQUEST_CONTRACT_VERSION
 from maple_next.providers.turn_boundary import (
     DispatchDecision,
     DispatchTrigger,
@@ -392,55 +393,39 @@ def test_gate_allows_explicit_confirmed_unknown_hp_status_stages_weather_terrain
     assert result.allowed
 
 
-# --- 3. Provider bridge: dispatch decision + gate composition ----------------
+# --- 3. Provider bridge: pure, non-authorizing request assembly -------------
 
 
-def test_bridge_builds_request_when_dispatch_and_gate_both_allow() -> None:
+def test_bridge_builds_request_from_loaded_state() -> None:
     state = _confirmed_state()
-    request = build_provider_ready_rich_state_request(
+    request = build_pure_rich_state_request_from_loaded_state(
         current_identity=state.identity,
         latest_confirmed_state=state,
         confirmed_legal_actions=(_legal_action(),),
         latest_open_draft=None,
-        dispatch_decision=_allowed_dispatch_decision(),
+        selected_three=("Dondozo", "Gholdengo", "Urshifu"),
+        self_active="Dondozo",
     )
-    assert request.contract_version == RICH_STATE_PROJECTION_CONTRACT_VERSION
+    assert request.contract_version == RICH_STATE_REQUEST_CONTRACT_VERSION
     assert len(request.request_hash) == 64
     assert len(request.reviewed_snapshot_hash) == 64
 
 
-def test_bridge_fails_closed_when_dispatch_denied_retry_trigger() -> None:
-    denied = decide_turn_advice_dispatch(
-        trigger=DispatchTrigger.RETRY,
-        is_current_binding=True,
-        has_pending_job=False,
-        attempt_consumed=False,
-    )
-    with pytest.raises(ProviderReadyGateError):
-        build_provider_ready_rich_state_request(
-            current_identity=_identity(),
-            latest_confirmed_state=_confirmed_state(),
-            confirmed_legal_actions=(_legal_action(),),
-            latest_open_draft=None,
-            dispatch_decision=denied,
-        )
+def test_bridge_pure_builder_has_no_dispatch_decision_parameter() -> None:
+    """Remediation regression: the pure builder must never accept a forged decision.
 
+    A prior version of this bridge accepted an externally supplied
+    ``DispatchDecision`` and trusted it -- any caller could construct
+    ``DispatchDecision(allowed=True, ...)`` and obtain a provider-ready
+    request without ever touching durable state. That parameter must never
+    exist on this pure builder again; dispatch authorization now lives
+    exclusively in ``BattleApplication.request_rich_turn_advice``.
+    """
 
-def test_bridge_fails_closed_when_attempt_already_consumed() -> None:
-    denied = decide_turn_advice_dispatch(
-        trigger=DispatchTrigger.TRUSTED_HUMAN_ACTIVATION,
-        is_current_binding=True,
-        has_pending_job=False,
-        attempt_consumed=True,
-    )
-    with pytest.raises(ProviderReadyGateError):
-        build_provider_ready_rich_state_request(
-            current_identity=_identity(),
-            latest_confirmed_state=_confirmed_state(),
-            confirmed_legal_actions=(_legal_action(),),
-            latest_open_draft=None,
-            dispatch_decision=denied,
-        )
+    import inspect
+
+    parameters = inspect.signature(build_pure_rich_state_request_from_loaded_state).parameters
+    assert "dispatch_decision" not in parameters
 
 
 def test_bridge_fails_closed_on_newer_open_draft() -> None:
@@ -460,12 +445,13 @@ def test_bridge_fails_closed_on_newer_open_draft() -> None:
         derived_at_utc=CONFIRMED_AT,
     )
     with pytest.raises(ProviderReadyGateError):
-        build_provider_ready_rich_state_request(
+        build_pure_rich_state_request_from_loaded_state(
             current_identity=state.identity,
             latest_confirmed_state=state,
             confirmed_legal_actions=(_legal_action(),),
             latest_open_draft=newer_draft,
-            dispatch_decision=_allowed_dispatch_decision(),
+            selected_three=("Dondozo", "Gholdengo", "Urshifu"),
+            self_active="Dondozo",
         )
 
 

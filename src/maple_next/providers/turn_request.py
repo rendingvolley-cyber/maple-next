@@ -371,11 +371,21 @@ def request_payload_hash(request: TurnAdviceRequest) -> str:
     return hashlib.sha256(encode_canonical_request(request)).hexdigest()
 
 
-def build_provider_prompt(request: TurnAdviceRequest) -> str:
-    """Build the deterministic, secret-free Initial Prompt v1."""
+def _render_provider_prompt_from_canonical_request(
+    canonical_request: dict[str, Any],
+) -> str:
+    """Shared, secret-free Initial Prompt v1 renderer.
+
+    Both the legacy ``TurnAdviceRequest`` prompt builder and the additive
+    Bundle B rich-state request prompt builder
+    (``providers/turn_advice_rich_state.py``) delegate to this single
+    renderer so ``_TURN_INITIAL_PROMPT`` is never copied or independently
+    reimplemented. Given the same canonical request dict, the output is
+    byte-for-byte identical regardless of caller.
+    """
 
     canonical = json.dumps(
-        canonical_request_dict(request),
+        canonical_request,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -383,18 +393,34 @@ def build_provider_prompt(request: TurnAdviceRequest) -> str:
     return f"{_TURN_INITIAL_PROMPT}\n\nCanonical request:\n{canonical}"
 
 
-def build_provider_request_body(request: TurnAdviceRequest) -> dict[str, Any]:
-    """Build the deterministic Gemini generateContent body without secrets."""
+def _render_provider_request_body_from_prompt(
+    prompt: str, requested_output_schema: dict[str, Any]
+) -> dict[str, Any]:
+    """Shared Gemini ``generateContent`` body renderer. No secrets, no model/endpoint."""
 
     return {
         "contents": [
             {
                 "role": "user",
-                "parts": [{"text": build_provider_prompt(request)}],
+                "parts": [{"text": prompt}],
             }
         ],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseJsonSchema": request.requested_output_schema,
+            "responseJsonSchema": requested_output_schema,
         },
     }
+
+
+def build_provider_prompt(request: TurnAdviceRequest) -> str:
+    """Build the deterministic, secret-free Initial Prompt v1."""
+
+    return _render_provider_prompt_from_canonical_request(canonical_request_dict(request))
+
+
+def build_provider_request_body(request: TurnAdviceRequest) -> dict[str, Any]:
+    """Build the deterministic Gemini generateContent body without secrets."""
+
+    return _render_provider_request_body_from_prompt(
+        build_provider_prompt(request), request.requested_output_schema
+    )

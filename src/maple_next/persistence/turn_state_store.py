@@ -164,6 +164,54 @@ class TurnStateStoreMixin(StoreBase):
             return None
         return self._confirmed_turn_state_from_row(row)
 
+    def get_latest_confirmed_turn_state_for_identity(
+        self, *, session_id: str, match_id: str, generation: int
+    ) -> ConfirmedTurnState | None:
+        """Latest confirmed state scoped to the exact session/match/generation."""
+
+        row = self.connection.execute(
+            """
+            SELECT * FROM confirmed_turn_states
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+            ORDER BY turn_number DESC, battle_revision DESC, rowid DESC
+            LIMIT 1
+            """,
+            (session_id, match_id, generation),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._confirmed_turn_state_from_row(row)
+
+    def list_confirmed_turn_states_for_match(
+        self, *, session_id: str, match_id: str, generation: int
+    ) -> tuple[ConfirmedTurnState, ...]:
+        """All confirmed states for the exact match, oldest first, deterministic order."""
+
+        rows = self.connection.execute(
+            """
+            SELECT * FROM confirmed_turn_states
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+            ORDER BY turn_number ASC, battle_revision ASC, rowid ASC
+            """,
+            (session_id, match_id, generation),
+        ).fetchall()
+        return tuple(self._confirmed_turn_state_from_row(row) for row in rows)
+
+    def match_uses_rich_state_contract(
+        self, *, session_id: str, match_id: str, generation: int
+    ) -> bool:
+        """Whether this exact match has ever recorded a Bundle A confirmed turn state."""
+
+        row = self.connection.execute(
+            """
+            SELECT 1 FROM confirmed_turn_states
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+            LIMIT 1
+            """,
+            (session_id, match_id, generation),
+        ).fetchone()
+        return row is not None
+
     # --- Action result deltas (append-only) --------------------------------
 
     def append_action_result_delta(self, delta: ActionResultDelta) -> None:
@@ -237,6 +285,21 @@ class TurnStateStoreMixin(StoreBase):
         if row is None:
             raise KeyError(delta_id)
         return self._action_result_delta_from_row(row)
+
+    def list_action_result_deltas_for_match(
+        self, *, session_id: str, match_id: str, generation: int
+    ) -> tuple[ActionResultDelta, ...]:
+        """All deltas for the exact match, oldest first, deterministic order."""
+
+        rows = self.connection.execute(
+            """
+            SELECT * FROM action_result_deltas
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+            ORDER BY turn_number ASC, battle_revision ASC, rowid ASC
+            """,
+            (session_id, match_id, generation),
+        ).fetchall()
+        return tuple(self._action_result_delta_from_row(row) for row in rows)
 
     # --- Next-turn drafts (upsert scoped to session/turn/revision) --------
 
@@ -331,6 +394,42 @@ class TurnStateStoreMixin(StoreBase):
             return None
         return self._next_turn_state_draft_from_row(row)
 
+    def get_latest_next_turn_state_draft_for_identity(
+        self, *, session_id: str, match_id: str, generation: int
+    ) -> NextTurnStateDraft | None:
+        """Latest unresolved draft scoped to the exact session/match/generation."""
+
+        row = self.connection.execute(
+            """
+            SELECT * FROM next_turn_state_drafts
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+            ORDER BY turn_number DESC, battle_revision DESC, rowid DESC
+            LIMIT 1
+            """,
+            (session_id, match_id, generation),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._next_turn_state_draft_from_row(row)
+
+    def list_next_turn_state_drafts_for_match(
+        self, *, session_id: str, match_id: str, generation: int
+    ) -> tuple[NextTurnStateDraft, ...]:
+        """All drafts for the exact match, oldest first.
+
+        Used to detect a foreign or corrupt draft.
+        """
+
+        rows = self.connection.execute(
+            """
+            SELECT * FROM next_turn_state_drafts
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+            ORDER BY turn_number ASC, battle_revision ASC, rowid ASC
+            """,
+            (session_id, match_id, generation),
+        ).fetchall()
+        return tuple(self._next_turn_state_draft_from_row(row) for row in rows)
+
     # --- Legal action prefill drafts ---------------------------------------
 
     def append_legal_action_prefill_draft(self, prefill: LegalActionPrefillDraft) -> None:
@@ -418,15 +517,10 @@ class TurnStateStoreMixin(StoreBase):
             ),
         )
 
-    def get_confirmed_legal_action_selection(
-        self, confirmation_id: str
+    @staticmethod
+    def _confirmed_legal_action_selection_from_row(
+        row: sqlite3.Row,
     ) -> ConfirmedLegalActionSelection:
-        row = self.connection.execute(
-            "SELECT * FROM confirmed_legal_action_selections WHERE confirmation_id = ?",
-            (confirmation_id,),
-        ).fetchone()
-        if row is None:
-            raise KeyError(confirmation_id)
         identity = TurnIdentity(
             session_id=str(row["session_id"]),
             match_id=str(row["match_id"]),
@@ -448,6 +542,44 @@ class TurnStateStoreMixin(StoreBase):
             confirmation=confirmation,
             source_prefill_id=row["source_prefill_id"],
         )
+
+    def get_confirmed_legal_action_selection(
+        self, confirmation_id: str
+    ) -> ConfirmedLegalActionSelection:
+        row = self.connection.execute(
+            "SELECT * FROM confirmed_legal_action_selections WHERE confirmation_id = ?",
+            (confirmation_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(confirmation_id)
+        return self._confirmed_legal_action_selection_from_row(row)
+
+    def list_confirmed_legal_action_selections_for_identity(
+        self, identity: TurnIdentity
+    ) -> tuple[ConfirmedLegalActionSelection, ...]:
+        """Every confirmed legal action for the exact turn identity, deterministic order.
+
+        Ordered by ``confirmation_id`` (not SQLite ``rowid``) so the result
+        is independent of insertion/row order.
+        """
+
+        rows = self.connection.execute(
+            """
+            SELECT * FROM confirmed_legal_action_selections
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+              AND turn_id = ? AND turn_number = ? AND battle_revision = ?
+            ORDER BY confirmation_id ASC
+            """,
+            (
+                identity.session_id,
+                identity.match_id,
+                identity.generation,
+                identity.turn_id,
+                identity.turn_number,
+                identity.battle_revision,
+            ),
+        ).fetchall()
+        return tuple(self._confirmed_legal_action_selection_from_row(row) for row in rows)
 
     # --- Rich action completion row write (private helper) -----------------
     #

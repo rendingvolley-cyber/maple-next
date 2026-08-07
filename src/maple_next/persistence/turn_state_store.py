@@ -412,6 +412,30 @@ class TurnStateStoreMixin(StoreBase):
             return None
         return self._next_turn_state_draft_from_row(row)
 
+    def list_candidate_next_turn_state_drafts_for_confirmed_state(
+        self, based_on_confirmed_state_id: str
+    ) -> tuple[NextTurnStateDraft, ...]:
+        """Every draft claiming to be based on this confirmed state -- validation only.
+
+        Deliberately keyed on ``based_on_confirmed_state_id`` alone (not
+        pre-filtered by session/match/generation), so a candidate whose own
+        identity columns are corrupt or foreign cannot disappear from this
+        query before its full chain is validated. This is a read-only
+        helper for validation; it is not an acceptance/authorization path
+        and must never be used to silently select "no draft" when a
+        candidate exists but fails full-chain validation.
+        """
+
+        rows = self.connection.execute(
+            """
+            SELECT * FROM next_turn_state_drafts
+            WHERE based_on_confirmed_state_id = ?
+            ORDER BY turn_number ASC, battle_revision ASC, rowid ASC
+            """,
+            (based_on_confirmed_state_id,),
+        ).fetchall()
+        return tuple(self._next_turn_state_draft_from_row(row) for row in rows)
+
     def list_next_turn_state_drafts_for_match(
         self, *, session_id: str, match_id: str, generation: int
     ) -> tuple[NextTurnStateDraft, ...]:

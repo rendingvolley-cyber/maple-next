@@ -31,6 +31,8 @@ from maple_next.domain.models import (
 )
 from maple_next.domain.team_build import ChampionsTeamBuild
 from maple_next.domain.turn_state import (
+    ConfirmedTurnState,
+    NextTurnStateDraft,
     TurnIdentity,
     TurnStateIdentityError,
     TurnStateStaleError,
@@ -67,6 +69,7 @@ from maple_next.providers.turn_validation import (
     TurnAdviceResultCode,
     build_normalized_turn_advice_result,
     sanitized_reason_for,
+    validate_turn_advice_legality,
     validate_turn_advice_result,
 )
 from maple_next.workers.contracts.models import JobEnvelope, ResultEnvelope
@@ -828,14 +831,24 @@ class BattleApplication:
             # value is not used further -- passing the boundary is the proof.
             build_confirmed_legal_actions_input(current_identity, confirmed_legal_actions)
 
-            latest_open_draft = self.repository.get_latest_next_turn_state_draft_for_identity(
-                session_id=session.session_id,
-                match_id=session.match_id,
-                generation=session.generation,
+            # Retrieved by ``based_on_confirmed_state_id`` alone (never
+            # pre-filtered by session/match/generation) so a foreign or
+            # corrupt candidate cannot simply disappear before validation --
+            # every candidate below is validated full-chain and, on any
+            # failure, denies the request rather than silently treating the
+            # corruption as "no draft".
+            candidate_drafts = (
+                self.repository.list_candidate_next_turn_state_drafts_for_confirmed_state(
+                    latest_state.confirmed_state_id
+                )
             )
+            latest_open_draft: NextTurnStateDraft | None = None
             latest_open_draft_turn_number: int | None = None
             latest_open_draft_battle_revision: int | None = None
-            if latest_open_draft is not None:
+            if candidate_drafts:
+                if len(candidate_drafts) > 1:
+                    raise DomainError("CONTRADICTORY_DUPLICATE_OPEN_DRAFT_REJECTED")
+                latest_open_draft = candidate_drafts[0]
                 if (
                     latest_open_draft.identity.session_id != session.session_id
                     or latest_open_draft.identity.match_id != session.match_id
@@ -1252,6 +1265,240 @@ class BattleApplication:
             self.repository.update_job_status(job.job_id, JobStatus.SUCCEEDED)
             self.repository.audit_result(result, ResultDisposition.APPLIED, "BINDING_ACCEPTED")
         return ResultDisposition.APPLIED
+
+    def apply_rich_turn_advice_result(self, result: ResultEnvelope) -> ResultDisposition:
+        """Versioned rich-result apply path. Never used for a legacy job.
+
+        The legacy :meth:`apply_turn_advice_result` binds
+        ``job.input_snapshot_id`` against ``session.current_reviewed_board_id``
+        -- correct for the legacy per-turn-facts flow, but wrong for a rich
+        job, whose ``input_snapshot_id`` is a ``ConfirmedTurnState.
+        confirmed_state_id``. That field is never touched or repurposed here.
+
+        The discriminator for "this is a rich result" is durable and
+        unambiguous: the job's own ``(session_id, match_id, generation)``
+        must already have a persisted ``ConfirmedTurnState`` row (see
+        :meth:`~maple_next.persistence.turn_state_store.TurnStateStoreMixin.
+        match_uses_rich_state_contract`), and ``job.input_snapshot_id`` must
+        resolve to an actual ``ConfirmedTurnState`` via
+        :meth:`build_rich_turn_advice_transport_request`. Nothing here
+        infers rich status from caller-supplied result data.
+        """
+
+        with self.repository.transaction():
+            job = self._load_result_job_or_audit(result)
+            if job is None:
+                return ResultDisposition.STALE_REJECTED
+            if job.job_type is not JobType.TURN_ADVICE:
+                self.repository.audit_result(
+                    result, ResultDisposition.STALE_REJECTED, "JOB_TYPE_NOT_TURN_ADVICE"
+                )
+                return ResultDisposition.STALE_REJECTED
+            if not self.repository.match_uses_rich_state_contract(
+                session_id=job.session_id, match_id=job.match_id, generation=job.generation
+            ):
+                self.repository.audit_result(
+                    result, ResultDisposition.STALE_REJECTED, "JOB_NOT_RICH_STATE_CONTRACT"
+                )
+                return ResultDisposition.STALE_REJECTED
+            if self.repository.has_applied_result(job.job_id):
+                self.repository.audit_result(
+                    result, ResultDisposition.DUPLICATE_IGNORED, "RESULT_ALREADY_APPLIED"
+                )
+                return ResultDisposition.DUPLICATE_IGNORED
+
+            session = self.repository.load_active_session()
+            latest_job = (
+                self.repository.latest_job_by_type(session.session_id, JobType.TURN_ADVICE)
+                if session is not None
+                else None
+            )
+            current_identity: TurnIdentity | None = None
+            latest_state: ConfirmedTurnState | None = None
+            if session is not None and session.current_turn_id is not None:
+                turn = self.repository.get_turn(session.current_turn_id)
+                current_identity = TurnIdentity(
+                    session_id=session.session_id,
+                    match_id=session.match_id,
+                    generation=session.generation,
+                    turn_id=turn.turn_id,
+                    turn_number=turn.turn_number,
+                    battle_revision=session.battle_revision,
+                )
+                latest_state = self.repository.get_latest_confirmed_turn_state_for_identity(
+                    session_id=session.session_id,
+                    match_id=session.match_id,
+                    generation=session.generation,
+                )
+
+            reason = self._rich_binding_failure_reason(
+                session,
+                latest_job,
+                job,
+                result,
+                current_identity=current_identity,
+                latest_state=latest_state,
+            )
+            if reason is not None:
+                self.repository.audit_result(result, ResultDisposition.STALE_REJECTED, reason)
+                return ResultDisposition.STALE_REJECTED
+
+            assert session is not None
+            assert session.current_turn_id is not None
+            assert latest_state is not None
+            try:
+                rebuilt = self.build_rich_turn_advice_transport_request(job)
+                source_type = str(result.source_type).strip()
+                model = str(result.model).strip()
+                if not source_type:
+                    raise ValueError(sanitized_reason_for(TurnAdviceResultCode.SOURCE_INVALID))
+                if not model:
+                    raise ValueError(sanitized_reason_for(TurnAdviceResultCode.MODEL_INVALID))
+                body = turn_advice_body_from_dict(result.payload)
+                normalized = NormalizedTurnAdviceResult(
+                    contract_version=rebuilt.contract_version,
+                    job_type=rebuilt.job_type,
+                    session_id=rebuilt.identity.session_id,
+                    match_id=rebuilt.identity.match_id,
+                    generation=rebuilt.identity.generation,
+                    turn_number=rebuilt.identity.turn_number,
+                    battle_revision=rebuilt.identity.battle_revision,
+                    reviewed_snapshot_id=rebuilt.reviewed_confirmed_state_id,
+                    reviewed_snapshot_hash=rebuilt.reviewed_snapshot_hash,
+                    request_payload_hash=result.request_payload_hash,
+                    source_type=source_type,
+                    model=model,
+                    advice=body,
+                )
+                legality_code = validate_turn_advice_legality(rebuilt, normalized)
+                if legality_code is not TurnAdviceResultCode.VALID:
+                    raise ValueError(sanitized_reason_for(legality_code))
+
+                # ``turn_advices.input_snapshot_id`` has a durable FK against
+                # the legacy ``reviewed_turn_facts`` table (schema v14) --
+                # the rich ``ConfirmedTurnState.confirmed_state_id`` cannot
+                # be stored there without a schema migration, which is out
+                # of this narrow remediation's scope. The rich identity
+                # binding above (job/result/latest-state confirmed_state_id
+                # equality) is what actually authorizes this apply; this
+                # column remains a legacy cross-reference for the existing
+                # reader/export code that already expects it.
+                if session.current_reviewed_board_id is None:
+                    raise DomainError("REVIEWED_TURN_FACTS_REQUIRED_FOR_ADVICE_RECORD")
+                recommended = body.recommended_action
+                action_type = ActionType(recommended.action_type)
+                action_name = recommended.action_name
+                opponent_prediction = body.opponent_prediction.summary
+                rationale = "; ".join(body.reasons)
+                warnings = tuple(body.warnings)
+                advice = TurnAdviceSnapshot(
+                    turn_advice_id=result.result_id,
+                    turn_id=session.current_turn_id,
+                    turn_number=rebuilt.identity.turn_number,
+                    job_id=job.job_id,
+                    input_snapshot_id=session.current_reviewed_board_id,
+                    action_type=action_type,
+                    action_name=action_name,
+                    opponent_prediction=opponent_prediction,
+                    rationale=rationale,
+                    is_mock=source_type != "GEMINI",
+                    source_type=source_type,
+                    model=model,
+                    warnings=warnings,
+                )
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+                TurnAdviceSchemaError,
+                ProviderReadyGateError,
+                DomainError,
+            ):
+                self.repository.audit_result(
+                    result, ResultDisposition.INVALID_REJECTED, "INVALID_PAYLOAD"
+                )
+                self.repository.update_job_status(job.job_id, JobStatus.FAILED)
+                return ResultDisposition.INVALID_REJECTED
+
+            self.repository.append_turn_advice(session.session_id, advice)
+            session.current_turn_advice_id = advice.turn_advice_id
+            session.bump_battle()
+            self.repository.save_session(session)
+            self.repository.update_job_status(job.job_id, JobStatus.SUCCEEDED)
+            self.repository.audit_result(result, ResultDisposition.APPLIED, "BINDING_ACCEPTED")
+        return ResultDisposition.APPLIED
+
+    @staticmethod
+    def _rich_binding_failure_reason(
+        session: BattleSession | None,
+        latest_job: JobEnvelope | None,
+        job: JobEnvelope,
+        result: ResultEnvelope,
+        *,
+        current_identity: TurnIdentity | None,
+        latest_state: ConfirmedTurnState | None,
+    ) -> str | None:
+        """Rich-lane analogue of :meth:`_binding_failure_reason`.
+
+        Binds against the durable latest ``ConfirmedTurnState`` instead of
+        ``session.current_reviewed_board_id`` -- the only difference from
+        the legacy check. Every other binding dimension (job currency,
+        contract/command/job-type, session/match/generation, turn/revision,
+        expected state, request hash) is preserved exactly.
+        """
+
+        checks = (
+            (latest_job is not None and latest_job.job_id == job.job_id, "JOB_ID_NOT_CURRENT"),
+            (
+                job.status in {JobStatus.QUEUED, JobStatus.IN_FLIGHT},
+                "JOB_NOT_ACCEPTING_RESULTS",
+            ),
+            (result.contract_version == job.contract_version, "CONTRACT_VERSION_MISMATCH"),
+            (result.command_id == job.command_id, "COMMAND_ID_MISMATCH"),
+            (result.job_type is job.job_type, "JOB_TYPE_MISMATCH"),
+            (session is not None, "NO_ACTIVE_MATCH"),
+            (session is not None and result.session_id == session.session_id, "SESSION_MISMATCH"),
+            (session is not None and result.match_id == session.match_id, "MATCH_MISMATCH"),
+            (
+                session is not None and result.generation == session.generation,
+                "GENERATION_MISMATCH",
+            ),
+            (
+                current_identity is not None
+                and result.turn_number == job.turn_number
+                and result.turn_number == current_identity.turn_number,
+                "TURN_MISMATCH",
+            ),
+            (
+                session is not None
+                and result.base_battle_revision == session.battle_revision
+                and result.base_battle_revision == job.base_battle_revision,
+                "BATTLE_REVISION_MISMATCH",
+            ),
+            (
+                session is not None
+                and result.expected_state is session.state
+                and result.expected_state is job.expected_state,
+                "EXPECTED_STATE_MISMATCH",
+            ),
+            (
+                latest_state is not None
+                and job.input_snapshot_id == result.input_snapshot_id
+                and result.input_snapshot_id == latest_state.confirmed_state_id,
+                "INPUT_SNAPSHOT_MISMATCH",
+            ),
+            (
+                current_identity is not None
+                and latest_state is not None
+                and latest_state.identity == current_identity,
+                "CONFIRMED_STATE_NOT_CURRENT_BINDING",
+            ),
+            (result.request_payload_hash == job.request_payload_hash, "REQUEST_HASH_MISMATCH"),
+        )
+        for ok, reason in checks:
+            if not ok:
+                return reason
+        return None
 
     def record_actual_action(
         self,

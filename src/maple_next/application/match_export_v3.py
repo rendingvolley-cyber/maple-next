@@ -38,6 +38,7 @@ from maple_next.domain.turn_state import (
     ConfirmedLegalActionSelection,
     ConfirmedTurnState,
     FixedEvidenceMetadata,
+    TurnIdentity,
     field_delta_to_json,
     known_to_json,
     side_delta_to_json,
@@ -59,7 +60,24 @@ _REQUIRED_TOP_LEVEL_KEYS = frozenset(
         "outcome",
         "ended_at_utc",
         "final_battle_revision",
+        "selection",
         "turns",
+        "action_history",
+    }
+)
+
+_REQUIRED_SELECTION_KEYS = frozenset({"self_team", "opponent_team", "selected_three", "lead"})
+
+_REQUIRED_LEGACY_TURN_KEYS = frozenset(
+    {
+        "turn_number",
+        "reviewed_facts",
+        "advice",
+        "self_executed_action",
+        "opponent_executed_action",
+        "action_order",
+        "recorded_at_utc",
+        "actual_action",
     }
 )
 
@@ -115,8 +133,7 @@ class ConfirmedTurnRecord:
     evidence: FixedEvidenceMetadata | None
 
 
-def _identity_to_json(state: ConfirmedTurnState) -> dict[str, Any]:
-    identity = state.identity
+def _identity_to_json(identity: TurnIdentity) -> dict[str, Any]:
     return {
         "session_id": identity.session_id,
         "match_id": identity.match_id,
@@ -131,7 +148,7 @@ def _confirmed_state_to_json(state: ConfirmedTurnState) -> dict[str, Any]:
     return {
         "confirmed_state_id": state.confirmed_state_id,
         "previous_confirmed_state_id": state.previous_confirmed_state_id,
-        "identity": _identity_to_json(state),
+        "identity": _identity_to_json(state.identity),
         "self_side": side_state_to_json(state.self_side),
         "opponent_side": side_state_to_json(state.opponent_side),
         "weather": known_to_json(state.weather),
@@ -148,6 +165,7 @@ def _confirmed_state_to_json(state: ConfirmedTurnState) -> dict[str, Any]:
 def _delta_to_json(delta: ActionResultDelta) -> dict[str, Any]:
     return {
         "delta_id": delta.delta_id,
+        "identity": _identity_to_json(delta.identity),
         "based_on_confirmed_state_id": delta.based_on_confirmed_state_id,
         "self_side": side_delta_to_json(delta.self_side),
         "opponent_side": side_delta_to_json(delta.opponent_side),
@@ -164,8 +182,10 @@ def _delta_to_json(delta: ActionResultDelta) -> dict[str, Any]:
 def _legal_action_to_json(selection: ConfirmedLegalActionSelection) -> dict[str, Any]:
     return {
         "confirmation_id": selection.confirmation_id,
+        "identity": _identity_to_json(selection.identity),
         "action_type": selection.action_type.value,
         "action_name": selection.action_name,
+        "confirmed_by_human": selection.confirmation.confirmed_by_human,
         "confirmed_at_utc": selection.confirmation.confirmed_at_utc,
         "provenance": selection.confirmation.provenance,
         "source_prefill_id": selection.source_prefill_id,
@@ -188,6 +208,8 @@ def build_match_export_v3_payload(
     generation: int,
     outcome: MatchOutcomeRecord,
     turns: tuple[ConfirmedTurnRecord, ...],
+    selection: dict[str, Any] | None = None,
+    action_history: tuple[dict[str, Any], ...] = (),
 ) -> dict[str, Any]:
     """Build the v3 export payload. Fails closed on any identity mismatch.
 
@@ -196,6 +218,13 @@ def build_match_export_v3_payload(
     actions and, when present, evidence and source delta are embedded
     verbatim (per-field knowledge/provenance intact, no backfill, no raw
     bytes/secrets).
+
+    ``selection``/``action_history`` are optional here (this standalone
+    builder predates the repository-backed integration in
+    ``application/match_service.py``, whose payload always supplies real
+    values for both) -- when omitted, a minimal but strictly valid
+    placeholder is used so the result always satisfies
+    :func:`parse_match_export_v3`'s required top-level keys.
     """
 
     if not turns:
@@ -206,8 +235,8 @@ def build_match_export_v3_payload(
         state = record.confirmed_state
         if state.identity.session_id != session_id or state.identity.match_id != match_id:
             raise MatchExportV3Error("V3_EXPORT_TURN_IDENTITY_MISMATCH")
-        for selection in record.confirmed_legal_actions:
-            if selection.identity != state.identity:
+        for legal_action_selection in record.confirmed_legal_actions:
+            if legal_action_selection.identity != state.identity:
                 raise MatchExportV3Error("V3_EXPORT_LEGAL_ACTION_IDENTITY_MISMATCH")
         if record.source_delta is not None and (
             record.source_delta.based_on_confirmed_state_id != state.previous_confirmed_state_id
@@ -249,7 +278,13 @@ def build_match_export_v3_payload(
         "outcome": outcome.outcome.value,
         "ended_at_utc": outcome.ended_at_utc,
         "final_battle_revision": outcome.final_battle_revision,
+        "selection": (
+            selection
+            if selection is not None
+            else {"self_team": [], "opponent_team": [], "selected_three": [], "lead": ""}
+        ),
         "turns": turn_payloads,
+        "action_history": list(action_history),
     }
 
 
@@ -510,9 +545,31 @@ def parse_match_export_v3(raw: bytes) -> dict[str, Any]:
     if forbidden is not None:
         raise MatchExportV3Error(f"V3_EXPORT_FORBIDDEN_KEY:{forbidden}")
 
+    selection = payload["selection"]
+    if not isinstance(selection, dict):
+        raise MatchExportV3Error("V3_EXPORT_SELECTION_MUST_BE_OBJECT")
+    missing_selection = _REQUIRED_SELECTION_KEYS - selection.keys()
+    if missing_selection:
+        raise MatchExportV3Error(f"V3_EXPORT_SELECTION_MISSING_KEYS:{sorted(missing_selection)}")
+
+    if not isinstance(payload["action_history"], list):
+        raise MatchExportV3Error("V3_EXPORT_ACTION_HISTORY_MUST_BE_LIST")
+
     for turn_payload in payload["turns"]:
         if not isinstance(turn_payload, dict):
             raise MatchExportV3Error("V3_EXPORT_TURN_MUST_BE_OBJECT")
+        # A turn carrying the legacy per-turn shape (produced by the
+        # repository-backed integration in application/match_service.py)
+        # must retain every legacy compatibility field. The older,
+        # standalone rich-only turn shape (turn_number/confirmed_turn_state
+        # directly on the turn, no "reviewed_facts") predates that
+        # integration and is validated on its own terms below.
+        if "reviewed_facts" in turn_payload:
+            missing_turn_keys = _REQUIRED_LEGACY_TURN_KEYS - turn_payload.keys()
+            if missing_turn_keys:
+                raise MatchExportV3Error(
+                    f"V3_EXPORT_TURN_MISSING_LEGACY_KEYS:{sorted(missing_turn_keys)}"
+                )
         if "rich_state" in turn_payload:
             _validate_rich_state_block(
                 turn_payload["rich_state"], turn_number=turn_payload.get("turn_number")

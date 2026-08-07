@@ -28,7 +28,17 @@ from maple_next.domain.models import (
     AppliedSelectionSnapshot,
     BattleTurn,
     RecordedAction,
+    ReviewedBoardSnapshot,
     SelectionFacts,
+    StatStages,
+)
+from maple_next.domain.team_build import (
+    CHAMPIONS_BATTLE_FORMAT,
+    CHAMPIONS_GAME,
+    CHAMPIONS_SCHEMA_VERSION,
+    ChampionsPokemonBuild,
+    ChampionsStatPoints,
+    ChampionsTeamBuild,
 )
 from maple_next.domain.turn_state import (
     ActionResultDelta,
@@ -195,7 +205,15 @@ def rich_fixture(tmp_path) -> RichSessionFixture:
     return fixture
 
 
-# --- 1. Legacy byte-equality goldens (captured at the remediation parent) ---
+# --- 1. Legacy byte-equality goldens ----------------------------------------
+#
+# All values below were captured by directly loading
+# ``src/maple_next/providers/turn_request.py`` as it existed at the accepted
+# Bundle A base commit ``4f428a3730631015aedbf981d89f6540d40475ac`` (via
+# ``git show <sha>:<path>`` and ``importlib``, never through the modified
+# implementation) and hashing its actual output. They are therefore golden
+# evidence of the accepted legacy behavior, not newly generated expected
+# output from this remediation's code.
 
 _GOLDEN = {
     "_TURN_INITIAL_PROMPT_sha256": (
@@ -209,7 +227,84 @@ _GOLDEN = {
     ),
     "v1_prompt_sha256": "09c6f0b79b5f22046a74c427544020ecd817dbaa95b649e1da00b274b942ca3e",
     "v1_body_sha256": "7bfe2df4c80b1905697af71183fa4739290808b7798604ebb3f5091ef6c353b8",
+    "v2_canonical_dict_bytes_sha256": (
+        "fa149601cd8b65256b821d54f65c871d3cd651c76e3089c28a28900e91f6099c"
+    ),
+    "v2_prompt_sha256": "fb9f88b9b9cd7a5e5b186ef6382db2dba6010faff92a40c0ac87457b47096889",
+    "v2_body_sha256": "e22a2b004121a2a6d4e548eaf08cff5af14857c7254789808c5c33d10fec561b",
 }
+
+_V2_SELF_TEAM = ("Pikachu", "Gholdengo", "Dragonite", "Dondozo", "Hatterene", "Urshifu")
+
+
+def _v2_member(name: str, index: int) -> ChampionsPokemonBuild:
+    return ChampionsPokemonBuild(
+        pokemon_name=name,
+        moves=(f"{name}-A", f"{name}-B"),
+        held_item=None if index == 0 else f"{name}-item",
+        ability=f"{name}-ability",
+        nature="Serious",
+        stat_points=ChampionsStatPoints(hp=10, speed=10),
+    )
+
+
+def _build_sample_v2_request():
+    """A real, complete v2 request built with an actual ``ChampionsTeamBuild`` fixture.
+
+    Not a mocked or partial v2 shape -- every field
+    ``build_turn_advice_request`` requires for a detailed (v2) request is
+    populated exactly as the accepted Bundle A base would build it.
+    """
+
+    team_build = ChampionsTeamBuild(
+        schema_version=CHAMPIONS_SCHEMA_VERSION,
+        game=CHAMPIONS_GAME,
+        name="Golden team",
+        battle_format=CHAMPIONS_BATTLE_FORMAT,
+        members=tuple(_v2_member(name, index) for index, name in enumerate(_V2_SELF_TEAM)),
+    )
+    snapshot = ReviewedBoardSnapshot(
+        reviewed_board_id="board-v2",
+        turn_id="turn-1",
+        self_active=_V2_SELF_TEAM[0],
+        opponent_active="Garchomp",
+        self_hp=HpBucket.FIFTY_ONE_TO_SIXTY,
+        opponent_hp=HpBucket.UNKNOWN,
+        self_status="NONE",
+        opponent_status="UNKNOWN",
+        self_stages=StatStages(speed=1),
+        opponent_stages=StatStages(defense=-1),
+        weather="RAIN",
+        terrain="UNKNOWN",
+        self_side_effects=("REFLECT",),
+        opponent_side_effects=("STEALTH_ROCK",),
+    )
+    return legacy_turn_request.build_turn_advice_request(
+        session_id="session-v2",
+        match_id="match-v2",
+        generation=7,
+        turn_number=1,
+        battle_revision=12,
+        reviewed_snapshot_id=snapshot.reviewed_board_id,
+        reviewed_snapshot=snapshot,
+        self_active=_V2_SELF_TEAM[0],
+        selected_three=(_V2_SELF_TEAM[0], _V2_SELF_TEAM[1], _V2_SELF_TEAM[2]),
+        legal_actions=(
+            legacy_turn_request.LegalAction(
+                action_id="move-1",
+                action_type=ActionType.MOVE,
+                action_name="Thunderbolt",
+                owner_active=_V2_SELF_TEAM[0],
+            ),
+            legacy_turn_request.LegalAction(
+                action_id="switch-1",
+                action_type=ActionType.SWITCH,
+                action_name=_V2_SELF_TEAM[1],
+                switch_target=_V2_SELF_TEAM[1],
+            ),
+        ),
+        self_team_build=team_build,
+    )
 
 
 def _sha256(data: bytes) -> str:
@@ -243,6 +338,22 @@ def test_legacy_v1_canonical_prompt_body_byte_identical_to_golden() -> None:
         separators=(",", ":"),
     ).encode("utf-8")
     assert _sha256(body_bytes) == _GOLDEN["v1_body_sha256"]
+
+
+def test_legacy_v2_canonical_prompt_body_byte_identical_to_golden() -> None:
+    request = _build_sample_v2_request()
+    assert _sha256(legacy_turn_request.encode_canonical_request(request)) == _GOLDEN[
+        "v2_canonical_dict_bytes_sha256"
+    ]
+    assert _sha256(legacy_turn_request.build_provider_prompt(request).encode("utf-8")) == _GOLDEN[
+        "v2_prompt_sha256"
+    ]
+    body_bytes = json.dumps(
+        legacy_turn_request.build_provider_request_body(request),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert _sha256(body_bytes) == _GOLDEN["v2_body_sha256"]
 
 
 # --- 2. Canonical rich request completeness ----------------------------------
@@ -737,6 +848,9 @@ def test_export_selects_v3_for_rich_state_match(rich_fixture: RichSessionFixture
 # --- 7. Strict v3 parser rejections ------------------------------------------
 
 
+_MINIMAL_SELECTION = {"self_team": [], "opponent_team": [], "selected_three": [], "lead": ""}
+
+
 def test_parser_rejects_forbidden_provider_key() -> None:
     payload = {
         "schema_version": "maple-match.v3",
@@ -746,6 +860,8 @@ def test_parser_rejects_forbidden_provider_key() -> None:
         "outcome": "WIN",
         "ended_at_utc": CONFIRMED_AT,
         "final_battle_revision": 1,
+        "selection": _MINIMAL_SELECTION,
+        "action_history": [],
         "turns": [{"turn_number": 1, "api_key": "secret"}],
     }
     with pytest.raises(MatchExportV3Error, match="FORBIDDEN_KEY"):
@@ -761,6 +877,8 @@ def test_parser_rejects_unknown_carrying_value() -> None:
         "outcome": "WIN",
         "ended_at_utc": CONFIRMED_AT,
         "final_battle_revision": 1,
+        "selection": _MINIMAL_SELECTION,
+        "action_history": [],
         "turns": [
             {
                 "turn_number": 1,

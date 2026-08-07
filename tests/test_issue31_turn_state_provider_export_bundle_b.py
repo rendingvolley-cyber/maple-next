@@ -428,6 +428,45 @@ def test_bridge_pure_builder_has_no_dispatch_decision_parameter() -> None:
     assert "dispatch_decision" not in parameters
 
 
+def test_decide_turn_advice_dispatch_denies_retry_trigger_for_rich_lane() -> None:
+    """Restores the original denied-retry-trigger assertion at its true source.
+
+    The pure builder above no longer accepts a ``DispatchDecision`` at all
+    (see ``test_bridge_pure_builder_has_no_dispatch_decision_parameter``) --
+    dispatch authorization, including this exact denial, now lives
+    exclusively in ``BattleApplication.request_rich_turn_advice``, which
+    calls :func:`decide_turn_advice_dispatch` internally exactly once. This
+    test pins the underlying policy the rich lane depends on, so the
+    original safety assertion is preserved rather than dropped.
+    """
+
+    denied = decide_turn_advice_dispatch(
+        trigger=DispatchTrigger.RETRY,
+        is_current_binding=True,
+        has_pending_job=False,
+        attempt_consumed=False,
+    )
+    assert not denied.allowed
+    assert denied.reason_code == "DENY_TRIGGER_NOT_TRUSTED_HUMAN_ACTIVATION"
+
+
+def test_decide_turn_advice_dispatch_denies_attempt_already_consumed_for_rich_lane() -> None:
+    """Restores the original denied-attempt-consumed assertion at its true source.
+
+    See :func:`test_decide_turn_advice_dispatch_denies_retry_trigger_for_rich_lane`
+    for why this moved out of the pure builder.
+    """
+
+    denied = decide_turn_advice_dispatch(
+        trigger=DispatchTrigger.TRUSTED_HUMAN_ACTIVATION,
+        is_current_binding=True,
+        has_pending_job=False,
+        attempt_consumed=True,
+    )
+    assert not denied.allowed
+    assert denied.reason_code == "DENY_ATTEMPT_ALREADY_CONSUMED"
+
+
 def test_bridge_fails_closed_on_newer_open_draft() -> None:
     state = _confirmed_state()
     newer_draft = NextTurnStateDraft(

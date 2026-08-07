@@ -22,11 +22,11 @@ from maple_next.providers.turn_transport import (
     load_authorized_turn_provider_config_from_env,
 )
 from maple_next.runtime_env import bootstrap_repo_root_dotenv
+from maple_next.ui.battle_record_ui import BattleRecordUiWindow
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
 from maple_next.ui.gemini_turn_advice import GeminiTurnAdviceAdapter
-from maple_next.ui.match_controller import MatchFlowController
-from maple_next.ui.turn_snapshot_official_window import TurnSnapshotMatchFlowWindow
+from maple_next.ui.turn_state_flow import GeminiRichTurnAdviceAdapter, TurnStateFlowController
 
 
 def repository_root() -> Path:
@@ -57,6 +57,19 @@ def build_turn_gemini_adapter() -> GeminiTurnAdviceAdapter:
     """Build the fail-closed production Turn Advice adapter."""
 
     return GeminiTurnAdviceAdapter(
+        GeminiTurnAdviceTransport(),
+        load_authorized_turn_provider_config_from_env,
+    )
+
+
+def build_rich_turn_gemini_adapter() -> GeminiRichTurnAdviceAdapter:
+    """Build the fail-closed production rich-state Turn Advice adapter.
+
+    Same production transport/config source as the legacy adapter above --
+    this is the same authorized real-provider seam, not a second one.
+    """
+
+    return GeminiRichTurnAdviceAdapter(
         GeminiTurnAdviceTransport(),
         load_authorized_turn_provider_config_from_env,
     )
@@ -98,7 +111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         battle_application = MatchApplication(repository, export_directory)
         battle_application.recover_after_restart()
-        controller = MatchFlowController(
+        controller = TurnStateFlowController(
             battle_application,
             repository,
             MockSelectionAdviceAdapter(),
@@ -107,8 +120,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 load_selection_provider_config_from_env,
             ),
             turn_gemini_adapter=build_turn_gemini_adapter(),
+            rich_turn_gemini_adapter=build_rich_turn_gemini_adapter(),
         )
-        window = TurnSnapshotMatchFlowWindow(
+        window = BattleRecordUiWindow(
             controller,
             ocr_data_directory=ocr_data_directory,
         )

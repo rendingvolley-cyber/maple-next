@@ -557,19 +557,19 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._center_column_layout.addWidget(self.action_result_delta_group)
         self._right_column_layout.insertWidget(0, self.rich_gemini_group)
 
+        # Only left (confirmed log) and right (Gemini detail) get their own
+        # scroll container -- center is the primary work area and must never
+        # scroll as a whole (spec Bundle C section 2/4).
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setWidget(left_container)
-        center_scroll = QScrollArea()
-        center_scroll.setWidgetResizable(True)
-        center_scroll.setWidget(center_container)
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
         right_scroll.setWidget(right_container)
 
         body_row = QHBoxLayout()
         body_row.addWidget(left_scroll, 18)
-        body_row.addWidget(center_scroll, 52)
+        body_row.addWidget(center_container, 52)
         body_row.addWidget(right_scroll, 30)
 
         bottom_bar = QWidget()

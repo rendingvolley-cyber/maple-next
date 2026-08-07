@@ -589,21 +589,39 @@ class TurnStateFlowController(MatchFlowController):
     # -- NEXT TURN + draft derivation ------------------------------------------
 
     def next_turn(self) -> OperatorView:
-        """Advance the legacy Turn, then derive+persist the Bundle A draft.
+        """Advance the legacy Turn, then attempt to derive+persist a Bundle A draft.
 
-        Uses the accepted pure :func:`derive_next_turn_state_draft`. The
-        draft's identity uses the *real* new ``turn_id``/``turn_number``
-        (from the legacy :meth:`next_turn` transition) but a synthetic
-        ``battle_revision = previous_confirmed_state.identity.battle_revision
-        + 1``, because the legacy ``confirm_turn_facts``/
-        ``record_actual_action``/``next_turn`` sequence bumps the session's
-        real revision counter three times per Turn while the accepted
-        Bundle A chain-binding rule requires exactly one bump between a
-        confirmed state and its derived draft. This does not weaken any
-        accepted check: the "newer open draft" provider-ready gate compares
-        by ``turn_number`` first, and a stale draft is never looked up by
-        anything other than its own ``based_on_confirmed_state_id`` once a
-        real ``ConfirmedTurnState`` for the new Turn is confirmed.
+        KNOWN DESIGN_CONFLICT (00 comment 5217523903): this uses only the
+        *durable* session identity (real ``turn_id``/``turn_number``/
+        ``battle_revision`` as of right after the legacy :meth:`next_turn`
+        transition) -- no fabricated/synthetic revision is ever
+        constructed. The accepted :func:`derive_next_turn_state_draft` ->
+        :func:`_bind_next_identity` requires
+        ``next_identity.battle_revision == previous_confirmed_state.identity.
+        battle_revision + 1`` *exactly*. The accepted legacy
+        ``confirm_turn_facts``/``apply_rich_turn_advice_result``/
+        ``record_actual_action``/``next_turn`` sequence each call
+        ``session.bump_battle()`` unconditionally, so at least 3 durable
+        bumps normally separate a Turn's ``ConfirmedTurnState`` (persisted
+        right after ``confirm_turn_facts``, which is also the earliest point
+        a durable state can exist for the Bundle B provider-ready gate) from
+        the real session revision once :meth:`next_turn` completes -- not
+        exactly 1. Using the real durable revision therefore makes the
+        ``+1`` invariant fail in the normal case, not just an edge case.
+
+        This method does not invent a replacement identity scheme (e.g.
+        re-stamping an intermediate ``ConfirmedTurnState`` on every bump) to
+        paper over that gap -- that would be a Bundle A usage-pattern change
+        this narrow remediation is not authorized to make. Instead it relies
+        on :func:`derive_next_turn_state_draft`'s own existing fail-closed
+        behavior: on ``TurnStateError`` (which now includes the ordinary
+        ``REVISION_MISMATCH`` case), no draft is persisted and the legacy
+        Turn advancement itself still completes and is returned unchanged.
+        Draft auto-derivation is consequently a no-op under the current
+        legacy bump pattern; resolving that durably requires a decision this
+        adapter cannot make unilaterally (relax the Bundle A ``+1`` rule to
+        "> previous", or intentionally re-stamp ``ConfirmedTurnState`` at
+        each accepted bump point, or something else).
         """
 
         identity_before = self._safe_current_identity()
@@ -630,13 +648,15 @@ class TurnStateFlowController(MatchFlowController):
         if session is None or session.current_turn_id is None:
             return view
         new_turn = self._repository.get_turn(session.current_turn_id)
+        # Durable only: the real, current session identity -- never a
+        # fabricated "previous + 1". See the DESIGN_CONFLICT note above.
         next_identity = TurnIdentity(
-            session_id=latest_state.identity.session_id,
-            match_id=latest_state.identity.match_id,
-            generation=latest_state.identity.generation,
+            session_id=session.session_id,
+            match_id=session.match_id,
+            generation=session.generation,
             turn_id=new_turn.turn_id,
             turn_number=new_turn.turn_number,
-            battle_revision=latest_state.identity.battle_revision + 1,
+            battle_revision=session.battle_revision,
         )
         try:
             draft = derive_next_turn_state_draft(

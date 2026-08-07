@@ -326,7 +326,20 @@ def test_duplicate_gemini_activation_while_in_flight_is_blocked(tmp_path: Path) 
 # --- action + result delta, NEXT TURN, draft lifecycle ----------------------
 
 
-def test_record_action_persists_delta_and_next_turn_derives_draft(tmp_path: Path) -> None:
+def test_record_action_persists_delta_and_next_turn_advances_with_durable_identity_only(
+    tmp_path: Path,
+) -> None:
+    """NEXT TURN always advances the legacy Turn using only durable identity.
+
+    DESIGN_CONFLICT (00 comment 5217523903): draft auto-derivation is a
+    documented no-op under the current legacy bump pattern -- see the
+    docstring on ``TurnStateFlowController.next_turn``. This test proves
+    the *durable-identity-only* behavior: no draft is fabricated with an
+    invented revision, NEXT TURN itself still succeeds, and the confirmed
+    state correctly becomes non-provider-ready (IDENTITY_MISMATCH) once the
+    real session identity has moved on.
+    """
+
     repository, controller, window, transport = build_window(tmp_path)
     _advance_to_turn_capture_pending(controller)
     window.render_view()
@@ -354,12 +367,17 @@ def test_record_action_persists_delta_and_next_turn_derives_draft(tmp_path: Path
 
     window._on_next_turn()
     next_view = controller.refresh()
+    # NEXT TURN itself (the legacy state-machine transition) still succeeds
+    # even though the Bundle A draft could not be derived durably.
     assert next_view.projection.session_state == "TURN_CAPTURE_PENDING"
+    assert next_view.error_message is None
+
     summary_after_next = controller.turn_state_summary()
-    assert summary_after_next.open_draft is not None
+    # No draft is fabricated with an invented revision -- fail closed, not
+    # silently "working" with a fake identity.
+    assert summary_after_next.open_draft is None
     # The old ConfirmedTurnState[T] is still the latest row for this
-    # session, but it is now bound to a superseded (T, not T+1) identity --
-    # a fresh draft is never provider-ready until the human re-confirms it.
+    # session, but it is now bound to a superseded (T, not T+1) identity.
     assert summary_after_next.confirmed_state is not None
     assert summary_after_next.confirmed_state.identity != summary_after_next.identity
     assert summary_after_next.provider_ready is False
@@ -367,9 +385,14 @@ def test_record_action_persists_delta_and_next_turn_derives_draft(tmp_path: Path
     repository.close()
 
 
-def test_draft_never_shown_as_confirmed_and_gemini_disabled_until_reconfirm(
+def test_current_state_editor_shows_no_draft_carry_forward_after_next_turn(
     tmp_path: Path,
 ) -> None:
+    """Companion to the DESIGN_CONFLICT test above: the draft banner/carry-
+    forward prefill never appears, because no draft was ever persisted --
+    the panel must not fabricate a "draft exists" UI state either.
+    """
+
     repository, controller, window, _transport = build_window(tmp_path)
     _advance_to_turn_capture_pending(controller)
     window.render_view()
@@ -387,14 +410,13 @@ def test_draft_never_shown_as_confirmed_and_gemini_disabled_until_reconfirm(
     window._on_next_turn()
 
     window.render_view()
-    assert window.current_state_draft_label.isHidden() is False
-    # The draft's SELF active carried forward into the (still unconfirmed)
-    # editor widgets -- but no new ConfirmedTurnState for this new identity
-    # exists yet, so the panel must not present it as confirmed.
     summary = controller.turn_state_summary()
-    assert summary.open_draft is not None
+    assert summary.open_draft is None
+    assert window.current_state_draft_label.isHidden() is True
+    # Session is back to needing a fresh, fully human-entered current state
+    # for the new Turn -- not provider-ready until re-confirmed.
     assert summary.confirmed_state is not None
-    assert summary.confirmed_state.identity != summary.open_draft.identity
+    assert summary.confirmed_state.identity != summary.identity
     assert summary.provider_ready is False
     repository.close()
 

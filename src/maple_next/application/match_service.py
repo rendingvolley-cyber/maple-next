@@ -387,17 +387,22 @@ class MatchApplication(BattleApplication):
             if turn.turn_number != state.identity.turn_number:
                 raise DomainError("V3_EXPORT_STATE_TURN_NUMBER_MISMATCH")
 
+        # Candidate deltas are loaded by based_on_confirmed_state_id alone
+        # (never pre-filtered by the delta's own session/match/generation/
+        # turn/revision, since those columns are themselves under
+        # validation below) so a corrupt or foreign delta that references
+        # one of our exported states cannot disappear before
+        # validate_delta_chain_for_export ever sees it.
+        delta_candidates = self.repository.list_action_result_delta_candidates_for_confirmed_states(
+            tuple(state.confirmed_state_id for state in confirmed_states)
+        )
         try:
             delta_by_based_on = validate_delta_chain_for_export(
                 session_id=session.session_id,
                 match_id=session.match_id,
                 generation=session.generation,
                 confirmed_states=confirmed_states,
-                deltas=self.repository.list_action_result_deltas_for_match(
-                    session_id=session.session_id,
-                    match_id=session.match_id,
-                    generation=session.generation,
-                ),
+                deltas=delta_candidates,
             )
         except MatchExportV3Error as exc:
             raise DomainError(f"V3_EXPORT_DELTA_VALIDATION_FAILED:{exc}") from exc

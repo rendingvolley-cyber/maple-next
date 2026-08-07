@@ -301,6 +301,37 @@ class TurnStateStoreMixin(StoreBase):
         ).fetchall()
         return tuple(self._action_result_delta_from_row(row) for row in rows)
 
+    def list_action_result_delta_candidates_for_confirmed_states(
+        self, confirmed_state_ids: tuple[str, ...]
+    ) -> tuple[ActionResultDelta, ...]:
+        """Every delta claiming to be based on any of ``confirmed_state_ids`` -- validation only.
+
+        Deliberately keyed *only* on ``based_on_confirmed_state_id`` --
+        never pre-filtered by the delta's own ``session_id``/``match_id``/
+        ``generation``/``turn_id``/``turn_number``/``battle_revision``,
+        since those columns are themselves under validation by
+        ``validate_delta_chain_for_export``. A delta whose
+        ``based_on_confirmed_state_id`` genuinely references one of the
+        exported states but whose other identity columns are corrupted or
+        foreign must still be returned here so the validator can reject it,
+        rather than disappearing before validation ever sees it. A delta
+        belonging only to a genuinely unrelated confirmed state (not in
+        ``confirmed_state_ids``) is correctly excluded.
+        """
+
+        if not confirmed_state_ids:
+            return ()
+        placeholders = ",".join("?" for _ in confirmed_state_ids)
+        rows = self.connection.execute(
+            f"""
+            SELECT * FROM action_result_deltas
+            WHERE based_on_confirmed_state_id IN ({placeholders})
+            ORDER BY turn_number ASC, battle_revision ASC, rowid ASC
+            """,
+            confirmed_state_ids,
+        ).fetchall()
+        return tuple(self._action_result_delta_from_row(row) for row in rows)
+
     # --- Next-turn drafts (upsert scoped to session/turn/revision) --------
 
     def upsert_next_turn_state_draft(self, draft: NextTurnStateDraft) -> None:

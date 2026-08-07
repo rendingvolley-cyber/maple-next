@@ -109,6 +109,12 @@ _FORBIDDEN_KEYS = frozenset(
         "base64",
         "generationConfig",
         "contents",
+        "credential",
+        "credentials",
+        "secret",
+        "secrets",
+        "evidence_bytes",
+        "evidence_base64",
     }
 )
 
@@ -771,7 +777,25 @@ def _evidence_from_json(payload: Any, *, turn_number: object) -> FixedEvidenceMe
         raise MatchExportV3Error(f"V3_EXPORT_{label}_INVALID_EVIDENCE:{exc}") from exc
 
 
-def _validate_rich_state_block(block: Any, *, turn_number: object) -> None:
+@dataclass(frozen=True, slots=True)
+class _ReconstructedRichTurn:
+    """Bundle A objects reconstructed from one turn's ``rich_state`` block.
+
+    Returned by :func:`_validate_rich_state_block` so
+    :func:`parse_match_export_v3` can additionally validate the full
+    document as one canonical chain, not just each turn in isolation.
+    """
+
+    legacy_turn_number: object
+    state: ConfirmedTurnState
+    delta: ActionResultDelta | None
+    legal_actions: tuple[ConfirmedLegalActionSelection, ...]
+    evidence: FixedEvidenceMetadata | None
+
+
+def _validate_rich_state_block(
+    block: Any, *, turn_number: object
+) -> _ReconstructedRichTurn:
     """Strictly reconstruct every Bundle A object embedded in this rich turn.
 
     Delegates to the real domain constructors and codecs
@@ -782,7 +806,8 @@ def _validate_rich_state_block(block: Any, *, turn_number: object) -> None:
     own invariants participate in validation, rather than re-implementing a
     parallel, weaker subset. Also rejects any unexpected key in every fixed
     structure and cross-validates identity across the confirmed state,
-    delta, legal actions, and evidence within this one turn.
+    delta, legal actions, and evidence within this one turn. Returns the
+    reconstructed objects for full-document validation by the caller.
     """
 
     _reject_unexpected_keys(
@@ -835,12 +860,123 @@ def _validate_rich_state_block(block: Any, *, turn_number: object) -> None:
             ) from exc
 
     evidence_payload = block["evidence"]
+    evidence: FixedEvidenceMetadata | None = None
     if evidence_payload is not None:
         evidence = _evidence_from_json(evidence_payload, turn_number=turn_number)
         if state.evidence_id != evidence.evidence_id:
             raise MatchExportV3Error(
                 f"V3_EXPORT_RICH_STATE_EVIDENCE_ID_MISMATCH:turn={turn_number}"
             )
+    elif state.evidence_id is not None:
+        raise MatchExportV3Error(
+            f"V3_EXPORT_RICH_STATE_EVIDENCE_REQUIRED_BUT_ABSENT:turn={turn_number}"
+        )
+
+    return _ReconstructedRichTurn(
+        legacy_turn_number=turn_number,
+        state=state,
+        delta=delta,
+        legal_actions=legal_actions,
+        evidence=evidence,
+    )
+
+
+def _validate_full_document_rich_chain(
+    *,
+    session_id: str,
+    match_id: str,
+    generation: int,
+    final_battle_revision: int,
+    records: tuple[_ReconstructedRichTurn, ...],
+) -> None:
+    """Validate every repository-integrated rich turn as one canonical chain.
+
+    Runs after each individual turn's ``rich_state`` block has already
+    been reconstructed and validated in isolation
+    (:func:`_validate_rich_state_block`). This pass catches cross-turn
+    contradictions that per-turn validation cannot see: a state that
+    belongs to a foreign session/match/generation, a legacy
+    ``turn_number`` that doesn't match the embedded state's own identity,
+    duplicate/ambiguous state or delta identity across the whole document,
+    a broken ``previous_confirmed_state_id`` chain between adjacent
+    exported turns, an invalid turn/revision progression, a revision
+    beyond ``final_battle_revision``, or a foreign delta/legal-action
+    smuggled into an otherwise-valid turn.
+    """
+
+    if not records:
+        return
+
+    ordered = sorted(records, key=lambda record: record.state.identity.turn_number)
+
+    seen_state_ids: set[str] = set()
+    seen_turn_numbers: set[int] = set()
+    seen_delta_ids: set[str] = set()
+    seen_delta_chain_positions: set[str] = set()
+    previous_state: ConfirmedTurnState | None = None
+
+    for record in ordered:
+        state = record.state
+        identity = state.identity
+
+        if (
+            identity.session_id != session_id
+            or identity.match_id != match_id
+            or identity.generation != generation
+        ):
+            raise MatchExportV3Error("V3_EXPORT_DOCUMENT_STATE_FOREIGN_IDENTITY")
+
+        if identity.turn_number != record.legacy_turn_number:
+            raise MatchExportV3Error("V3_EXPORT_DOCUMENT_LEGACY_TURN_NUMBER_MISMATCH")
+
+        if state.confirmed_state_id in seen_state_ids:
+            raise MatchExportV3Error("V3_EXPORT_DOCUMENT_DUPLICATE_STATE_ID")
+        seen_state_ids.add(state.confirmed_state_id)
+
+        if identity.turn_number in seen_turn_numbers:
+            raise MatchExportV3Error("V3_EXPORT_DOCUMENT_DUPLICATE_STATE_TURN_POSITION")
+        seen_turn_numbers.add(identity.turn_number)
+
+        if identity.battle_revision > final_battle_revision:
+            raise MatchExportV3Error("V3_EXPORT_DOCUMENT_STATE_BEYOND_FINAL_REVISION")
+
+        delta = record.delta
+        if delta is not None:
+            delta_identity = delta.identity
+            if (
+                delta_identity.session_id != session_id
+                or delta_identity.match_id != match_id
+                or delta_identity.generation != generation
+            ):
+                raise MatchExportV3Error("V3_EXPORT_DOCUMENT_DELTA_FOREIGN_IDENTITY")
+            if delta.based_on_confirmed_state_id != state.confirmed_state_id:
+                raise MatchExportV3Error("V3_EXPORT_DOCUMENT_DELTA_BASED_ON_MISMATCH")
+            if delta.delta_id in seen_delta_ids:
+                raise MatchExportV3Error("V3_EXPORT_DOCUMENT_DUPLICATE_DELTA_ID")
+            seen_delta_ids.add(delta.delta_id)
+            if delta.based_on_confirmed_state_id in seen_delta_chain_positions:
+                raise MatchExportV3Error("V3_EXPORT_DOCUMENT_AMBIGUOUS_DELTA_CHAIN_POSITION")
+            seen_delta_chain_positions.add(delta.based_on_confirmed_state_id)
+            if delta_identity.battle_revision > final_battle_revision:
+                raise MatchExportV3Error("V3_EXPORT_DOCUMENT_DELTA_BEYOND_FINAL_REVISION")
+
+        for action in record.legal_actions:
+            action_identity = action.identity
+            if (
+                action_identity.session_id != session_id
+                or action_identity.match_id != match_id
+                or action_identity.generation != generation
+            ):
+                raise MatchExportV3Error("V3_EXPORT_DOCUMENT_LEGAL_ACTION_FOREIGN_IDENTITY")
+
+        if previous_state is not None:
+            if state.previous_confirmed_state_id != previous_state.confirmed_state_id:
+                raise MatchExportV3Error("V3_EXPORT_DOCUMENT_BROKEN_PREVIOUS_STATE_LINKAGE")
+            if identity.turn_number != previous_state.identity.turn_number + 1:
+                raise MatchExportV3Error("V3_EXPORT_DOCUMENT_INVALID_TURN_PROGRESSION")
+            if identity.battle_revision != previous_state.identity.battle_revision + 1:
+                raise MatchExportV3Error("V3_EXPORT_DOCUMENT_INVALID_REVISION_PROGRESSION")
+        previous_state = state
 
 
 def parse_match_export_v3(raw: bytes) -> dict[str, Any]:
@@ -848,10 +984,17 @@ def parse_match_export_v3(raw: bytes) -> dict[str, Any]:
 
     When any turn carries a ``rich_state`` block, that block is validated
     recursively (required sub-keys, knowledge/delta invariants, evidence
-    hash shape, no duplicate legal actions). The full payload is also
-    scanned recursively for a forbidden provider/prompt/header/credential
-    key -- a raw provider request/response, prompt text, or embedded image
-    bytes/base64 fails the parse closed.
+    hash shape, no duplicate legal actions). Once every rich turn has been
+    reconstructed, a second full-document pass
+    (:func:`_validate_full_document_rich_chain`) validates the whole
+    document as one canonical chain: top-level identity against every
+    state/delta/legal-action, legacy turn_number against the embedded
+    state, state/delta uniqueness, the previous-state chain across
+    adjacent exported turns, turn/revision progression, and the final
+    revision bound. The full payload is also scanned recursively for a
+    forbidden provider/prompt/header/credential key -- a raw provider
+    request/response, prompt text, or embedded image bytes/base64 fails
+    the parse closed.
     """
 
     try:
@@ -880,6 +1023,7 @@ def parse_match_export_v3(raw: bytes) -> dict[str, Any]:
     if not isinstance(payload["action_history"], list):
         raise MatchExportV3Error("V3_EXPORT_ACTION_HISTORY_MUST_BE_LIST")
 
+    rich_records: list[_ReconstructedRichTurn] = []
     for turn_payload in payload["turns"]:
         if not isinstance(turn_payload, dict):
             raise MatchExportV3Error("V3_EXPORT_TURN_MUST_BE_OBJECT")
@@ -896,9 +1040,19 @@ def parse_match_export_v3(raw: bytes) -> dict[str, Any]:
                     f"V3_EXPORT_TURN_MISSING_LEGACY_KEYS:{sorted(missing_turn_keys)}"
                 )
         if "rich_state" in turn_payload:
-            _validate_rich_state_block(
-                turn_payload["rich_state"], turn_number=turn_payload.get("turn_number")
+            rich_records.append(
+                _validate_rich_state_block(
+                    turn_payload["rich_state"], turn_number=turn_payload.get("turn_number")
+                )
             )
+
+    _validate_full_document_rich_chain(
+        session_id=str(payload["session_id"]),
+        match_id=str(payload["match_id"]),
+        generation=int(payload["generation"]),
+        final_battle_revision=int(payload["final_battle_revision"]),
+        records=tuple(rich_records),
+    )
     return payload
 
 

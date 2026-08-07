@@ -54,7 +54,7 @@ from maple_next.ui.turn_snapshot_official_window import TurnSnapshotMatchFlowWin
 from maple_next.ui.turn_state_flow import TurnStateFlowController, TurnStateSummaryView
 
 _BATTLE_RECORD_TAB_INDEX = 1
-_PREVIEW_MAX_HEIGHT = 96
+_PREVIEW_MAX_HEIGHT = 64
 _HUMAN_INPUT = (ProvenanceStep.HUMAN_INPUT,)
 
 _STAGE_FIELDS: tuple[tuple[str, str], ...] = (
@@ -196,16 +196,16 @@ class _KnownSideEffectsField(QWidget):
 class _DeltaIntField(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        layout = QVBoxLayout(self)
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(1)
         self.mode_box = QComboBox()
         self.mode_box.addItems(["UNKNOWN", "UNCHANGED", "CHANGED"])
-        self.mode_box.setMaximumWidth(90)
+        self.mode_box.setMaximumWidth(64)
         self.spin = QSpinBox()
         self.spin.setRange(-6, 6)
         self.spin.setEnabled(False)
-        self.spin.setMaximumWidth(90)
+        self.spin.setMaximumWidth(40)
         self.mode_box.currentTextChanged.connect(
             lambda text: self.spin.setEnabled(text == "CHANGED")
         )
@@ -309,13 +309,13 @@ def _add_compact_stage_grid(
     """4-columns-wide label-over-field grid -- ~2 rows instead of 7."""
 
     grid = QGridLayout()
-    grid.setHorizontalSpacing(4)
-    grid.setVerticalSpacing(2)
+    grid.setHorizontalSpacing(3)
+    grid.setVerticalSpacing(0)
     columns = 4
     for index, (key, label) in enumerate(stage_names):
         row, col = divmod(index, columns)
         label_widget = QLabel(label)
-        label_widget.setStyleSheet("font-size: 10px;")
+        label_widget.setStyleSheet("font-size: 9px;")
         grid.addWidget(label_widget, row * 2, col)
         grid.addWidget(fields[key], row * 2 + 1, col)
     layout.addLayout(grid)
@@ -327,20 +327,20 @@ class _SideStateEditor(QGroupBox):
     def __init__(self, title: str) -> None:
         super().__init__(title)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(1)
         status_row = QHBoxLayout()
         status_row.addWidget(QLabel("状態異常"))
         self.status_field = _KnownTextField("burn / paralysis")
         status_row.addWidget(self.status_field, 1)
+        status_row.addWidget(QLabel("その他"))
+        self.side_effects_field = _KnownSideEffectsField()
+        status_row.addWidget(self.side_effects_field, 1)
         layout.addLayout(status_row)
         self.stage_fields: dict[str, _KnownIntField] = {}
         for key, _label in _STAGE_FIELDS:
             self.stage_fields[key] = _KnownIntField()
         _add_compact_stage_grid(layout, self.stage_fields, _STAGE_FIELDS)
-        side_effects_row = QHBoxLayout()
-        side_effects_row.addWidget(QLabel("その他"))
-        self.side_effects_field = _KnownSideEffectsField()
-        side_effects_row.addWidget(self.side_effects_field, 1)
-        layout.addLayout(side_effects_row)
 
     def to_side_state(self, *, active: Known[str], hp_bucket: Known[HpBucket]) -> SideState:
         return SideState(
@@ -381,30 +381,28 @@ class _SideDeltaEditor(QGroupBox):
     def __init__(self, title: str) -> None:
         super().__init__(title)
         layout = QVBoxLayout(self)
-        active_row = QHBoxLayout()
-        active_row.addWidget(QLabel("active"))
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(1)
+        active_hp_row = QHBoxLayout()
+        active_hp_row.addWidget(QLabel("active"))
         self.active_field = _DeltaTextField("変更時のみ")
-        active_row.addWidget(self.active_field, 1)
-        layout.addLayout(active_row)
-        hp_row = QHBoxLayout()
-        hp_row.addWidget(QLabel("HP bucket"))
+        active_hp_row.addWidget(self.active_field, 1)
+        active_hp_row.addWidget(QLabel("HP"))
         self.hp_field = _DeltaHpField()
-        hp_row.addWidget(self.hp_field, 1)
-        layout.addLayout(hp_row)
+        active_hp_row.addWidget(self.hp_field, 1)
+        layout.addLayout(active_hp_row)
         status_row = QHBoxLayout()
         status_row.addWidget(QLabel("状態異常"))
         self.status_field = _DeltaTextField("変更時のみ")
         status_row.addWidget(self.status_field, 1)
+        status_row.addWidget(QLabel("その他"))
+        self.side_effects_field = _DeltaSideEffectsField()
+        status_row.addWidget(self.side_effects_field, 1)
         layout.addLayout(status_row)
         self.stage_fields: dict[str, _DeltaIntField] = {}
         for key, _label in _STAGE_FIELDS:
             self.stage_fields[key] = _DeltaIntField()
         _add_compact_stage_grid(layout, self.stage_fields, _STAGE_FIELDS)
-        side_effects_row = QHBoxLayout()
-        side_effects_row.addWidget(QLabel("その他"))
-        self.side_effects_field = _DeltaSideEffectsField()
-        side_effects_row.addWidget(self.side_effects_field, 1)
-        layout.addLayout(side_effects_row)
 
     def to_side_delta(self) -> SideDelta:
         return SideDelta(
@@ -470,6 +468,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
     def _build_bundle_c_state_widgets(self) -> None:
         self.current_state_group = QGroupBox("現在のTurn state — 人間が確認・修正")
         state_layout = QVBoxLayout(self.current_state_group)
+        state_layout.setContentsMargins(2, 2, 2, 2)
+        state_layout.setSpacing(0)
         self.current_state_draft_label = QLabel()
         self.current_state_draft_label.setWordWrap(True)
         self.current_state_draft_label.setStyleSheet("color: #b45309; font-weight: 600;")
@@ -486,11 +486,14 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.current_state_editor_container = QWidget()
         editor_layout = QVBoxLayout(self.current_state_editor_container)
         editor_layout.setContentsMargins(0, 0, 0, 0)
-        top_row = QFormLayout()
-        self.weather_field = _KnownTextField("天候 (例: sun / rain)")
-        self.terrain_field = _KnownTextField("フィールド (例: electric_terrain)")
-        top_row.addRow("天候", self.weather_field)
-        top_row.addRow("フィールド", self.terrain_field)
+        editor_layout.setSpacing(2)
+        top_row = QHBoxLayout()
+        self.weather_field = _KnownTextField("天候 (sun/rain)")
+        self.terrain_field = _KnownTextField("フィールド")
+        top_row.addWidget(QLabel("天候"))
+        top_row.addWidget(self.weather_field, 1)
+        top_row.addWidget(QLabel("フィールド"))
+        top_row.addWidget(self.terrain_field, 1)
         editor_layout.addLayout(top_row)
         sides_row = QHBoxLayout()
         self.self_state_editor = _SideStateEditor("自分")
@@ -504,11 +507,15 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             "ActionResultDelta — CHANGED / UNCHANGED / UNKNOWN を明示"
         )
         delta_layout = QVBoxLayout(self.action_result_delta_group)
-        delta_top_row = QFormLayout()
+        delta_layout.setContentsMargins(2, 2, 2, 2)
+        delta_layout.setSpacing(0)
+        delta_top_row = QHBoxLayout()
         self.weather_delta_field = _DeltaTextField("天候（変更時のみ）")
         self.terrain_delta_field = _DeltaTextField("フィールド（変更時のみ）")
-        delta_top_row.addRow("天候", self.weather_delta_field)
-        delta_top_row.addRow("フィールド", self.terrain_delta_field)
+        delta_top_row.addWidget(QLabel("天候"))
+        delta_top_row.addWidget(self.weather_delta_field, 1)
+        delta_top_row.addWidget(QLabel("フィールド"))
+        delta_top_row.addWidget(self.terrain_delta_field, 1)
         delta_layout.addLayout(delta_top_row)
         delta_sides_row = QHBoxLayout()
         self.self_delta_editor = _SideDeltaEditor("自分の結果")
@@ -533,6 +540,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         status_frame = self.application_mode_label.parentWidget()
         assert status_frame is not None
         outer_layout.removeWidget(status_frame)
+        # Shared (both-tabs) outer chrome starts at a very roomy 24px
+        # margin / 16px spacing -- tighten it so the fixed header above
+        # the 3-column body doesn't eat into the 720px budget.
+        outer_layout.setContentsMargins(8, 8, 8, 8)
+        outer_layout.setSpacing(4)
 
         left_container = self._left_column_layout.parentWidget()
         center_container = self._center_column_layout.parentWidget()
@@ -555,6 +567,38 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.next_turn_button.setText("NEXT TURN")
         if gemini_send_button is not None:
             gemini_send_button.setText("Gemini送信")
+
+        # Compact 2-column reflow: same widgets, same signal wiring, just
+        # laid out 2-per-row instead of 1-per-row so the fixed,
+        # non-scrolling center column can fit 1280x720/1440x900.
+        switch_widget = self.switch_checkboxes[0].parentWidget()
+        turn_facts_form = self.turn_facts_group.layout()
+        if isinstance(turn_facts_form, QFormLayout) and switch_widget is not None:
+            self._reflow_form_into_grid(
+                turn_facts_form,
+                [
+                    self.self_active_box,
+                    self.opponent_active_input,
+                    self.self_hp_box,
+                    self.opponent_hp_box,
+                    *self.move_inputs,
+                    switch_widget,
+                    self.turn_note_input,
+                ],
+            )
+        actual_action_form = self.actual_action_group.layout()
+        if isinstance(actual_action_form, QFormLayout):
+            self._reflow_form_into_grid(
+                actual_action_form,
+                [
+                    self.actual_action_type_box,
+                    self.actual_action_name_box,
+                    self.opponent_action_type_box,
+                    self.opponent_action_name_input,
+                    self.action_order_box,
+                    self.actual_action_confirm_checkbox,
+                ],
+            )
 
         # -- diagnostics drawer: technical/dev-only material -------------------
         self.diagnostics_drawer = _CollapsibleSection("診断情報 / Diagnostics")
@@ -677,9 +721,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             # Hard height cap on both evidentiary images -- still always
             # visible at a legible size, but bounded so the fixed,
             # non-scrolling center column can actually fit 900/720px.
-            self.capture_preview_label.setMinimumSize(160, 90)
+            self.capture_preview_label.setMinimumSize(100, 56)
             self.capture_preview_label.setMaximumHeight(_PREVIEW_MAX_HEIGHT)
-            self.turn_snapshot_image_label.setMinimumSize(160, 90)
+            self.turn_snapshot_image_label.setMinimumSize(100, 56)
             self.turn_snapshot_image_label.setMaximumHeight(_PREVIEW_MAX_HEIGHT)
             preview_row = QWidget()
             preview_row_layout = QHBoxLayout(preview_row)
@@ -715,26 +759,37 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
         page = QWidget()
         page_layout = QVBoxLayout(page)
-        page_layout.setContentsMargins(6, 6, 6, 6)
+        page_layout.setContentsMargins(2, 2, 2, 2)
+        page_layout.setSpacing(3)
         page_layout.addWidget(header_widget)
         page_layout.addLayout(body_row, 1)
         page_layout.addWidget(bottom_bar)
+        body_row.setSpacing(4)
+        bottom_bar_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_bar_layout.setSpacing(4)
+        header_layout.setSpacing(2)
         # Compact chrome app-wide within this tab: every QGroupBox/QLabel's
         # margins and spacing add up across the ~6 groups always live in
         # the center column -- this is what actually makes 900/720px
         # reachable without dropping any operator-visible field.
         page.setStyleSheet(
-            "QGroupBox { margin-top: 10px; padding: 4px 4px 2px 4px; font-size: 11px; }"
+            "QGroupBox { margin-top: 2px; padding: 0px; font-size: 9px; }"
             "QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 0 2px; }"
-            "QLabel { font-size: 11px; }"
-            "QPushButton { padding: 2px 6px; font-size: 11px; }"
-            "QComboBox, QLineEdit, QSpinBox, QCheckBox { font-size: 11px; }"
+            "QLabel { font-size: 10px; }"
+            "QPushButton { padding: 1px 5px; font-size: 10px; }"
+            "QComboBox, QLineEdit, QSpinBox, QCheckBox { font-size: 10px; padding: 0px 2px; }"
+            "QComboBox, QLineEdit, QSpinBox { min-height: 15px; max-height: 17px; }"
         )
+        self.battle_context_label.setMaximumHeight(16)
         capture_status_layout = self.capture_status_group.layout()
         if capture_status_layout is not None:
             capture_status_layout.setContentsMargins(4, 4, 4, 4)
             capture_status_layout.setSpacing(2)
-        self.reconnect_capture_button.setMaximumHeight(22)
+        self.reconnect_capture_button.setMaximumHeight(16)
+        self.capture_status_label.setMaximumHeight(28)
+        turn_snapshot_status_label = getattr(self, "turn_snapshot_status_label", None)
+        if turn_snapshot_status_label is not None:
+            turn_snapshot_status_label.setMaximumHeight(28)
         turn_snapshot_group_widget = getattr(self, "turn_snapshot_group", None)
         if turn_snapshot_group_widget is not None:
             turn_snapshot_layout = turn_snapshot_group_widget.layout()
@@ -743,11 +798,50 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 turn_snapshot_layout.setSpacing(2)
         retake_button = getattr(self, "retake_turn_snapshot_button", None)
         if retake_button is not None:
-            retake_button.setMaximumHeight(22)
-        self._center_column_layout.setSpacing(4)
+            retake_button.setMaximumHeight(16)
+        self._center_column_layout.setSpacing(0)
+        self._center_column_layout.setContentsMargins(0, 0, 0, 0)
+
+        # The shared (both-tabs) primary-CTA/guidance labels sit above the
+        # tab widget itself -- shrinking their font is the last bit of
+        # fixed header overhead available to reclaim for 720px-tall
+        # viewports, without touching Selection-tab layout/behavior.
+        self.primary_cta_label.setStyleSheet("font-size: 13px; font-weight: 600;")
+        self.guidance_label.setStyleSheet("font-size: 10px;")
+        self.guidance_label.setMaximumHeight(28)
 
         self.header_tabs.removeTab(_BATTLE_RECORD_TAB_INDEX)
         self.header_tabs.insertTab(_BATTLE_RECORD_TAB_INDEX, page, "バトルレコード")
+
+    @staticmethod
+    def _reflow_form_into_grid(
+        form: QFormLayout, widgets: list[QWidget], *, columns: int = 2
+    ) -> None:
+        """Move existing rows (widget + its auto-created label, if any) out
+        of a QFormLayout into a compact N-per-row QGridLayout, then embed
+        that grid back as a single full-width row of the same form.
+
+        Reparents only -- every widget keeps its identity, its connected
+        signals, and its place in the form's tab order group; nothing here
+        creates a new input, changes a label's text, or touches a slot.
+        """
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(0)
+        for index, widget in enumerate(widgets):
+            label = form.labelForField(widget)
+            form.removeWidget(widget)
+            if label is not None:
+                form.removeWidget(label)
+            row, col = divmod(index, columns)
+            col_base = col * 2
+            if label is not None:
+                grid.addWidget(label, row, col_base)
+                grid.addWidget(widget, row, col_base + 1)
+            else:
+                grid.addWidget(widget, row, col_base, 1, 2)
+        form.addRow(grid)
 
     @staticmethod
     def _extract_widget(container: QWidget, widget: QWidget) -> None:

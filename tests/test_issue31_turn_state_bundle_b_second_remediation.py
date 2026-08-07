@@ -582,10 +582,15 @@ def test_open_draft_wrong_battle_revision_denied(rich_fixture: RichSessionFixtur
     rich_fixture.repository.append_action_result_delta(delta)
     rich_fixture.repository.connection.commit()
 
-    # Draft claims battle_revision=9 (should be prior + 1 == 4) -- wrong increment.
+    # 00 design decision (Issue #31 comment 5217661584): the next-turn
+    # revision rule is "strictly greater than previous" (battle_revision is
+    # a durable global mutation counter, not a Turn-scoped +1 sequence).
+    # Draft claims battle_revision=3, equal to (not greater than) the prior
+    # confirmed state's own revision -- still correctly rejected under the
+    # new rule, just no longer via "wrong increment" but via "not greater".
     draft = NextTurnStateDraft(
         draft_id="draft-wrong-revision",
-        identity=rich_fixture.identity(turn_number=2, battle_revision=9, turn_id="turn-2"),
+        identity=rich_fixture.identity(turn_number=2, battle_revision=3, turn_id="turn-2"),
         based_on_confirmed_state_id=rich_fixture.confirmed_state_id,
         source_delta_id="delta-z",
         self_side=_confirmed_side("Dondozo"),

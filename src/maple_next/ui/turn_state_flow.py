@@ -589,39 +589,29 @@ class TurnStateFlowController(MatchFlowController):
     # -- NEXT TURN + draft derivation ------------------------------------------
 
     def next_turn(self) -> OperatorView:
-        """Advance the legacy Turn, then attempt to derive+persist a Bundle A draft.
+        """Advance the legacy Turn, then derive+persist the Bundle A draft.
 
-        KNOWN DESIGN_CONFLICT (00 comment 5217523903): this uses only the
-        *durable* session identity (real ``turn_id``/``turn_number``/
-        ``battle_revision`` as of right after the legacy :meth:`next_turn`
-        transition) -- no fabricated/synthetic revision is ever
-        constructed. The accepted :func:`derive_next_turn_state_draft` ->
-        :func:`_bind_next_identity` requires
-        ``next_identity.battle_revision == previous_confirmed_state.identity.
-        battle_revision + 1`` *exactly*. The accepted legacy
-        ``confirm_turn_facts``/``apply_rich_turn_advice_result``/
-        ``record_actual_action``/``next_turn`` sequence each call
-        ``session.bump_battle()`` unconditionally, so at least 3 durable
-        bumps normally separate a Turn's ``ConfirmedTurnState`` (persisted
-        right after ``confirm_turn_facts``, which is also the earliest point
-        a durable state can exist for the Bundle B provider-ready gate) from
-        the real session revision once :meth:`next_turn` completes -- not
-        exactly 1. Using the real durable revision therefore makes the
-        ``+1`` invariant fail in the normal case, not just an edge case.
+        00 design decision (Issue #31 comment 5217661584, closing the
+        DESIGN_CONFLICT raised in comment 5217523903): ``battle_revision``
+        is a durable *global* mutation-revision counter, not a Turn-scoped
+        sequence, so :func:`~maple_next.domain.turn_state._bind_next_identity`
+        now requires the next identity's revision to be *strictly greater
+        than* the previous confirmed state's revision, not exactly +1. This
+        method uses only the real, durable session identity (``turn_id``/
+        ``turn_number``/``battle_revision`` as of right after the legacy
+        :meth:`next_turn` transition) -- never a fabricated value. Because
+        the legacy ``confirm_turn_facts``/``apply_rich_turn_advice_result``/
+        ``record_actual_action``/``next_turn`` sequence only ever
+        *increases* ``session.battle_revision`` (each calls
+        ``session.bump_battle()``, which is always ``+= 1``), the real
+        revision at this point is always strictly greater than whatever was
+        stamped on the Turn's ``ConfirmedTurnState`` -- so this now
+        genuinely succeeds under the accepted rule, not just in principle.
 
-        This method does not invent a replacement identity scheme (e.g.
-        re-stamping an intermediate ``ConfirmedTurnState`` on every bump) to
-        paper over that gap -- that would be a Bundle A usage-pattern change
-        this narrow remediation is not authorized to make. Instead it relies
-        on :func:`derive_next_turn_state_draft`'s own existing fail-closed
-        behavior: on ``TurnStateError`` (which now includes the ordinary
-        ``REVISION_MISMATCH`` case), no draft is persisted and the legacy
-        Turn advancement itself still completes and is returned unchanged.
-        Draft auto-derivation is consequently a no-op under the current
-        legacy bump pattern; resolving that durably requires a decision this
-        adapter cannot make unilaterally (relax the Bundle A ``+1`` rule to
-        "> previous", or intentionally re-stamp ``ConfirmedTurnState`` at
-        each accepted bump point, or something else).
+        Draft derivation can still fail closed (``TurnStateError``, no
+        draft persisted, the legacy Turn advancement itself still
+        completes and is returned) for a genuinely corrupt/foreign chain --
+        e.g. a delta that does not belong to the latest confirmed state.
         """
 
         identity_before = self._safe_current_identity()

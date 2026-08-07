@@ -22,12 +22,14 @@ OCR polling, match export, or the turn-snapshot fixed-image flow. It only:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -86,10 +88,13 @@ class _KnownIntField(QWidget):
         super().__init__()
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
         self.spin = QSpinBox()
         self.spin.setRange(-6, 6)
         self.spin.setEnabled(False)
-        self.unknown_box = QCheckBox("不明")
+        self.spin.setMaximumWidth(46)
+        self.unknown_box = QCheckBox("?")
+        self.unknown_box.setToolTip("不明")
         self.unknown_box.setChecked(True)
         self.unknown_box.toggled.connect(lambda checked: self.spin.setEnabled(not checked))
         layout.addWidget(self.spin)
@@ -190,13 +195,16 @@ class _KnownSideEffectsField(QWidget):
 class _DeltaIntField(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
         self.mode_box = QComboBox()
         self.mode_box.addItems(["UNKNOWN", "UNCHANGED", "CHANGED"])
+        self.mode_box.setMaximumWidth(90)
         self.spin = QSpinBox()
         self.spin.setRange(-6, 6)
         self.spin.setEnabled(False)
+        self.spin.setMaximumWidth(90)
         self.mode_box.currentTextChanged.connect(
             lambda text: self.spin.setEnabled(text == "CHANGED")
         )
@@ -294,21 +302,44 @@ class _DeltaSideEffectsField(QWidget):
         return FieldDelta.unknown()
 
 
+def _add_compact_stage_grid(
+    layout: QVBoxLayout, fields: Mapping[str, QWidget], stage_names: tuple[tuple[str, str], ...]
+) -> None:
+    """4-columns-wide label-over-field grid -- ~2 rows instead of 7."""
+
+    grid = QGridLayout()
+    grid.setHorizontalSpacing(4)
+    grid.setVerticalSpacing(2)
+    columns = 4
+    for index, (key, label) in enumerate(stage_names):
+        row, col = divmod(index, columns)
+        label_widget = QLabel(label)
+        label_widget.setStyleSheet("font-size: 10px;")
+        grid.addWidget(label_widget, row * 2, col)
+        grid.addWidget(fields[key], row * 2 + 1, col)
+    layout.addLayout(grid)
+
+
 class _SideStateEditor(QGroupBox):
     """One side's SELF/OPPONENT current-state review/correction fields."""
 
     def __init__(self, title: str) -> None:
         super().__init__(title)
-        layout = QFormLayout(self)
-        self.status_field = _KnownTextField("状態異常 (例: burn / paralysis)")
-        layout.addRow("状態異常", self.status_field)
+        layout = QVBoxLayout(self)
+        status_row = QHBoxLayout()
+        status_row.addWidget(QLabel("状態異常"))
+        self.status_field = _KnownTextField("burn / paralysis")
+        status_row.addWidget(self.status_field, 1)
+        layout.addLayout(status_row)
         self.stage_fields: dict[str, _KnownIntField] = {}
-        for key, label in _STAGE_FIELDS:
-            field = _KnownIntField()
-            self.stage_fields[key] = field
-            layout.addRow(label, field)
+        for key, _label in _STAGE_FIELDS:
+            self.stage_fields[key] = _KnownIntField()
+        _add_compact_stage_grid(layout, self.stage_fields, _STAGE_FIELDS)
+        side_effects_row = QHBoxLayout()
+        side_effects_row.addWidget(QLabel("その他"))
         self.side_effects_field = _KnownSideEffectsField()
-        layout.addRow("その他の状態", self.side_effects_field)
+        side_effects_row.addWidget(self.side_effects_field, 1)
+        layout.addLayout(side_effects_row)
 
     def to_side_state(self, *, active: Known[str], hp_bucket: Known[HpBucket]) -> SideState:
         return SideState(
@@ -348,20 +379,31 @@ class _SideDeltaEditor(QGroupBox):
 
     def __init__(self, title: str) -> None:
         super().__init__(title)
-        layout = QFormLayout(self)
-        self.active_field = _DeltaTextField("交代後の active（変更時のみ）")
-        layout.addRow("active", self.active_field)
+        layout = QVBoxLayout(self)
+        active_row = QHBoxLayout()
+        active_row.addWidget(QLabel("active"))
+        self.active_field = _DeltaTextField("変更時のみ")
+        active_row.addWidget(self.active_field, 1)
+        layout.addLayout(active_row)
+        hp_row = QHBoxLayout()
+        hp_row.addWidget(QLabel("HP bucket"))
         self.hp_field = _DeltaHpField()
-        layout.addRow("HP bucket", self.hp_field)
-        self.status_field = _DeltaTextField("状態異常（変更時のみ）")
-        layout.addRow("状態異常", self.status_field)
+        hp_row.addWidget(self.hp_field, 1)
+        layout.addLayout(hp_row)
+        status_row = QHBoxLayout()
+        status_row.addWidget(QLabel("状態異常"))
+        self.status_field = _DeltaTextField("変更時のみ")
+        status_row.addWidget(self.status_field, 1)
+        layout.addLayout(status_row)
         self.stage_fields: dict[str, _DeltaIntField] = {}
-        for key, label in _STAGE_FIELDS:
-            field = _DeltaIntField()
-            self.stage_fields[key] = field
-            layout.addRow(label, field)
+        for key, _label in _STAGE_FIELDS:
+            self.stage_fields[key] = _DeltaIntField()
+        _add_compact_stage_grid(layout, self.stage_fields, _STAGE_FIELDS)
+        side_effects_row = QHBoxLayout()
+        side_effects_row.addWidget(QLabel("その他"))
         self.side_effects_field = _DeltaSideEffectsField()
-        layout.addRow("その他の状態", self.side_effects_field)
+        side_effects_row.addWidget(self.side_effects_field, 1)
+        layout.addLayout(side_effects_row)
 
     def to_side_delta(self) -> SideDelta:
         return SideDelta(
@@ -427,22 +469,35 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
     def _build_bundle_c_state_widgets(self) -> None:
         self.current_state_group = QGroupBox("現在のTurn state — 人間が確認・修正")
         state_layout = QVBoxLayout(self.current_state_group)
+        self.current_state_draft_label = QLabel()
+        self.current_state_draft_label.setWordWrap(True)
+        self.current_state_draft_label.setStyleSheet("color: #b45309; font-weight: 600;")
+        state_layout.addWidget(self.current_state_draft_label)
+        # Read-only one-line summary shown once the state is already
+        # confirmed for this Turn -- the full editor only needs screen
+        # space while it is actually editable (TURN_CAPTURE_PENDING), so
+        # it collapses the rest of the time to keep the fixed-height,
+        # never-scrolling center column workable.
+        self.current_state_summary_label = QLabel()
+        self.current_state_summary_label.setWordWrap(True)
+        state_layout.addWidget(self.current_state_summary_label)
+
+        self.current_state_editor_container = QWidget()
+        editor_layout = QVBoxLayout(self.current_state_editor_container)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
         top_row = QFormLayout()
         self.weather_field = _KnownTextField("天候 (例: sun / rain)")
         self.terrain_field = _KnownTextField("フィールド (例: electric_terrain)")
         top_row.addRow("天候", self.weather_field)
         top_row.addRow("フィールド", self.terrain_field)
-        state_layout.addLayout(top_row)
+        editor_layout.addLayout(top_row)
         sides_row = QHBoxLayout()
         self.self_state_editor = _SideStateEditor("自分")
         self.opponent_state_editor = _SideStateEditor("相手")
         sides_row.addWidget(self.self_state_editor)
         sides_row.addWidget(self.opponent_state_editor)
-        state_layout.addLayout(sides_row)
-        self.current_state_draft_label = QLabel()
-        self.current_state_draft_label.setWordWrap(True)
-        self.current_state_draft_label.setStyleSheet("color: #b45309; font-weight: 600;")
-        state_layout.addWidget(self.current_state_draft_label)
+        editor_layout.addLayout(sides_row)
+        state_layout.addWidget(self.current_state_editor_container)
 
         self.action_result_delta_group = QGroupBox(
             "ActionResultDelta — CHANGED / UNCHANGED / UNKNOWN を明示"
@@ -523,6 +578,36 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 frame_id_layout.addRow("キャプチャ機器", QLabel(capture_device.text()))
             self.diagnostics_drawer.add_widget(frame_id_row)
 
+        # ROI crop images and per-field origin/provenance rows are raw
+        # capture diagnostics -- keep them out of the fixed, non-scrolling
+        # center column entirely (spec: "4 ROI crops", "field origins" move
+        # to the diagnostics drawer). The fixed Turn image itself (the
+        # evidence thumbnail) stays in center.
+        crop_labels = getattr(self, "_turn_snapshot_crop_labels", None)
+        origin_labels = getattr(self, "_turn_snapshot_origin_labels", None)
+        if crop_labels or origin_labels:
+            roi_widget = QWidget()
+            roi_layout = QVBoxLayout(roi_widget)
+            roi_layout.setContentsMargins(0, 0, 0, 0)
+            if crop_labels:
+                for label in crop_labels.values():
+                    label.setVisible(False)
+                    label.setParent(None)
+                crop_row = QHBoxLayout()
+                for label in crop_labels.values():
+                    label.setVisible(True)
+                    crop_row.addWidget(label)
+                roi_layout.addLayout(crop_row)
+            if origin_labels:
+                origins_form = QFormLayout()
+                for field_key, label in origin_labels.items():
+                    label.setVisible(False)
+                    label.setParent(None)
+                    label.setVisible(True)
+                    origins_form.addRow(field_key, label)
+                roi_layout.addLayout(origins_form)
+            self.diagnostics_drawer.add_widget(roi_widget)
+
         # -- terminal-flow drawer: match end/export/recovery -------------------
         self.terminal_flow_drawer = _CollapsibleSection(
             "試合終了・Export・復旧"
@@ -556,6 +641,23 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._center_column_layout.addWidget(self.current_state_group)
         self._center_column_layout.addWidget(self.action_result_delta_group)
         self._right_column_layout.insertWidget(0, self.rich_gemini_group)
+
+        # Live preview and the fixed Turn image are both ~16:9 -- placing
+        # them side by side instead of stacked keeps both always visible
+        # (neither is hidden or shrunk below evidentiary size) while
+        # roughly halving their combined height footprint, which is what
+        # actually makes the fixed-height, non-scrolling center column
+        # viable at 900/720px.
+        turn_snapshot_group = getattr(self, "turn_snapshot_group", None)
+        if turn_snapshot_group is not None:
+            self._detach_from_parent_layout(self.capture_status_group)
+            self._detach_from_parent_layout(turn_snapshot_group)
+            preview_row = QWidget()
+            preview_row_layout = QHBoxLayout(preview_row)
+            preview_row_layout.setContentsMargins(0, 0, 0, 0)
+            preview_row_layout.addWidget(self.capture_status_group, 1)
+            preview_row_layout.addWidget(turn_snapshot_group, 1)
+            self._center_column_layout.insertWidget(0, preview_row)
 
         # Only left (confirmed log) and right (Gemini detail) get their own
         # scroll container -- center is the primary work area and must never
@@ -643,6 +745,34 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self.opponent_state_editor,
         ):
             widget.setEnabled(editable and current.persistence_reads_allowed)
+        # Full editor only while actually editable; a compact one-line
+        # summary the rest of the time so it never dominates the fixed,
+        # non-scrolling center column once already confirmed.
+        self.current_state_editor_container.setVisible(editable)
+        self.current_state_summary_label.setVisible(not editable)
+        if not editable and summary.confirmed_state is not None:
+            state = summary.confirmed_state
+            self_active_value = state.self_side.active.value
+            opponent_active_value = state.opponent_side.active.value
+            self_active_text = self_active_value if self_active_value is not None else "不明"
+            opponent_active_text = (
+                opponent_active_value if opponent_active_value is not None else "不明"
+            )
+            self.current_state_summary_label.setText(
+                f"確定済み state — 自分: {self_active_text} / 相手: {opponent_active_text}"
+            )
+        elif not editable:
+            self.current_state_summary_label.setText("確定済み stateはまだありません。")
+
+        # Collapse the legal-action prefill rows (moves/switches) once they
+        # are no longer editable -- same fixed-height rationale as above.
+        turn_facts_form = self.turn_facts_group.layout()
+        if isinstance(turn_facts_form, QFormLayout):
+            for row_widget in (*self.move_inputs, *self.switch_checkboxes):
+                row_widget.setVisible(editable)
+                row_label = turn_facts_form.labelForField(row_widget)
+                if row_label is not None:
+                    row_label.setVisible(editable)
 
         draft_not_yet_promoted = summary.open_draft is not None and (
             summary.confirmed_state is None
@@ -713,6 +843,18 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.terrain_field.set_known(draft.terrain)
         self.self_state_editor.load_side_state(draft.self_side)
         self.opponent_state_editor.load_side_state(draft.opponent_side)
+        self_active = draft.self_side.active
+        if self_active.is_confirmed and self_active.value is not None:
+            self.self_active_box.setCurrentText(self_active.value)
+        opponent_active = draft.opponent_side.active
+        if opponent_active.is_confirmed and opponent_active.value is not None:
+            self.opponent_active_input.setText(opponent_active.value)
+        self_hp = draft.self_side.hp_bucket
+        if self_hp.is_confirmed and self_hp.value is not None:
+            self.self_hp_box.setCurrentText(self_hp.value.value)
+        opponent_hp = draft.opponent_side.hp_bucket
+        if opponent_hp.is_confirmed and opponent_hp.value is not None:
+            self.opponent_hp_box.setCurrentText(opponent_hp.value.value)
 
     # -- overridden handlers: gather the new widgets, then delegate ------------
 

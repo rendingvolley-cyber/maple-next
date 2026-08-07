@@ -1234,7 +1234,15 @@ def test_hydration_rejects_draft_with_corrupted_delta_identity(tmp_path: Path) -
         ("generation", 999),
         ("turn_id", "turn-1"),
         ("turn_number", 99),
-        ("battle_revision", 99),
+        # 00 design decision (Issue #31 comment 5217661584): the next-turn
+        # revision rule is "strictly greater than previous", not "exactly
+        # +1". A larger revision (e.g. 99) is therefore no longer
+        # "corrupted" on its own -- the corrupt case that must still fail
+        # is a revision that is NOT greater than the confirmed state's own
+        # revision (here, previous.identity.battle_revision == 0, the
+        # _identity() default, so 0 itself is not-greater and still
+        # correctly rejected).
+        ("battle_revision", 0),
     ],
 )
 def test_hydration_rejects_corrupted_draft_identity(

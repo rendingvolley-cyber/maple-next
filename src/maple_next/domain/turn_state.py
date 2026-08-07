@@ -414,6 +414,21 @@ def _bind_delta_to_confirmed_state(previous: ConfirmedTurnState, delta: ActionRe
 
 
 def _bind_next_identity(previous_identity: TurnIdentity, next_identity: TurnIdentity) -> None:
+    """Bind a draft's identity to the confirmed state it is derived from.
+
+    ``battle_revision`` is a durable *global* mutation-revision counter
+    (bumped by every accepted state-changing command across the whole
+    session -- Selection facts, Turn facts, Turn Advice application, actual
+    action recording, Turn advancement, ...), not a Turn-scoped sequence.
+    00 design decision (Issue #31 comment 5217661584): the next-turn rule is
+    therefore "strictly greater than the previous confirmed state's
+    revision", not "exactly +1" -- a real derivation may legitimately
+    observe several durable bumps between one Turn's ConfirmedTurnState and
+    the next Turn's identity. ``turn_number`` remains exactly +1: each Turn
+    transition advances the Turn sequence by exactly one, regardless of how
+    many global mutation revisions occurred within it.
+    """
+
     if next_identity.session_id != previous_identity.session_id:
         raise TurnStateIdentityError("SESSION_MISMATCH")
     if next_identity.match_id != previous_identity.match_id:
@@ -422,7 +437,7 @@ def _bind_next_identity(previous_identity: TurnIdentity, next_identity: TurnIden
         raise TurnStateIdentityError("GENERATION_MISMATCH")
     if next_identity.turn_number != previous_identity.turn_number + 1:
         raise TurnStateIdentityError("TURN_MISMATCH")
-    if next_identity.battle_revision != previous_identity.battle_revision + 1:
+    if next_identity.battle_revision <= previous_identity.battle_revision:
         raise TurnStateIdentityError("REVISION_MISMATCH")
     if next_identity.turn_id == previous_identity.turn_id:
         raise TurnStateIdentityError("TURN_ID_NOT_ADVANCED")

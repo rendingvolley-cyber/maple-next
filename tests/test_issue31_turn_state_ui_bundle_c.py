@@ -326,18 +326,16 @@ def test_duplicate_gemini_activation_while_in_flight_is_blocked(tmp_path: Path) 
 # --- action + result delta, NEXT TURN, draft lifecycle ----------------------
 
 
-def test_record_action_persists_delta_and_next_turn_advances_with_durable_identity_only(
+def test_record_action_persists_delta_and_next_turn_derives_durable_draft(
     tmp_path: Path,
 ) -> None:
-    """NEXT TURN always advances the legacy Turn using only durable identity.
+    """NEXT TURN derives and persists a real Bundle A draft.
 
-    DESIGN_CONFLICT (00 comment 5217523903): draft auto-derivation is a
-    documented no-op under the current legacy bump pattern -- see the
-    docstring on ``TurnStateFlowController.next_turn``. This test proves
-    the *durable-identity-only* behavior: no draft is fabricated with an
-    invented revision, NEXT TURN itself still succeeds, and the confirmed
-    state correctly becomes non-provider-ready (IDENTITY_MISMATCH) once the
-    real session identity has moved on.
+    00 design decision (comment 5217661584, closing the DESIGN_CONFLICT
+    from comment 5217523903): battle_revision is a durable global
+    mutation-revision counter, so the next-turn rule is "strictly greater
+    than previous", not "exactly +1". Using only the real, durable session
+    identity (never a fabricated value), draft derivation now succeeds.
     """
 
     repository, controller, window, transport = build_window(tmp_path)
@@ -345,6 +343,9 @@ def test_record_action_persists_delta_and_next_turn_advances_with_durable_identi
     window.render_view()
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()
+    confirmed_before = controller.turn_state_summary().confirmed_state
+    assert confirmed_before is not None
+
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
     window.mock_turn_prediction_input.setText("pred")
@@ -367,30 +368,31 @@ def test_record_action_persists_delta_and_next_turn_advances_with_durable_identi
 
     window._on_next_turn()
     next_view = controller.refresh()
-    # NEXT TURN itself (the legacy state-machine transition) still succeeds
-    # even though the Bundle A draft could not be derived durably.
     assert next_view.projection.session_state == "TURN_CAPTURE_PENDING"
     assert next_view.error_message is None
 
     summary_after_next = controller.turn_state_summary()
-    # No draft is fabricated with an invented revision -- fail closed, not
-    # silently "working" with a fake identity.
-    assert summary_after_next.open_draft is None
-    # The old ConfirmedTurnState[T] is still the latest row for this
-    # session, but it is now bound to a superseded (T, not T+1) identity.
-    assert summary_after_next.confirmed_state is not None
-    assert summary_after_next.confirmed_state.identity != summary_after_next.identity
-    assert summary_after_next.provider_ready is False
-    assert "IDENTITY_MISMATCH" in summary_after_next.provider_ready_denial_reasons
+    draft = summary_after_next.open_draft
+    assert draft is not None
+    # Durable only: real turn_id/turn_number/battle_revision, strictly
+    # greater revision than the confirmed state it derives from -- no
+    # fabricated "previous + 1" anywhere.
+    assert draft.based_on_confirmed_state_id == confirmed_before.confirmed_state_id
+    assert draft.identity.turn_number == confirmed_before.identity.turn_number + 1
+    assert draft.identity.battle_revision > confirmed_before.identity.battle_revision
+    assert draft.identity == summary_after_next.identity
+    assert draft.provider_ready is False
+    # The delta's CHANGED self HP carried into the draft's self_side.
+    assert draft.self_side.hp_bucket.value.value == "81-90"
     repository.close()
 
 
-def test_current_state_editor_shows_no_draft_carry_forward_after_next_turn(
+def test_current_state_editor_shows_draft_carry_forward_after_next_turn(
     tmp_path: Path,
 ) -> None:
-    """Companion to the DESIGN_CONFLICT test above: the draft banner/carry-
-    forward prefill never appears, because no draft was ever persisted --
-    the panel must not fabricate a "draft exists" UI state either.
+    """The draft banner appears and prefills the editor, but the draft is
+    never presented as a confirmed current state -- explicit human
+    re-confirmation is still required before it becomes provider-ready.
     """
 
     repository, controller, window, _transport = build_window(tmp_path)
@@ -406,17 +408,23 @@ def test_current_state_editor_shows_no_draft_carry_forward_after_next_turn(
     window.actual_action_type_box.setCurrentText("MOVE")
     window.actual_action_name_box.setCurrentText("Flower Trick")
     window.actual_action_confirm_checkbox.setChecked(True)
+    # Explicit UNCHANGED (not just leaving it at the default UNKNOWN) is
+    # what carries the active Pokemon forward into the draft.
+    window.self_delta_editor.active_field.mode_box.setCurrentText("UNCHANGED")
     window._on_record_action()
     window._on_next_turn()
 
     window.render_view()
     summary = controller.turn_state_summary()
-    assert summary.open_draft is None
-    assert window.current_state_draft_label.isHidden() is True
-    # Session is back to needing a fresh, fully human-entered current state
-    # for the new Turn -- not provider-ready until re-confirmed.
+    assert summary.open_draft is not None
+    assert window.current_state_draft_label.isHidden() is False
+    # The draft's carried-forward SELF active/HP were loaded into the
+    # editor widgets for human review -- not auto-confirmed.
+    assert window.self_active_box.currentText() == SELECTED_THREE[0]
+    # No new ConfirmedTurnState for this new identity exists yet, so the
+    # panel must not present the draft as confirmed/provider-ready.
     assert summary.confirmed_state is not None
-    assert summary.confirmed_state.identity != summary.identity
+    assert summary.confirmed_state.identity != summary.open_draft.identity
     assert summary.provider_ready is False
     repository.close()
 
@@ -469,6 +477,75 @@ def test_restart_hydration_reloads_confirmed_state_and_legal_actions(tmp_path: P
     assert after.confirmed_state is not None
     assert after.confirmed_state.confirmed_state_id == before.confirmed_state.confirmed_state_id
     assert len(after.confirmed_legal_actions) == len(before.confirmed_legal_actions)
+    restarted_repository.close()
+
+
+def test_restart_hydration_reloads_the_same_next_turn_state_draft(tmp_path: Path) -> None:
+    """A NextTurnStateDraft persisted before restart hydrates identically after."""
+
+    db_path = tmp_path / "hydrate_draft.db"
+    repository = SQLiteRepository(db_path)
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    application = MatchApplication(repository, export_dir)
+    transport = FakeTurnAdviceTransport()
+    rich_adapter = GeminiRichTurnAdviceAdapter(transport, dispatch_factory=SyncDispatch)
+    controller = TurnStateFlowController(
+        application, repository, MockSelectionAdviceAdapter(), MockTurnAdviceAdapter(),
+        None, None, rich_adapter,
+    )
+    ocr_dir = tmp_path / "ocr"
+    ocr_dir.mkdir()
+    qt_application()
+    window = BattleRecordUiWindow(controller, ocr_data_directory=ocr_dir)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+    window._on_confirm_turn_facts()
+    window.mock_turn_action_type_box.setCurrentText("MOVE")
+    window.mock_turn_action_name_box.setCurrentText("Flower Trick")
+    window.mock_turn_prediction_input.setText("pred")
+    window.mock_turn_rationale_input.setText("reason")
+    window._on_trusted_send_turn_to_gemini()
+    window.actual_action_type_box.setCurrentText("MOVE")
+    window.actual_action_name_box.setCurrentText("Flower Trick")
+    window.actual_action_confirm_checkbox.setChecked(True)
+    window.self_delta_editor.active_field.mode_box.setCurrentText("UNCHANGED")
+    window._on_record_action()
+    window._on_next_turn()
+
+    before = controller.turn_state_summary()
+    assert before.open_draft is not None
+    before_draft_id = before.open_draft.draft_id
+    before_identity = before.open_draft.identity
+    repository.close()
+
+    restarted_repository = SQLiteRepository(db_path)
+    restarted_application = MatchApplication(restarted_repository, export_dir)
+    restarted_transport = FakeTurnAdviceTransport()
+    restarted_rich_adapter = GeminiRichTurnAdviceAdapter(
+        restarted_transport, dispatch_factory=SyncDispatch
+    )
+    restarted_controller = TurnStateFlowController(
+        restarted_application,
+        restarted_repository,
+        MockSelectionAdviceAdapter(),
+        MockTurnAdviceAdapter(),
+        None,
+        None,
+        restarted_rich_adapter,
+    )
+    restarted_window = BattleRecordUiWindow(restarted_controller, ocr_data_directory=ocr_dir)
+    restarted_window.render_view()
+
+    after = restarted_controller.turn_state_summary()
+    assert after.open_draft is not None
+    assert after.open_draft.draft_id == before_draft_id
+    assert after.open_draft.identity == before_identity
+    # The draft banner/carry-forward prefill re-appears identically after
+    # a fresh restart, from the same persisted row -- not recomputed.
+    assert restarted_window.current_state_draft_label.isHidden() is False
+    assert restarted_window.self_active_box.currentText() == SELECTED_THREE[0]
     restarted_repository.close()
 
 

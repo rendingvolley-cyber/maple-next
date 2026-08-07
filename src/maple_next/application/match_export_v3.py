@@ -27,21 +27,31 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from maple_next.application.turn_legal_action_boundary import build_confirmed_legal_actions_input
+from maple_next.domain.enums import ActionType
 from maple_next.domain.match_models import MatchOutcomeRecord
 from maple_next.domain.turn_state import (
     ActionResultDelta,
+    ConfirmationMeta,
     ConfirmedLegalActionSelection,
     ConfirmedTurnState,
     FixedEvidenceMetadata,
     TurnIdentity,
+    TurnStateError,
+    TurnStateIdentityError,
+    field_delta_from_json,
     field_delta_to_json,
+    known_from_json,
     known_to_json,
+    side_delta_from_json,
     side_delta_to_json,
+    side_state_from_json,
     side_state_to_json,
 )
 
@@ -300,9 +310,14 @@ def validate_confirmed_states_for_export(
 
     Requires: the outcome's own identity matches the export session exactly;
     every confirmed state belongs to the exact session/match/generation;
-    unique state ids; unique (turn_number, battle_revision) pairs; a
-    strictly non-decreasing (turn_number, battle_revision) ordering; and no
-    state whose ``battle_revision`` exceeds ``outcome.final_battle_revision``.
+    unique state ids; unique turn_number (Bundle A's chain rules increment
+    turn_number and battle_revision together by exactly one on every
+    transition, so a valid chain never has two different confirmed states
+    for the same turn_number); a strictly non-decreasing
+    (turn_number, battle_revision) ordering; every non-first state's
+    ``previous_confirmed_state_id`` linking to the immediately preceding
+    exported state; and no state whose ``battle_revision`` exceeds
+    ``outcome.final_battle_revision``.
     """
 
     if outcome.session_id != session_id or outcome.match_id != match_id:
@@ -311,8 +326,10 @@ def validate_confirmed_states_for_export(
         raise MatchExportV3Error("V3_EXPORT_OUTCOME_GENERATION_MISMATCH")
 
     seen_state_ids: set[str] = set()
+    seen_turn_numbers: set[int] = set()
     seen_turn_revisions: set[tuple[int, int]] = set()
     previous_key: tuple[int, int] | None = None
+    previous_state: ConfirmedTurnState | None = None
     for state in confirmed_states:
         identity = state.identity
         if (
@@ -324,6 +341,9 @@ def validate_confirmed_states_for_export(
         if state.confirmed_state_id in seen_state_ids:
             raise MatchExportV3Error("V3_EXPORT_DUPLICATE_STATE_ID")
         seen_state_ids.add(state.confirmed_state_id)
+        if identity.turn_number in seen_turn_numbers:
+            raise MatchExportV3Error("V3_EXPORT_CONTRADICTORY_STATE_SAME_TURN")
+        seen_turn_numbers.add(identity.turn_number)
         key = (identity.turn_number, identity.battle_revision)
         if key in seen_turn_revisions:
             raise MatchExportV3Error("V3_EXPORT_DUPLICATE_TURN_REVISION")
@@ -333,6 +353,97 @@ def validate_confirmed_states_for_export(
         previous_key = key
         if identity.battle_revision > outcome.final_battle_revision:
             raise MatchExportV3Error("V3_EXPORT_STATE_BEYOND_FINAL_REVISION")
+        if previous_state is not None and (
+            state.previous_confirmed_state_id != previous_state.confirmed_state_id
+        ):
+            raise MatchExportV3Error("V3_EXPORT_BROKEN_PREVIOUS_STATE_LINKAGE")
+        previous_state = state
+
+
+_HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def validate_evidence_hash_shape(sha256: str) -> None:
+    """Reject anything that is not exactly 64 valid hexadecimal characters.
+
+    ``"z" * 64`` (right length, wrong alphabet) is rejected, not just a
+    length check.
+    """
+
+    if not isinstance(sha256, str) or _HEX64_RE.match(sha256) is None:
+        raise MatchExportV3Error("V3_EXPORT_INVALID_EVIDENCE_HASH_SHAPE")
+
+
+def validate_delta_chain_for_export(
+    *,
+    session_id: str,
+    match_id: str,
+    generation: int,
+    confirmed_states: tuple[ConfirmedTurnState, ...],
+    deltas: tuple[ActionResultDelta, ...],
+) -> dict[str, ActionResultDelta]:
+    """Map each confirmed state id to its (at most one) source delta, fail closed.
+
+    Never a dict comprehension that silently overwrites a duplicate:
+    a duplicate ``delta_id``, two deltas claiming the same chain position
+    (same ``based_on_confirmed_state_id``), a foreign session/match/
+    generation, a delta whose based-on state isn't among the exported
+    ``confirmed_states``, or a delta whose own identity doesn't match that
+    based-on state's identity (Bundle A's convention: a delta shares the
+    identity of the confirmed state it describes a change *from*) all fail
+    the whole export closed rather than picking one silently.
+    """
+
+    confirmed_by_id = {state.confirmed_state_id: state for state in confirmed_states}
+    seen_delta_ids: set[str] = set()
+    delta_by_based_on: dict[str, ActionResultDelta] = {}
+    for delta in deltas:
+        if delta.delta_id in seen_delta_ids:
+            raise MatchExportV3Error("V3_EXPORT_DUPLICATE_DELTA_ID")
+        seen_delta_ids.add(delta.delta_id)
+        identity = delta.identity
+        if (
+            identity.session_id != session_id
+            or identity.match_id != match_id
+            or identity.generation != generation
+        ):
+            raise MatchExportV3Error("V3_EXPORT_DELTA_FOREIGN_IDENTITY")
+        if not delta.based_on_confirmed_state_id:
+            raise MatchExportV3Error("V3_EXPORT_DELTA_MISSING_BASED_ON_STATE")
+        based_on_state = confirmed_by_id.get(delta.based_on_confirmed_state_id)
+        if based_on_state is None:
+            raise MatchExportV3Error("V3_EXPORT_DELTA_BASED_ON_STATE_NOT_FOUND")
+        if identity != based_on_state.identity:
+            raise MatchExportV3Error("V3_EXPORT_DELTA_IDENTITY_MISMATCH")
+        if delta.based_on_confirmed_state_id in delta_by_based_on:
+            raise MatchExportV3Error("V3_EXPORT_AMBIGUOUS_DELTA_CHAIN_POSITION")
+        delta_by_based_on[delta.based_on_confirmed_state_id] = delta
+    return delta_by_based_on
+
+
+def validate_legal_actions_for_export(
+    identity: TurnIdentity, actions: tuple[ConfirmedLegalActionSelection, ...]
+) -> None:
+    """Re-run the accepted Bundle A legal-action boundary at export time.
+
+    Does not rely on validation having already happened when the actions
+    were originally confirmed -- every export re-proves that every action
+    is a ``ConfirmedLegalActionSelection`` bound to ``identity``, non-blank,
+    non-duplicate, and MOVE/SWITCH-valid, then additionally rejects a
+    duplicate ``confirmation_id`` (a distinct concern from the boundary's
+    own duplicate-name check).
+    """
+
+    try:
+        build_confirmed_legal_actions_input(identity, actions)
+    except (TurnStateIdentityError, ValueError) as exc:
+        raise MatchExportV3Error(f"V3_EXPORT_LEGAL_ACTION_BOUNDARY_REJECTED:{exc}") from exc
+
+    seen_confirmation_ids: set[str] = set()
+    for action in actions:
+        if action.confirmation_id in seen_confirmation_ids:
+            raise MatchExportV3Error("V3_EXPORT_DUPLICATE_LEGAL_ACTION_CONFIRMATION_ID")
+        seen_confirmation_ids.add(action.confirmation_id)
 
 
 def _rich_state_block(record: ConfirmedTurnRecord) -> dict[str, Any]:
@@ -415,22 +526,12 @@ def _find_forbidden_key(node: Any, *, path: str = "$") -> str | None:
     return None
 
 
-def _validate_rich_state_block(block: Any, *, turn_number: object) -> None:
-    if not isinstance(block, dict):
-        raise MatchExportV3Error(f"V3_EXPORT_RICH_STATE_MUST_BE_OBJECT:turn={turn_number}")
-    missing = _REQUIRED_RICH_STATE_KEYS - block.keys()
-    if missing:
-        raise MatchExportV3Error(
-            f"V3_EXPORT_RICH_STATE_MISSING_KEYS:turn={turn_number}:{sorted(missing)}"
-        )
-    if block["contract_version"] != RICH_STATE_EXPORT_CONTRACT_VERSION:
-        raise MatchExportV3Error(
-            f"V3_EXPORT_RICH_STATE_CONTRACT_VERSION_MISMATCH:turn={turn_number}"
-        )
-    state = block["confirmed_turn_state"]
-    if not isinstance(state, dict):
-        raise MatchExportV3Error(f"V3_EXPORT_RICH_STATE_STATE_MUST_BE_OBJECT:turn={turn_number}")
-    required_state_keys = {
+_ALLOWED_IDENTITY_KEYS = frozenset(
+    {"session_id", "match_id", "generation", "turn_id", "turn_number", "battle_revision"}
+)
+_ALLOWED_CONFIRMATION_KEYS = frozenset({"confirmed_by_human", "confirmed_at_utc", "provenance"})
+_ALLOWED_CONFIRMED_STATE_KEYS = frozenset(
+    {
         "confirmed_state_id",
         "previous_confirmed_state_id",
         "identity",
@@ -441,80 +542,304 @@ def _validate_rich_state_block(block: Any, *, turn_number: object) -> None:
         "confirmation",
         "evidence_id",
     }
-    missing_state = required_state_keys - state.keys()
-    if missing_state:
-        raise MatchExportV3Error(
-            f"V3_EXPORT_RICH_STATE_STATE_MISSING_KEYS:turn={turn_number}:{sorted(missing_state)}"
+)
+_ALLOWED_DELTA_KEYS = frozenset(
+    {
+        "delta_id",
+        "identity",
+        "based_on_confirmed_state_id",
+        "self_side",
+        "opponent_side",
+        "weather",
+        "terrain",
+        "confirmation",
+    }
+)
+_ALLOWED_LEGAL_ACTION_KEYS = frozenset(
+    {
+        "confirmation_id",
+        "identity",
+        "action_type",
+        "action_name",
+        "confirmed_by_human",
+        "confirmed_at_utc",
+        "provenance",
+        "source_prefill_id",
+    }
+)
+_ALLOWED_EVIDENCE_KEYS = frozenset({"evidence_id", "relative_path", "sha256", "recorded_at_utc"})
+
+
+def _reject_unexpected_keys(payload: Any, allowed: frozenset[str], *, label: str) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise MatchExportV3Error(f"V3_EXPORT_{label}_MUST_BE_OBJECT")
+    unexpected = set(payload.keys()) - allowed
+    if unexpected:
+        raise MatchExportV3Error(f"V3_EXPORT_{label}_UNEXPECTED_KEYS:{sorted(unexpected)}")
+    missing = allowed - payload.keys()
+    if missing:
+        raise MatchExportV3Error(f"V3_EXPORT_{label}_MISSING_KEYS:{sorted(missing)}")
+    return payload
+
+
+def _validate_known_shape(payload: Any, *, label: str) -> None:
+    if not isinstance(payload, dict):
+        raise MatchExportV3Error(f"V3_EXPORT_{label}_MUST_BE_OBJECT")
+    status = payload.get("status")
+    if status not in {"CONFIRMED", "UNKNOWN"}:
+        raise MatchExportV3Error(f"V3_EXPORT_RICH_STATE_INVALID_KNOWLEDGE_STATUS:{label}")
+    if status == "UNKNOWN" and "value" in payload:
+        raise MatchExportV3Error(f"V3_EXPORT_RICH_STATE_UNKNOWN_CARRIES_VALUE:{label}")
+    allowed = {"status", "provenance_chain"} if status == "UNKNOWN" else {
+        "status",
+        "value",
+        "provenance_chain",
+    }
+    _reject_unexpected_keys(payload, frozenset(allowed), label=f"RICH_STATE_KNOWN:{label}")
+    if status == "CONFIRMED" and not payload.get("provenance_chain"):
+        raise MatchExportV3Error(f"V3_EXPORT_RICH_STATE_MISSING_PROVENANCE:{label}")
+
+
+def _validate_field_delta_shape(payload: Any, *, label: str) -> None:
+    if not isinstance(payload, dict):
+        raise MatchExportV3Error(f"V3_EXPORT_{label}_MUST_BE_OBJECT")
+    observation = payload.get("observation")
+    if observation not in {"CHANGED", "UNCHANGED", "UNKNOWN"}:
+        raise MatchExportV3Error(f"V3_EXPORT_RICH_STATE_INVALID_OBSERVATION:{label}")
+    if observation == "CHANGED" and payload.get("after_value") is None:
+        raise MatchExportV3Error(f"V3_EXPORT_RICH_STATE_CHANGED_WITHOUT_VALUE:{label}")
+    if observation != "CHANGED" and payload.get("after_value") is not None:
+        raise MatchExportV3Error(f"V3_EXPORT_RICH_STATE_UNCHANGED_CARRIES_VALUE:{label}")
+    allowed = (
+        {"observation", "after_value", "provenance_chain"}
+        if observation == "CHANGED"
+        else {"observation", "provenance_chain"}
+    )
+    _reject_unexpected_keys(payload, frozenset(allowed), label=f"RICH_STATE_FIELD_DELTA:{label}")
+
+
+_SIDE_STATE_FIELDS = (
+    "active",
+    "hp_bucket",
+    "status",
+    "attack_stage",
+    "defense_stage",
+    "special_attack_stage",
+    "special_defense_stage",
+    "speed_stage",
+    "accuracy_stage",
+    "evasion_stage",
+    "side_effects",
+)
+
+
+def _validate_side_state_shape(payload: Any, *, label: str) -> None:
+    _reject_unexpected_keys(
+        payload, frozenset(_SIDE_STATE_FIELDS), label=f"RICH_STATE_SIDE:{label}"
+    )
+    for field_name in _SIDE_STATE_FIELDS:
+        _validate_known_shape(payload[field_name], label=f"{label}.{field_name}")
+
+
+def _validate_side_delta_shape(payload: Any, *, label: str) -> None:
+    _reject_unexpected_keys(
+        payload, frozenset(_SIDE_STATE_FIELDS), label=f"RICH_STATE_SIDE_DELTA:{label}"
+    )
+    for field_name in _SIDE_STATE_FIELDS:
+        _validate_field_delta_shape(payload[field_name], label=f"{label}.{field_name}")
+
+
+def _identity_from_json(payload: Any, *, label: str) -> TurnIdentity:
+    _reject_unexpected_keys(payload, _ALLOWED_IDENTITY_KEYS, label=f"{label}_IDENTITY")
+    try:
+        return TurnIdentity(
+            session_id=str(payload["session_id"]),
+            match_id=str(payload["match_id"]),
+            generation=int(payload["generation"]),
+            turn_id=str(payload["turn_id"]),
+            turn_number=int(payload["turn_number"]),
+            battle_revision=int(payload["battle_revision"]),
         )
-    for known_field in ("weather", "terrain"):
-        known = state[known_field]
-        if not isinstance(known, dict) or "status" not in known:
-            raise MatchExportV3Error(
-                f"V3_EXPORT_RICH_STATE_INVALID_KNOWLEDGE:turn={turn_number}:{known_field}"
-            )
-        if known["status"] not in {"CONFIRMED", "UNKNOWN"}:
-            raise MatchExportV3Error(
-                f"V3_EXPORT_RICH_STATE_INVALID_KNOWLEDGE_STATUS:turn={turn_number}:{known_field}"
-            )
-        if known["status"] == "UNKNOWN" and known.get("value") is not None:
-            raise MatchExportV3Error(
-                f"V3_EXPORT_RICH_STATE_UNKNOWN_CARRIES_VALUE:turn={turn_number}:{known_field}"
-            )
-        if known["status"] == "CONFIRMED" and not known.get("provenance_chain"):
-            raise MatchExportV3Error(
-                f"V3_EXPORT_RICH_STATE_MISSING_PROVENANCE:turn={turn_number}:{known_field}"
-            )
-    delta = block["source_action_result_delta"]
-    if delta is not None:
-        if not isinstance(delta, dict) or "based_on_confirmed_state_id" not in delta:
-            raise MatchExportV3Error(
-                f"V3_EXPORT_RICH_STATE_INVALID_DELTA:turn={turn_number}"
-            )
-        for field_delta_field in ("weather", "terrain"):
-            field_delta = delta.get(field_delta_field)
-            if not isinstance(field_delta, dict) or "observation" not in field_delta:
-                raise MatchExportV3Error(
-                    f"V3_EXPORT_RICH_STATE_INVALID_FIELD_DELTA:turn={turn_number}:{field_delta_field}"
-                )
-            observation = field_delta["observation"]
-            if observation not in {"CHANGED", "UNCHANGED", "UNKNOWN"}:
-                raise MatchExportV3Error(
-                    f"V3_EXPORT_RICH_STATE_INVALID_OBSERVATION:turn={turn_number}:{field_delta_field}"
-                )
-            if observation == "CHANGED" and field_delta.get("after_value") is None:
-                raise MatchExportV3Error(
-                    f"V3_EXPORT_RICH_STATE_CHANGED_WITHOUT_VALUE:turn={turn_number}:{field_delta_field}"
-                )
-            if observation != "CHANGED" and field_delta.get("after_value") is not None:
-                raise MatchExportV3Error(
-                    f"V3_EXPORT_RICH_STATE_UNCHANGED_CARRIES_VALUE:turn={turn_number}:{field_delta_field}"
-                )
-    legal_actions = block["confirmed_legal_actions"]
-    if not isinstance(legal_actions, list):
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MatchExportV3Error(f"V3_EXPORT_{label}_INVALID_IDENTITY:{exc}") from exc
+
+
+def _confirmation_from_json(payload: Any, *, label: str) -> ConfirmationMeta:
+    _reject_unexpected_keys(payload, _ALLOWED_CONFIRMATION_KEYS, label=f"{label}_CONFIRMATION")
+    try:
+        return ConfirmationMeta(
+            confirmed_by_human=bool(payload["confirmed_by_human"]),
+            confirmed_at_utc=str(payload["confirmed_at_utc"]),
+            provenance=str(payload["provenance"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MatchExportV3Error(f"V3_EXPORT_{label}_INVALID_CONFIRMATION:{exc}") from exc
+
+
+def _confirmed_state_from_json(payload: Any, *, turn_number: object) -> ConfirmedTurnState:
+    label = f"RICH_STATE_STATE:turn={turn_number}"
+    _reject_unexpected_keys(payload, _ALLOWED_CONFIRMED_STATE_KEYS, label=label)
+    identity = _identity_from_json(payload["identity"], label=label)
+    _validate_side_state_shape(payload["self_side"], label=f"{label}.self_side")
+    _validate_side_state_shape(payload["opponent_side"], label=f"{label}.opponent_side")
+    _validate_known_shape(payload["weather"], label=f"{label}.weather")
+    _validate_known_shape(payload["terrain"], label=f"{label}.terrain")
+    confirmation = _confirmation_from_json(payload["confirmation"], label=label)
+    try:
+        return ConfirmedTurnState(
+            confirmed_state_id=str(payload["confirmed_state_id"]),
+            identity=identity,
+            previous_confirmed_state_id=payload["previous_confirmed_state_id"],
+            self_side=side_state_from_json(payload["self_side"]),
+            opponent_side=side_state_from_json(payload["opponent_side"]),
+            weather=known_from_json(payload["weather"]),
+            terrain=known_from_json(payload["terrain"]),
+            confirmation=confirmation,
+            evidence_id=payload["evidence_id"],
+        )
+    except (TurnStateError, ValueError, TypeError, KeyError) as exc:
+        raise MatchExportV3Error(f"V3_EXPORT_{label}_INVALID_STATE:{exc}") from exc
+
+
+def _delta_from_json(payload: Any, *, turn_number: object) -> ActionResultDelta:
+    label = f"RICH_STATE_DELTA:turn={turn_number}"
+    _reject_unexpected_keys(payload, _ALLOWED_DELTA_KEYS, label=label)
+    identity = _identity_from_json(payload["identity"], label=label)
+    _validate_side_delta_shape(payload["self_side"], label=f"{label}.self_side")
+    _validate_side_delta_shape(payload["opponent_side"], label=f"{label}.opponent_side")
+    _validate_field_delta_shape(payload["weather"], label=f"{label}.weather")
+    _validate_field_delta_shape(payload["terrain"], label=f"{label}.terrain")
+    confirmation = _confirmation_from_json(payload["confirmation"], label=label)
+    try:
+        return ActionResultDelta(
+            delta_id=str(payload["delta_id"]),
+            identity=identity,
+            based_on_confirmed_state_id=str(payload["based_on_confirmed_state_id"]),
+            self_side=side_delta_from_json(payload["self_side"]),
+            opponent_side=side_delta_from_json(payload["opponent_side"]),
+            weather=field_delta_from_json(payload["weather"]),
+            terrain=field_delta_from_json(payload["terrain"]),
+            confirmation=confirmation,
+        )
+    except (TurnStateError, ValueError, TypeError, KeyError) as exc:
+        raise MatchExportV3Error(f"V3_EXPORT_{label}_INVALID_DELTA:{exc}") from exc
+
+
+def _legal_action_from_json(
+    payload: Any, *, turn_number: object
+) -> ConfirmedLegalActionSelection:
+    label = f"RICH_STATE_LEGAL_ACTION:turn={turn_number}"
+    _reject_unexpected_keys(payload, _ALLOWED_LEGAL_ACTION_KEYS, label=label)
+    identity = _identity_from_json(payload["identity"], label=label)
+    confirmation = _confirmation_from_json(
+        {
+            "confirmed_by_human": payload["confirmed_by_human"],
+            "confirmed_at_utc": payload["confirmed_at_utc"],
+            "provenance": payload["provenance"],
+        },
+        label=label,
+    )
+    try:
+        action_type = ActionType(str(payload["action_type"]))
+    except ValueError as exc:
+        raise MatchExportV3Error(f"V3_EXPORT_{label}_INVALID_ACTION_TYPE:{exc}") from exc
+    try:
+        return ConfirmedLegalActionSelection(
+            confirmation_id=str(payload["confirmation_id"]),
+            identity=identity,
+            action_type=action_type,
+            action_name=str(payload["action_name"]),
+            confirmation=confirmation,
+            source_prefill_id=payload["source_prefill_id"],
+        )
+    except (TurnStateError, ValueError, TypeError, KeyError) as exc:
+        raise MatchExportV3Error(f"V3_EXPORT_{label}_INVALID_LEGAL_ACTION:{exc}") from exc
+
+
+def _evidence_from_json(payload: Any, *, turn_number: object) -> FixedEvidenceMetadata:
+    label = f"RICH_STATE_EVIDENCE:turn={turn_number}"
+    _reject_unexpected_keys(payload, _ALLOWED_EVIDENCE_KEYS, label=label)
+    validate_evidence_hash_shape(payload.get("sha256"))
+    try:
+        return FixedEvidenceMetadata(
+            evidence_id=str(payload["evidence_id"]),
+            relative_path=str(payload["relative_path"]),
+            sha256=str(payload["sha256"]),
+            recorded_at_utc=str(payload["recorded_at_utc"]),
+        )
+    except (ValueError, TypeError, KeyError) as exc:
+        raise MatchExportV3Error(f"V3_EXPORT_{label}_INVALID_EVIDENCE:{exc}") from exc
+
+
+def _validate_rich_state_block(block: Any, *, turn_number: object) -> None:
+    """Strictly reconstruct every Bundle A object embedded in this rich turn.
+
+    Delegates to the real domain constructors and codecs
+    (:func:`known_from_json`, :func:`side_state_from_json`,
+    :func:`field_delta_from_json`, :func:`side_delta_from_json`,
+    ``ConfirmedTurnState``, ``ActionResultDelta``,
+    ``ConfirmedLegalActionSelection``, ``FixedEvidenceMetadata``) so their
+    own invariants participate in validation, rather than re-implementing a
+    parallel, weaker subset. Also rejects any unexpected key in every fixed
+    structure and cross-validates identity across the confirmed state,
+    delta, legal actions, and evidence within this one turn.
+    """
+
+    _reject_unexpected_keys(
+        block, _REQUIRED_RICH_STATE_KEYS, label=f"RICH_STATE:turn={turn_number}"
+    )
+    if block["contract_version"] != RICH_STATE_EXPORT_CONTRACT_VERSION:
+        raise MatchExportV3Error(
+            f"V3_EXPORT_RICH_STATE_CONTRACT_VERSION_MISMATCH:turn={turn_number}"
+        )
+
+    state = _confirmed_state_from_json(block["confirmed_turn_state"], turn_number=turn_number)
+
+    delta_payload = block["source_action_result_delta"]
+    delta = (
+        _delta_from_json(delta_payload, turn_number=turn_number)
+        if delta_payload is not None
+        else None
+    )
+    if delta is not None and delta.identity != state.identity:
+        raise MatchExportV3Error(
+            f"V3_EXPORT_RICH_STATE_DELTA_STATE_IDENTITY_MISMATCH:turn={turn_number}"
+        )
+
+    legal_actions_payload = block["confirmed_legal_actions"]
+    if not isinstance(legal_actions_payload, list):
         raise MatchExportV3Error(
             f"V3_EXPORT_RICH_STATE_LEGAL_ACTIONS_MUST_BE_LIST:turn={turn_number}"
         )
-    seen_confirmation_ids: set[object] = set()
+    legal_actions = tuple(
+        _legal_action_from_json(action, turn_number=turn_number)
+        for action in legal_actions_payload
+    )
+    seen_confirmation_ids: set[str] = set()
     for action in legal_actions:
-        if not isinstance(action, dict) or not action.get("confirmation_id"):
+        if action.identity != state.identity:
             raise MatchExportV3Error(
-                f"V3_EXPORT_RICH_STATE_MALFORMED_LEGAL_ACTION:turn={turn_number}"
+                f"V3_EXPORT_RICH_STATE_LEGAL_ACTION_IDENTITY_MISMATCH:turn={turn_number}"
             )
-        if action["confirmation_id"] in seen_confirmation_ids:
+        if action.confirmation_id in seen_confirmation_ids:
             raise MatchExportV3Error(
                 f"V3_EXPORT_RICH_STATE_DUPLICATE_LEGAL_ACTION:turn={turn_number}"
             )
-        seen_confirmation_ids.add(action["confirmation_id"])
-    evidence = block["evidence"]
-    if evidence is not None:
-        if state["evidence_id"] != evidence.get("evidence_id"):
+        seen_confirmation_ids.add(action.confirmation_id)
+    if legal_actions:
+        try:
+            build_confirmed_legal_actions_input(state.identity, legal_actions)
+        except (TurnStateIdentityError, ValueError) as exc:
+            raise MatchExportV3Error(
+                f"V3_EXPORT_RICH_STATE_LEGAL_ACTION_BOUNDARY_REJECTED:turn={turn_number}:{exc}"
+            ) from exc
+
+    evidence_payload = block["evidence"]
+    if evidence_payload is not None:
+        evidence = _evidence_from_json(evidence_payload, turn_number=turn_number)
+        if state.evidence_id != evidence.evidence_id:
             raise MatchExportV3Error(
                 f"V3_EXPORT_RICH_STATE_EVIDENCE_ID_MISMATCH:turn={turn_number}"
-            )
-        sha256 = evidence.get("sha256")
-        if not isinstance(sha256, str) or len(sha256) != 64:
-            raise MatchExportV3Error(
-                f"V3_EXPORT_RICH_STATE_INVALID_EVIDENCE_HASH:turn={turn_number}"
             )
 
 

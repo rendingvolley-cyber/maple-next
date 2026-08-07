@@ -831,17 +831,7 @@ class BattleApplication:
             # value is not used further -- passing the boundary is the proof.
             build_confirmed_legal_actions_input(current_identity, confirmed_legal_actions)
 
-            # Retrieved by ``based_on_confirmed_state_id`` alone (never
-            # pre-filtered by session/match/generation) so a foreign or
-            # corrupt candidate cannot simply disappear before validation --
-            # every candidate below is validated full-chain and, on any
-            # failure, denies the request rather than silently treating the
-            # corruption as "no draft".
-            candidate_drafts = (
-                self.repository.list_candidate_next_turn_state_drafts_for_confirmed_state(
-                    latest_state.confirmed_state_id
-                )
-            )
+            candidate_drafts = self._discover_candidate_open_drafts(latest_state)
             latest_open_draft: NextTurnStateDraft | None = None
             latest_open_draft_turn_number: int | None = None
             latest_open_draft_battle_revision: int | None = None
@@ -1015,6 +1005,39 @@ class BattleApplication:
         if compute_turn_request_payload_hash(request) != job.request_payload_hash:
             raise DomainError("REQUEST_PAYLOAD_HASH_MISMATCH")
         return request
+
+    def _discover_candidate_open_drafts(
+        self, latest_state: ConfirmedTurnState
+    ) -> tuple[NextTurnStateDraft, ...]:
+        """Every OPEN draft candidate for ``latest_state``, found two independent ways.
+
+        A draft is discoverable either by its own (possibly corrupted)
+        ``based_on_confirmed_state_id`` column, or -- independently -- by
+        being the referrer of a delta that is durably based on
+        ``latest_state`` (``action_result_deltas.based_on_confirmed_state_id
+        == latest_state.confirmed_state_id``). Taking the union means a
+        draft whose own ``based_on_confirmed_state_id`` was corrupted but
+        whose ``source_delta_id`` genuinely points at a current-chain delta
+        cannot disappear as "no draft" -- it is still surfaced here, and
+        :meth:`request_rich_turn_advice` then runs it through full-chain
+        validation, which is what actually detects and rejects the
+        corruption. "No draft" is only concluded when neither discovery
+        path finds any candidate.
+        """
+
+        by_based_on = self.repository.list_candidate_next_turn_state_drafts_for_confirmed_state(
+            latest_state.confirmed_state_id
+        )
+        deltas_based_on_current = self.repository.list_action_result_deltas_based_on(
+            latest_state.confirmed_state_id
+        )
+        by_source_delta = self.repository.list_next_turn_state_drafts_by_source_delta_ids(
+            tuple(delta.delta_id for delta in deltas_based_on_current)
+        )
+        candidates_by_draft_id: dict[str, NextTurnStateDraft] = {}
+        for draft in (*by_based_on, *by_source_delta):
+            candidates_by_draft_id[draft.draft_id] = draft
+        return tuple(candidates_by_draft_id.values())
 
     def build_rich_turn_advice_transport_request(
         self, job: JobEnvelope

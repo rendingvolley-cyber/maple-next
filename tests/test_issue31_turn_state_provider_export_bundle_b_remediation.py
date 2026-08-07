@@ -851,6 +851,101 @@ def test_export_selects_v3_for_rich_state_match(rich_fixture: RichSessionFixture
 _MINIMAL_SELECTION = {"self_team": [], "opponent_team": [], "selected_three": [], "lead": ""}
 
 
+def _known_json(status: str = "CONFIRMED", value: object = "NONE") -> dict:
+    if status == "UNKNOWN":
+        return {"status": "UNKNOWN", "provenance_chain": ["UNKNOWN"]}
+    return {"status": "CONFIRMED", "value": value, "provenance_chain": ["HUMAN_INPUT"]}
+
+
+def _field_delta_json(observation: str = "UNCHANGED", after_value: object = None) -> dict:
+    if observation == "CHANGED":
+        return {
+            "observation": "CHANGED",
+            "after_value": after_value,
+            "provenance_chain": ["HUMAN_INPUT"],
+        }
+    return {"observation": observation, "provenance_chain": ["HUMAN_INPUT"]}
+
+
+_SIDE_STATE_FIELD_NAMES = (
+    "active",
+    "hp_bucket",
+    "status",
+    "attack_stage",
+    "defense_stage",
+    "special_attack_stage",
+    "special_defense_stage",
+    "speed_stage",
+    "accuracy_stage",
+    "evasion_stage",
+    "side_effects",
+)
+
+
+def _valid_side_state_json() -> dict:
+    values = {
+        "active": "Dondozo",
+        "hp_bucket": "100",
+        "status": "NONE",
+        "attack_stage": 0,
+        "defense_stage": 0,
+        "special_attack_stage": 0,
+        "special_defense_stage": 0,
+        "speed_stage": 0,
+        "accuracy_stage": 0,
+        "evasion_stage": 0,
+        "side_effects": [],
+    }
+    return {name: _known_json(value=values[name]) for name in _SIDE_STATE_FIELD_NAMES}
+
+
+def _valid_side_delta_json() -> dict:
+    return {name: _field_delta_json() for name in _SIDE_STATE_FIELD_NAMES}
+
+
+def _valid_identity_json(**overrides) -> dict:
+    identity = {
+        "session_id": "s",
+        "match_id": "m",
+        "generation": 1,
+        "turn_id": "t1",
+        "turn_number": 1,
+        "battle_revision": 1,
+    }
+    identity.update(overrides)
+    return identity
+
+
+def _valid_confirmation_json() -> dict:
+    return {
+        "confirmed_by_human": True,
+        "confirmed_at_utc": CONFIRMED_AT,
+        "provenance": "HUMAN_CONFIRMED",
+    }
+
+
+def _valid_rich_state_block() -> dict:
+    from maple_next.application.match_export_v3 import RICH_STATE_EXPORT_CONTRACT_VERSION
+
+    return {
+        "contract_version": RICH_STATE_EXPORT_CONTRACT_VERSION,
+        "confirmed_turn_state": {
+            "confirmed_state_id": "s1",
+            "previous_confirmed_state_id": None,
+            "identity": _valid_identity_json(),
+            "self_side": _valid_side_state_json(),
+            "opponent_side": _valid_side_state_json(),
+            "weather": _known_json(),
+            "terrain": _known_json(),
+            "confirmation": _valid_confirmation_json(),
+            "evidence_id": None,
+        },
+        "source_action_result_delta": None,
+        "confirmed_legal_actions": [],
+        "evidence": None,
+    }
+
+
 def test_parser_rejects_forbidden_provider_key() -> None:
     payload = {
         "schema_version": "maple-match.v3",
@@ -869,6 +964,8 @@ def test_parser_rejects_forbidden_provider_key() -> None:
 
 
 def test_parser_rejects_unknown_carrying_value() -> None:
+    rich_state = _valid_rich_state_block()
+    rich_state["confirmed_turn_state"]["weather"] = {"status": "UNKNOWN", "value": "NONE"}
     payload = {
         "schema_version": "maple-match.v3",
         "session_id": "s",
@@ -879,28 +976,7 @@ def test_parser_rejects_unknown_carrying_value() -> None:
         "final_battle_revision": 1,
         "selection": _MINIMAL_SELECTION,
         "action_history": [],
-        "turns": [
-            {
-                "turn_number": 1,
-                "rich_state": {
-                    "contract_version": "maple-match-rich-state.v1",
-                    "confirmed_turn_state": {
-                        "confirmed_state_id": "s1",
-                        "previous_confirmed_state_id": None,
-                        "identity": {},
-                        "self_side": {},
-                        "opponent_side": {},
-                        "weather": {"status": "UNKNOWN", "value": "NONE"},
-                        "terrain": {"status": "UNKNOWN", "provenance_chain": ["UNKNOWN"]},
-                        "confirmation": {},
-                        "evidence_id": None,
-                    },
-                    "source_action_result_delta": None,
-                    "confirmed_legal_actions": [],
-                    "evidence": None,
-                },
-            }
-        ],
+        "turns": [{"turn_number": 1, "rich_state": rich_state}],
     }
     with pytest.raises(MatchExportV3Error, match="UNKNOWN_CARRIES_VALUE"):
         parse_match_export_v3(json.dumps(payload).encode("utf-8"))

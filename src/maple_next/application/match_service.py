@@ -17,6 +17,9 @@ from maple_next.application.match_export_v3 import (
     build_integrated_match_export_v3_payload,
     parse_match_export_v3,
     validate_confirmed_states_for_export,
+    validate_delta_chain_for_export,
+    validate_evidence_hash_shape,
+    validate_legal_actions_for_export,
 )
 from maple_next.application.projection import DomainProjection
 from maple_next.application.service import BattleApplication, DomainError
@@ -371,31 +374,66 @@ class MatchApplication(BattleApplication):
         except MatchExportV3Error as exc:
             raise DomainError(f"V3_EXPORT_STATE_VALIDATION_FAILED:{exc}") from exc
 
-        deltas_by_identity = {
-            delta.identity: delta
-            for delta in self.repository.list_action_result_deltas_for_match(
+        # Every exported state's turn_id/turn_number must correspond to a
+        # real repository BattleTurn belonging to this exact session --
+        # never inferred from the confirmed state row alone.
+        turns_by_id = {
+            turn.turn_id: turn for turn in self.repository.list_turns(session.session_id)
+        }
+        for state in confirmed_states:
+            turn = turns_by_id.get(state.identity.turn_id)
+            if turn is None:
+                raise DomainError("V3_EXPORT_STATE_TURN_ID_NOT_FOUND")
+            if turn.turn_number != state.identity.turn_number:
+                raise DomainError("V3_EXPORT_STATE_TURN_NUMBER_MISMATCH")
+
+        try:
+            delta_by_based_on = validate_delta_chain_for_export(
                 session_id=session.session_id,
                 match_id=session.match_id,
                 generation=session.generation,
+                confirmed_states=confirmed_states,
+                deltas=self.repository.list_action_result_deltas_for_match(
+                    session_id=session.session_id,
+                    match_id=session.match_id,
+                    generation=session.generation,
+                ),
             )
-        }
+        except MatchExportV3Error as exc:
+            raise DomainError(f"V3_EXPORT_DELTA_VALIDATION_FAILED:{exc}") from exc
 
         rich_turns: dict[int, ConfirmedTurnRecord] = {}
         for state in confirmed_states:
             legal_actions = self.repository.list_confirmed_legal_action_selections_for_identity(
                 state.identity
             )
+            try:
+                validate_legal_actions_for_export(state.identity, legal_actions)
+            except MatchExportV3Error as exc:
+                raise DomainError(f"V3_EXPORT_LEGAL_ACTION_VALIDATION_FAILED:{exc}") from exc
+
             evidence = None
             if state.evidence_id is not None:
                 try:
                     evidence = self.repository.get_fixed_evidence_metadata(state.evidence_id)
                 except KeyError as exc:
                     raise DomainError("V3_EXPORT_EVIDENCE_METADATA_MISSING") from exc
-            # Latest battle_revision for a given turn_number wins -- states
-            # are already ordered ascending by (turn_number, battle_revision).
+                if evidence.evidence_id != state.evidence_id:
+                    raise DomainError("V3_EXPORT_EVIDENCE_ID_MISMATCH")
+                try:
+                    validate_evidence_hash_shape(evidence.sha256)
+                except MatchExportV3Error as exc:
+                    raise DomainError(f"V3_EXPORT_INVALID_EVIDENCE_HASH:{exc}") from exc
+
+            # Fail closed rather than "latest wins": Bundle A's chain rules
+            # guarantee at most one confirmed state per turn_number, but
+            # this is re-checked explicitly here as defense in depth rather
+            # than trusting a plain dict assignment to hide a violation.
+            if state.identity.turn_number in rich_turns:
+                raise DomainError("V3_EXPORT_CONTRADICTORY_RICH_STATE_SAME_TURN")
             rich_turns[state.identity.turn_number] = ConfirmedTurnRecord(
                 confirmed_state=state,
-                source_delta=deltas_by_identity.get(state.identity),
+                source_delta=delta_by_based_on.get(state.confirmed_state_id),
                 confirmed_legal_actions=legal_actions,
                 evidence=evidence,
             )

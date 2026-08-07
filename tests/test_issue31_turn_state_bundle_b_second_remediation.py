@@ -693,9 +693,60 @@ def test_strict_parser_requires_legacy_selection_and_action_history() -> None:
         parse_match_export_v3(json.dumps(payload).encode("utf-8"))
 
 
+_SIDE_STATE_FIELD_NAMES = (
+    "active",
+    "hp_bucket",
+    "status",
+    "attack_stage",
+    "defense_stage",
+    "special_attack_stage",
+    "special_defense_stage",
+    "speed_stage",
+    "accuracy_stage",
+    "evasion_stage",
+    "side_effects",
+)
+
+
+def _known_json(value: object = "NONE") -> dict:
+    return {"status": "CONFIRMED", "value": value, "provenance_chain": ["HUMAN_INPUT"]}
+
+
+def _valid_side_state_json() -> dict:
+    values: dict[str, object] = {
+        "active": "Dondozo",
+        "hp_bucket": "100",
+        "status": "NONE",
+        "attack_stage": 0,
+        "defense_stage": 0,
+        "special_attack_stage": 0,
+        "special_defense_stage": 0,
+        "speed_stage": 0,
+        "accuracy_stage": 0,
+        "evasion_stage": 0,
+        "side_effects": [],
+    }
+    return {name: _known_json(values[name]) for name in _SIDE_STATE_FIELD_NAMES}
+
+
+def _valid_side_delta_json() -> dict:
+    return {
+        name: {"observation": "UNCHANGED", "provenance_chain": ["HUMAN_INPUT"]}
+        for name in _SIDE_STATE_FIELD_NAMES
+    }
+
+
 def test_strict_parser_rejects_unknown_carrying_delta_after_value() -> None:
     from maple_next.application.match_export_v3 import RICH_STATE_EXPORT_CONTRACT_VERSION
 
+    shared_identity = {
+        "session_id": "s",
+        "match_id": "m",
+        "generation": 1,
+        "turn_id": "t1",
+        "turn_number": 1,
+        "battle_revision": 1,
+    }
     payload = {
         "schema_version": "maple-match.v3",
         "session_id": "s",
@@ -726,26 +777,11 @@ def test_strict_parser_rejects_unknown_carrying_delta_after_value() -> None:
                     "confirmed_turn_state": {
                         "confirmed_state_id": "s1",
                         "previous_confirmed_state_id": None,
-                        "identity": {
-                            "session_id": "s",
-                            "match_id": "m",
-                            "generation": 1,
-                            "turn_id": "t1",
-                            "turn_number": 1,
-                            "battle_revision": 1,
-                        },
-                        "self_side": {},
-                        "opponent_side": {},
-                        "weather": {
-                            "status": "CONFIRMED",
-                            "value": "NONE",
-                            "provenance_chain": ["HUMAN_INPUT"],
-                        },
-                        "terrain": {
-                            "status": "CONFIRMED",
-                            "value": "NONE",
-                            "provenance_chain": ["HUMAN_INPUT"],
-                        },
+                        "identity": shared_identity,
+                        "self_side": _valid_side_state_json(),
+                        "opponent_side": _valid_side_state_json(),
+                        "weather": _known_json(),
+                        "terrain": _known_json(),
                         "confirmation": {
                             "confirmed_by_human": True,
                             "confirmed_at_utc": CONFIRMED_AT,
@@ -755,17 +791,17 @@ def test_strict_parser_rejects_unknown_carrying_delta_after_value() -> None:
                     },
                     "source_action_result_delta": {
                         "delta_id": "d1",
-                        "identity": {
-                            "session_id": "s",
-                            "match_id": "m",
-                            "generation": 1,
-                            "turn_id": "t1",
-                            "turn_number": 1,
-                            "battle_revision": 1,
-                        },
+                        "identity": shared_identity,
                         "based_on_confirmed_state_id": "s0",
+                        "self_side": _valid_side_delta_json(),
+                        "opponent_side": _valid_side_delta_json(),
                         "weather": {"observation": "UNCHANGED", "after_value": "should-be-null"},
                         "terrain": {"observation": "UNCHANGED", "after_value": None},
+                        "confirmation": {
+                            "confirmed_by_human": True,
+                            "confirmed_at_utc": CONFIRMED_AT,
+                            "provenance": "HUMAN_CONFIRMED",
+                        },
                     },
                     "confirmed_legal_actions": [],
                     "evidence": None,

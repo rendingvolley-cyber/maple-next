@@ -436,6 +436,55 @@ class TurnStateStoreMixin(StoreBase):
         ).fetchall()
         return tuple(self._next_turn_state_draft_from_row(row) for row in rows)
 
+    def list_action_result_deltas_based_on(
+        self, based_on_confirmed_state_id: str
+    ) -> tuple[ActionResultDelta, ...]:
+        """Every delta claiming to be based on this confirmed state -- validation only.
+
+        Used, together with
+        :meth:`list_next_turn_state_drafts_by_source_delta_ids`, to discover
+        an OPEN draft through the delta relationship rather than trusting
+        the draft's own (possibly corrupted) ``based_on_confirmed_state_id``
+        column.
+        """
+
+        rows = self.connection.execute(
+            """
+            SELECT * FROM action_result_deltas
+            WHERE based_on_confirmed_state_id = ?
+            ORDER BY turn_number ASC, battle_revision ASC, rowid ASC
+            """,
+            (based_on_confirmed_state_id,),
+        ).fetchall()
+        return tuple(self._action_result_delta_from_row(row) for row in rows)
+
+    def list_next_turn_state_drafts_by_source_delta_ids(
+        self, delta_ids: tuple[str, ...]
+    ) -> tuple[NextTurnStateDraft, ...]:
+        """Every draft referencing any of ``delta_ids`` as its source delta.
+
+        Deliberately independent of the draft's own
+        ``based_on_confirmed_state_id`` column, so a draft discoverable
+        through a genuinely current-chain delta cannot disappear merely
+        because that column was corrupted on the draft row itself. Combined
+        with :meth:`list_candidate_next_turn_state_drafts_for_confirmed_state`,
+        this makes "no current-chain candidate exists by any durable
+        relation" the only way to conclude "no draft".
+        """
+
+        if not delta_ids:
+            return ()
+        placeholders = ",".join("?" for _ in delta_ids)
+        rows = self.connection.execute(
+            f"""
+            SELECT * FROM next_turn_state_drafts
+            WHERE source_delta_id IN ({placeholders})
+            ORDER BY turn_number ASC, battle_revision ASC, rowid ASC
+            """,
+            delta_ids,
+        ).fetchall()
+        return tuple(self._next_turn_state_draft_from_row(row) for row in rows)
+
     def list_next_turn_state_drafts_for_match(
         self, *, session_id: str, match_id: str, generation: int
     ) -> tuple[NextTurnStateDraft, ...]:

@@ -54,6 +54,7 @@ from maple_next.ui.turn_snapshot_official_window import TurnSnapshotMatchFlowWin
 from maple_next.ui.turn_state_flow import TurnStateFlowController, TurnStateSummaryView
 
 _BATTLE_RECORD_TAB_INDEX = 1
+_PREVIEW_MAX_HEIGHT = 96
 _HUMAN_INPUT = (ProvenanceStep.HUMAN_INPUT,)
 
 _STAGE_FIELDS: tuple[tuple[str, str], ...] = (
@@ -569,6 +570,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         capture_freshness = getattr(self, "capture_freshness_label", None)
         capture_device = getattr(self, "capture_device_label", None)
         turn_snapshot_frame_label = getattr(self, "turn_snapshot_frame_label", None)
+        turn_snapshot_identity_label = getattr(self, "turn_snapshot_identity_label", None)
+        turn_snapshot_roi_label = getattr(self, "turn_snapshot_roi_label", None)
         if turn_snapshot_frame_label is not None:
             frame_id_row = QWidget()
             frame_id_layout = QFormLayout(frame_id_row)
@@ -576,7 +579,26 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 frame_id_layout.addRow("フレーム鮮度", QLabel(capture_freshness.text()))
             if capture_device is not None:
                 frame_id_layout.addRow("キャプチャ機器", QLabel(capture_device.text()))
+            frame_id_layout.addRow("Turn Frame", QLabel(turn_snapshot_frame_label.text()))
+            if turn_snapshot_identity_label is not None:
+                frame_id_layout.addRow("Identity", QLabel(turn_snapshot_identity_label.text()))
+            if turn_snapshot_roi_label is not None:
+                frame_id_layout.addRow("ROI", QLabel(turn_snapshot_roi_label.text()))
             self.diagnostics_drawer.add_widget(frame_id_row)
+
+        # These specific detail rows are always visible below the two
+        # compact evidentiary thumbnails and duplicated (above) in the
+        # diagnostics drawer -- hide the originals in center so the
+        # thumbnails' own status text is the only thing shown there.
+        for detail_label in (
+            capture_freshness,
+            capture_device,
+            turn_snapshot_frame_label,
+            turn_snapshot_identity_label,
+            turn_snapshot_roi_label,
+        ):
+            if detail_label is not None:
+                detail_label.setVisible(False)
 
         # ROI crop images and per-field origin/provenance rows are raw
         # capture diagnostics -- keep them out of the fixed, non-scrolling
@@ -652,6 +674,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if turn_snapshot_group is not None:
             self._detach_from_parent_layout(self.capture_status_group)
             self._detach_from_parent_layout(turn_snapshot_group)
+            # Hard height cap on both evidentiary images -- still always
+            # visible at a legible size, but bounded so the fixed,
+            # non-scrolling center column can actually fit 900/720px.
+            self.capture_preview_label.setMinimumSize(160, 90)
+            self.capture_preview_label.setMaximumHeight(_PREVIEW_MAX_HEIGHT)
+            self.turn_snapshot_image_label.setMinimumSize(160, 90)
+            self.turn_snapshot_image_label.setMaximumHeight(_PREVIEW_MAX_HEIGHT)
             preview_row = QWidget()
             preview_row_layout = QHBoxLayout(preview_row)
             preview_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -690,6 +719,32 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         page_layout.addWidget(header_widget)
         page_layout.addLayout(body_row, 1)
         page_layout.addWidget(bottom_bar)
+        # Compact chrome app-wide within this tab: every QGroupBox/QLabel's
+        # margins and spacing add up across the ~6 groups always live in
+        # the center column -- this is what actually makes 900/720px
+        # reachable without dropping any operator-visible field.
+        page.setStyleSheet(
+            "QGroupBox { margin-top: 10px; padding: 4px 4px 2px 4px; font-size: 11px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 0 2px; }"
+            "QLabel { font-size: 11px; }"
+            "QPushButton { padding: 2px 6px; font-size: 11px; }"
+            "QComboBox, QLineEdit, QSpinBox, QCheckBox { font-size: 11px; }"
+        )
+        capture_status_layout = self.capture_status_group.layout()
+        if capture_status_layout is not None:
+            capture_status_layout.setContentsMargins(4, 4, 4, 4)
+            capture_status_layout.setSpacing(2)
+        self.reconnect_capture_button.setMaximumHeight(22)
+        turn_snapshot_group_widget = getattr(self, "turn_snapshot_group", None)
+        if turn_snapshot_group_widget is not None:
+            turn_snapshot_layout = turn_snapshot_group_widget.layout()
+            if turn_snapshot_layout is not None:
+                turn_snapshot_layout.setContentsMargins(4, 4, 4, 4)
+                turn_snapshot_layout.setSpacing(2)
+        retake_button = getattr(self, "retake_turn_snapshot_button", None)
+        if retake_button is not None:
+            retake_button.setMaximumHeight(22)
+        self._center_column_layout.setSpacing(4)
 
         self.header_tabs.removeTab(_BATTLE_RECORD_TAB_INDEX)
         self.header_tabs.insertTab(_BATTLE_RECORD_TAB_INDEX, page, "バトルレコード")

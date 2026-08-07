@@ -193,9 +193,15 @@ def test_document_rejects_invalid_turn_progression() -> None:
 
 
 def test_document_rejects_invalid_revision_progression() -> None:
+    # 00 design decision (Issue #31 comments 5217661584 / 5217996240):
+    # battle_revision is a durable global mutation-revision counter, so the
+    # chain rule is "strictly greater than previous", not "exactly +1". A
+    # larger revision (e.g. 9 > 1) is therefore no longer invalid on its
+    # own -- the corrupt case that must still fail is a revision that is
+    # NOT greater than the previous turn's own revision (state_1's is 1).
     payload = _valid_two_turn_payload()
-    payload["turns"][1]["rich_state"]["confirmed_turn_state"]["identity"]["battle_revision"] = 9
-    payload["final_battle_revision"] = 9
+    payload["turns"][1]["rich_state"]["confirmed_turn_state"]["identity"]["battle_revision"] = 1
+    payload["final_battle_revision"] = 1
     with pytest.raises(MatchExportV3Error, match="INVALID_REVISION_PROGRESSION"):
         parse_match_export_v3(json.dumps(payload).encode("utf-8"))
 

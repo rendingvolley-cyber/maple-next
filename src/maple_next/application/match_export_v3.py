@@ -316,14 +316,15 @@ def validate_confirmed_states_for_export(
 
     Requires: the outcome's own identity matches the export session exactly;
     every confirmed state belongs to the exact session/match/generation;
-    unique state ids; unique turn_number (Bundle A's chain rules increment
-    turn_number and battle_revision together by exactly one on every
-    transition, so a valid chain never has two different confirmed states
-    for the same turn_number); a strictly non-decreasing
-    (turn_number, battle_revision) ordering; every non-first state's
-    ``previous_confirmed_state_id`` linking to the immediately preceding
-    exported state; and no state whose ``battle_revision`` exceeds
-    ``outcome.final_battle_revision``.
+    unique state ids; unique turn_number (Bundle A's chain rules advance
+    turn_number by exactly one and battle_revision by strictly more than
+    zero on every transition -- battle_revision is a durable global
+    mutation-revision counter, not a Turn-scoped +1 sequence -- so a valid
+    chain never has two different confirmed states for the same
+    turn_number); a strictly increasing (turn_number, battle_revision)
+    ordering; every non-first state's ``previous_confirmed_state_id``
+    linking to the immediately preceding exported state; and no state whose
+    ``battle_revision`` exceeds ``outcome.final_battle_revision``.
     """
 
     if outcome.session_id != session_id or outcome.match_id != match_id:
@@ -974,7 +975,12 @@ def _validate_full_document_rich_chain(
                 raise MatchExportV3Error("V3_EXPORT_DOCUMENT_BROKEN_PREVIOUS_STATE_LINKAGE")
             if identity.turn_number != previous_state.identity.turn_number + 1:
                 raise MatchExportV3Error("V3_EXPORT_DOCUMENT_INVALID_TURN_PROGRESSION")
-            if identity.battle_revision != previous_state.identity.battle_revision + 1:
+            # 00 design decision (Issue #31 comment 5217661584, aligned across
+            # the whole rich-state chain by comment 5217996240):
+            # battle_revision is a durable global mutation-revision counter,
+            # not a Turn-scoped +1 sequence -- the same rule as
+            # maple_next.domain.turn_state._bind_next_identity.
+            if identity.battle_revision <= previous_state.identity.battle_revision:
                 raise MatchExportV3Error("V3_EXPORT_DOCUMENT_INVALID_REVISION_PROGRESSION")
         previous_state = state
 

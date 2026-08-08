@@ -315,6 +315,10 @@ class MapleMainWindow(QMainWindow):
 
         heading = QLabel("今なにをすべきか")
         heading.setStyleSheet("font-size: 22px; font-weight: 700;")
+        # Exposed so a compacting subclass (Bundle C) can remove this top
+        # guidance block entirely -- not just hide it -- and reclaim the
+        # vertical space for the body below.
+        self._top_guidance_heading_label = heading
         self.primary_cta_label = QLabel()
         self.primary_cta_label.setStyleSheet("font-size: 18px; font-weight: 600;")
         self.guidance_label = QLabel()

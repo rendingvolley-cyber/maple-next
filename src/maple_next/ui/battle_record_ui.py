@@ -58,12 +58,12 @@ from maple_next.ui.turn_state_flow import TurnStateFlowController, TurnStateSumm
 
 _BATTLE_RECORD_TAB_INDEX = 1
 # Default official-launch client size (visual-parity remediation,
-# 5223723582): resizable, not fixed -- the human can freely resize the
-# window. 1280x720 remains the supported functional-minimum viewport
-# (mock 5203292374/5203546707) and is exercised by manual resize, not by
-# this constant.
-_DEFAULT_LAUNCH_WIDTH = 1440
-_DEFAULT_LAUNCH_HEIGHT = 900
+# 5223723582; raised from 1440x900 to 1920x1080 per 5224228965): resizable,
+# not fixed -- the human can freely resize the window. 1280x720 remains the
+# supported functional-minimum viewport (mock 5203292374/5203546707) and is
+# exercised by manual resize, not by this constant.
+_DEFAULT_LAUNCH_WIDTH = 1920
+_DEFAULT_LAUNCH_HEIGHT = 1080
 _MINIMUM_SUPPORTED_WIDTH = 1280
 _MINIMUM_SUPPORTED_HEIGHT = 720
 # Fixed Turn image thumbnail width band from the accepted mock: ~230px at
@@ -504,12 +504,12 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.render_view()
 
     def _apply_default_launch_geometry(self) -> None:
-        """Default official-launch client size is 1440x900 (resizable).
+        """Default official-launch client size is 1920x1080 (resizable).
 
         Not a fixed size -- ``setMinimumSize`` only floors manual resize at
         the 1280x720 functional-minimum viewport; the human can resize
         larger or down to that floor freely. When the available screen work
-        area is smaller than 1440x900, degrade to the largest safe size
+        area is smaller than 1920x1080, degrade to the largest safe size
         that still keeps at least the 1280x720 floor when the screen can
         offer it, rather than opening off-screen.
         """
@@ -631,6 +631,25 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         status_frame = self.application_mode_label.parentWidget()
         assert status_frame is not None
         outer_layout.removeWidget(status_frame)
+
+        # Top guidance removal (5224224375): the "今なにをすべきか" heading,
+        # the state-specific subtitle, and the paragraph under it are
+        # removed entirely -- not hidden -- so their vertical space returns
+        # to the body/LIVE area below. The fixed 5-button footer's
+        # visible/enabled state plus the compact Turn/state/provider line
+        # and per-section labels already carry this information; no
+        # replacement banner or text is added. error_label (anomaly
+        # alerts) and the window title / tab bar are unaffected.
+        for guidance_widget in (
+            getattr(self, "_top_guidance_heading_label", None),
+            self.primary_cta_label,
+            self.guidance_label,
+        ):
+            if guidance_widget is None:
+                continue
+            outer_layout.removeWidget(guidance_widget)
+            guidance_widget.setVisible(False)
+            guidance_widget.setParent(None)
         # Shared (both-tabs) outer chrome starts at a very roomy 24px
         # margin / 16px spacing -- tighten it so the fixed header above
         # the 3-column body doesn't eat into the 720px budget.
@@ -995,14 +1014,6 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             retake_button.setMaximumHeight(16)
         self._center_column_layout.setSpacing(0)
         self._center_column_layout.setContentsMargins(0, 0, 0, 0)
-
-        # The shared (both-tabs) primary-CTA/guidance labels sit above the
-        # tab widget itself -- shrinking their font is the last bit of
-        # fixed header overhead available to reclaim for 720px-tall
-        # viewports, without touching Selection-tab layout/behavior.
-        self.primary_cta_label.setStyleSheet("font-size: 13px; font-weight: 600;")
-        self.guidance_label.setStyleSheet("font-size: 10px;")
-        self.guidance_label.setMaximumHeight(28)
 
         self.header_tabs.removeTab(_BATTLE_RECORD_TAB_INDEX)
         self.header_tabs.insertTab(_BATTLE_RECORD_TAB_INDEX, page, "バトルレコード")

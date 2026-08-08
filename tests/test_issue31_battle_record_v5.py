@@ -1,4 +1,4 @@
-"""Acceptance for Issue #31 Battle Record v5, through final closure 5225265176."""
+"""Acceptance for Issue #31 Battle Record v5 HTML parity, through 5225359921."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def test_visual_remediation_uses_one_four_phase_workbench_surface(tmp_path: Path
 
     assert window.workbench_stack.count() == 4
     assert window.workbench_stack.currentWidget() is window.review_workbench_page
-    assert window.workbench_stack.maximumHeight() == 425
+    assert window.workbench_stack.maximumHeight() == 350
     assert window.diagnostics_drawer.isHidden()
     assert window.terminal_flow_drawer.isHidden()
     assert window.turn_facts_confirm_checkbox.isHidden()
@@ -86,7 +86,8 @@ def test_visual_remediation_uses_one_four_phase_workbench_surface(tmp_path: Path
     window.mock_turn_rationale_input.setText("fake/injected test")
     window._on_trusted_send_turn_to_gemini()
     assert window.workbench_stack.currentWidget() is window.action_workbench_page
-    assert window.action_result_delta_group.isVisible()
+    assert not window.action_result_delta_group.isVisible()
+    assert set(window.self_action_tabs) == {"MOVE", "SWITCH"}
     assert not window.current_state_group.isVisible()
     repository.close()
 
@@ -165,8 +166,8 @@ def test_final_visual_uses_dark_cards_and_active_lifecycle_state(tmp_path: Path)
     window.render_view()
 
     style = window.battle_record_page.styleSheet()
-    assert "#0b1220" in style
-    assert "#111827" in style
+    assert "#07101a" in style
+    assert "#091623" in style
     assert window.confirm_turn_facts_button.property("active") is True
     assert window.start_turn_button.property("active") is False
     repository.close()
@@ -179,7 +180,9 @@ def test_combined_review_contains_ocr_legal_actions_ability_and_state_helper(
     _advance_to_turn_capture_pending(controller)
     window.render_view()
     window.opponent_active_input.setText("ボーマンダ")
-    assert window.current_state_editor_container.isVisible()
+    assert not window.current_state_editor_container.isVisible()
+    assert window.parity_self_status_box.isVisible()
+    assert window.parity_opponent_status_box.isVisible()
     assert len(window.move_inputs) >= 1
     assert len(window.switch_checkboxes) >= 1
     assert not window.ability_resolution_group.isHidden()

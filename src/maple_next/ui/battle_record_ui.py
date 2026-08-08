@@ -785,15 +785,42 @@ class _OpponentIntelWidget(QGroupBox):
     def __init__(self) -> None:
         super().__init__("Opponent INTEL")
         layout = QVBoxLayout(self)
-        self.species_label = QLabel("相手 active: 不明")
-        self.facts_label = QLabel("この試合: 特性 不明 / 道具 不明 / 技 不明")
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        head = QHBoxLayout()
+        self.species_label = QLabel("不明")
+        self.species_label.setObjectName("intelSpecies")
+        self.simple_badge = QLabel("簡易")
+        self.simple_badge.setProperty("badge", True)
+        head.addWidget(self.species_label, 1)
+        head.addWidget(self.simple_badge)
+        layout.addLayout(head)
+        self.context_label = QLabel("active opponent / 対戦情報優先")
+        self.context_label.setProperty("muted", True)
+        layout.addWidget(self.context_label)
+        self.facts_label = QLabel("この対戦で判明：特性 不明 / 持ち物 不明 / 観測技 不明")
         self.facts_label.setWordWrap(True)
-        self.summary_label = QLabel("move / ability / item: データなし")
-        self.summary_label.setWordWrap(True)
-        self.detail_button = QPushButton("INTEL詳細を表示")
-        layout.addWidget(self.species_label)
+        self.facts_label.setObjectName("intelFacts")
         layout.addWidget(self.facts_label)
-        layout.addWidget(self.summary_label)
+        mini_row = QHBoxLayout()
+        mini_row.setSpacing(6)
+        self.mini_values: dict[str, QLabel] = {}
+        for key, title in (("moves", "採用技"), ("abilities", "特性"), ("items", "持ち物")):
+            mini = QWidget()
+            mini.setProperty("miniCard", True)
+            mini_layout = QVBoxLayout(mini)
+            mini_layout.setContentsMargins(8, 8, 8, 8)
+            title_label = QLabel(title)
+            title_label.setProperty("cardTitle", True)
+            value_label = QLabel("データなし")
+            value_label.setWordWrap(True)
+            value_label.setProperty("muted", True)
+            mini_layout.addWidget(title_label)
+            mini_layout.addWidget(value_label, 1)
+            self.mini_values[key] = value_label
+            mini_row.addWidget(mini, 1)
+        layout.addLayout(mini_row, 1)
+        self.detail_button = QPushButton("INTEL詳細を表示")
         layout.addWidget(self.detail_button)
         self._view: OpponentIntelView | None = None
         self._detail_dialog: QDialog | None = None
@@ -802,22 +829,25 @@ class _OpponentIntelWidget(QGroupBox):
 
     def render_intel(self, view: OpponentIntelView) -> None:
         self._view = view
-        self.species_label.setText(f"相手 active: {view.species}")
+        self.species_label.setText(view.species)
         moves = ", ".join(view.moves) or "不明"
         self.facts_label.setText(
-            f"この試合優先: 特性 {view.ability} / 道具 {view.item} / 技 {moves}"
+            f"この対戦で判明：特性 {view.ability} / 持ち物 {view.item} / 観測技 {moves}"
         )
         if view.meta is None:
-            self.summary_label.setText("move / ability / item: データなし")
+            self.mini_values["moves"].setText("TOP候補：データなし")
+            possible = " / ".join(view.possible_abilities) or "データなし"
+            self.mini_values["abilities"].setText(possible)
+            self.mini_values["items"].setText("TOP候補：データなし")
         else:
             move_summary = ", ".join(entry.name for entry in view.meta.moves[:3]) or "データなし"
             ability_summary = (
                 ", ".join(entry.name for entry in view.meta.abilities[:2]) or "データなし"
             )
             item_summary = ", ".join(entry.name for entry in view.meta.items[:2]) or "データなし"
-            self.summary_label.setText(
-                f"move: {move_summary}\nability: {ability_summary}\nitem: {item_summary}"
-            )
+            self.mini_values["moves"].setText(move_summary)
+            self.mini_values["abilities"].setText(ability_summary)
+            self.mini_values["items"].setText(item_summary)
 
     def _open_detail(self, _checked: bool = False) -> None:
         if self._view is None:
@@ -825,14 +855,44 @@ class _OpponentIntelWidget(QGroupBox):
         view = self._view
         dialog = QDialog(self)
         dialog.setWindowTitle("Opponent INTEL 詳細")
+        dialog.setObjectName("intelDetailDialog")
         layout = QVBoxLayout(dialog)
-        species = QLabel(f"相手個体: {view.species}")
-        species.setObjectName("intelDetailSpecies")
-        layout.addWidget(species)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+        header = QHBoxLayout()
+        titles = QVBoxLayout()
+        title = QLabel("Opponent INTEL — 詳細")
+        title.setProperty("dialogTitle", True)
+        subtitle = QLabel("通常画面では簡易表示。必要な時だけ展開。")
+        subtitle.setProperty("muted", True)
+        titles.addWidget(title)
+        titles.addWidget(subtitle)
+        close_button = QPushButton("閉じる")
+        close_button.clicked.connect(dialog.close)
+        header.addLayout(titles, 1)
+        header.addWidget(close_button)
+        layout.addLayout(header)
+        selector = QHBoxLayout()
+        self.selector_buttons: list[QPushButton] = []
+        selector_labels = (view.species, "相手2", "相手3", "未判明", "未判明", "未判明")
+        for index, label in enumerate(selector_labels):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setChecked(index == 0)
+            button.setProperty("chip", True)
+            selector.addWidget(button)
+            self.selector_buttons.append(button)
+        selector.addStretch(1)
+        layout.addLayout(selector)
         if view.meta is None:
-            move_ranking = "データなし"
-            ability_ranking = "データなし"
-            item_ranking = "データなし"
+            placeholder_ranking = [f"取得データ {rank}位 --%" for rank in range(1, 5)]
+            placeholder_ranking.append("取得データ 5位 --% / データなし")
+            move_ranking = ", ".join(placeholder_ranking)
+            ability_names = view.possible_abilities or ("未判明",)
+            ability_ranking = ", ".join(
+                (*(f"{name} --%" for name in ability_names), "データなし")
+            )
+            item_ranking = ", ".join(placeholder_ranking)
             source = regulation = snapshot = "データなし"
         else:
             move_ranking = _format_rankings(view.meta.moves)
@@ -842,32 +902,26 @@ class _OpponentIntelWidget(QGroupBox):
             regulation = view.meta.regulation or "データなし"
             snapshot = view.meta.snapshot_date or "データなし"
         possible = ", ".join(view.possible_abilities) or "データなし"
-        sections: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
+        top_sections: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
             (
                 "current_match_facts",
-                "Current-match facts",
+                "この対戦で確定・観測した事実",
                 (
                     ("ability", view.ability),
                     ("item", view.item),
                     ("moves", ", ".join(view.moves) or "不明"),
                 ),
             ),
-            ("moves", "Moves", (("usage", move_ranking),)),
-            (
-                "abilities",
-                "Abilities",
-                (("possible", possible), ("usage", ability_ranking)),
-            ),
-            ("items", "Items", (("usage", item_ranking),)),
             (
                 "source",
-                "Source / regulation / snapshot",
+                "データ情報",
                 (("source", source), ("regulation", regulation), ("snapshot", snapshot)),
             ),
         )
         self._detail_sections = {}
-        for key, title, rows in sections:
-            section = QGroupBox(title)
+        top_row = QHBoxLayout()
+        for key, section_title, rows in top_sections:
+            section = QGroupBox(section_title)
             section.setObjectName(f"intelDetail_{key}")
             form = QFormLayout(section)
             for label, value in rows:
@@ -875,7 +929,33 @@ class _OpponentIntelWidget(QGroupBox):
                 value_label.setWordWrap(True)
                 form.addRow(label, value_label)
             self._detail_sections[key] = section
-            layout.addWidget(section)
+            top_row.addWidget(section, 1)
+        layout.addLayout(top_row)
+        ranking_row = QHBoxLayout()
+        ranking_specs = (
+            ("moves", "採用技ランキング", move_ranking),
+            (
+                "abilities",
+                "特性",
+                ability_ranking
+                if view.meta is None
+                else f"possible: {possible}\nusage: {ability_ranking}",
+            ),
+            ("items", "持ち物ランキング", item_ranking),
+        )
+        for key, section_title, value in ranking_specs:
+            section = QGroupBox(section_title)
+            section.setObjectName(f"intelDetail_{key}")
+            section_layout = QVBoxLayout(section)
+            lines = value.split(", ") if value != "データなし" else ["データなし"]
+            for line in lines[:5]:
+                row = QLabel(line)
+                row.setProperty("rankRow", True)
+                section_layout.addWidget(row)
+            section_layout.addStretch(1)
+            self._detail_sections[key] = section
+            ranking_row.addWidget(section, 1)
+        layout.addLayout(ranking_row, 1)
         layout.addStretch(1)
         dialog.setStyleSheet(
             "QDialog { background: #0b1220; color: #dbeafe; }"
@@ -884,7 +964,7 @@ class _OpponentIntelWidget(QGroupBox):
             "border-radius: 6px; margin-top: 8px; padding: 7px; color: #93c5fd; }"
             "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
         )
-        dialog.resize(620, 520)
+        dialog.resize(1420, 422)
         dialog.setModal(False)
         self._detail_dialog = dialog
         dialog.show()
@@ -1595,8 +1675,570 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._center_column_layout.setSpacing(0)
         self._center_column_layout.setContentsMargins(0, 0, 0, 0)
 
+        self._apply_html_parity_composition(
+            page=page,
+            page_layout=page_layout,
+            header_widget=header_widget,
+            body_row=body_row,
+            bottom_bar=bottom_bar,
+            bottom_bar_layout=bottom_bar_layout,
+            left_container=left_container,
+            center_container=center_container,
+            right_container=right_container,
+        )
+
         self.header_tabs.removeTab(_BATTLE_RECORD_TAB_INDEX)
         self.header_tabs.insertTab(_BATTLE_RECORD_TAB_INDEX, page, "バトルレコード")
+
+    def _apply_html_parity_composition(
+        self,
+        *,
+        page: QWidget,
+        page_layout: QVBoxLayout,
+        header_widget: QWidget,
+        body_row: QHBoxLayout,
+        bottom_bar: QWidget,
+        bottom_bar_layout: QHBoxLayout,
+        left_container: QWidget,
+        center_container: QWidget,
+        right_container: QWidget,
+    ) -> None:
+        """Recompose the operator surface against the binding v5 HTML.
+
+        Existing controller-bound inputs remain the source of truth, but
+        legacy forms are moved into a hidden holder. The visible tree below
+        is built from the HTML's cards, chips, tabs, and fixed stage rows.
+        """
+
+        # 58px persistent application header: brand / two tabs / utilities.
+        page_layout.removeWidget(header_widget)
+        header_widget.setVisible(False)
+        outer_layout = self.centralWidget().layout()
+        if outer_layout is not None:
+            outer_layout.setContentsMargins(0, 0, 0, 0)
+            outer_layout.setSpacing(0)
+        tab_bar = self.header_tabs.tabBar()
+        tab_bar.setFixedHeight(58)
+        tab_bar.hide()
+        self.header_tabs.setDocumentMode(True)
+        brand_corner = QWidget(self.header_tabs)
+        brand_corner.setFixedSize(290, 58)
+        brand_corner.move(0, 0)
+        brand_layout = QHBoxLayout(brand_corner)
+        brand_layout.setContentsMargins(18, 0, 12, 0)
+        brand = QLabel("MAPLE")
+        brand.setObjectName("mapleBrand")
+        brand_layout.addWidget(brand)
+        selection_tab = QPushButton("選出")
+        battle_tab = QPushButton("バトルレコード")
+        for button in (selection_tab, battle_tab):
+            button.setCheckable(True)
+            brand_layout.addWidget(button)
+        brand_layout.addStretch(1)
+        selection_tab.clicked.connect(lambda: self.header_tabs.setCurrentIndex(0))
+        battle_tab.clicked.connect(lambda: self.header_tabs.setCurrentIndex(1))
+
+        def sync_header_tabs(index: int) -> None:
+            selection_tab.setChecked(index == 0)
+            battle_tab.setChecked(index == 1)
+
+        self.header_tabs.currentChanged.connect(sync_header_tabs)
+        sync_header_tabs(self.header_tabs.currentIndex())
+        brand_corner.show()
+        brand_corner.raise_()
+        self.parity_brand_corner = brand_corner
+
+        utility_corner = QWidget(self.header_tabs)
+        utility_corner.setFixedSize(407, 58)
+        utility_corner.move(1513, 0)
+        utility_layout = QHBoxLayout(utility_corner)
+        utility_layout.setContentsMargins(8, 0, 18, 0)
+        utility_layout.setSpacing(8)
+        self.battle_context_label.setText("Match #demo   Turn —")
+        self.header_phase_badge = QPushButton("撮影待ち")
+        self.header_phase_badge.setEnabled(False)
+        export_button = QPushButton("試合終了・Export")
+        more_button = QPushButton("…")
+        export_button.clicked.connect(
+            lambda: self.terminal_flow_drawer.toggle_button.setChecked(True)
+        )
+        more_button.clicked.connect(
+            lambda: self.diagnostics_drawer.toggle_button.setChecked(True)
+        )
+        utility_layout.addWidget(self.battle_context_label)
+        utility_layout.addWidget(self.header_phase_badge)
+        utility_layout.addWidget(export_button)
+        utility_layout.addWidget(more_button)
+        utility_corner.show()
+        utility_corner.raise_()
+        self.parity_utility_corner = utility_corner
+
+        self.header_tabs.setStyleSheet(
+            "QTabWidget { background: #081421; }"
+            "QTabWidget::pane { border: 0; background: #07101a; }"
+            "QTabBar { background: #081421; }"
+            "QTabBar::tab { background: #0b1724; color: #edf5fb; border: 1px solid #314b64; "
+            "border-radius: 3px; min-width: 78px; padding: 8px 12px; margin: 14px 2px; }"
+            "QTabBar::tab:selected { background: #1a3c5d; font-weight: 800; }"
+            "QWidget { color: #edf5fb; }"
+            "QLabel#mapleBrand { font-size: 16px; font-weight: 900; letter-spacing: 2px; }"
+            "QPushButton { background: #0b1724; color: #edf5fb; border: 1px solid #314b64; "
+            "border-radius: 3px; padding: 7px 10px; }"
+            "QPushButton:disabled { color: #91a8bb; }"
+        )
+
+        # Binding stage geometry: body with no gutters and a 66px footer.
+        page_layout.setContentsMargins(0, 58, 0, 0)
+        page_layout.setSpacing(0)
+        body_row.setSpacing(0)
+        bottom_bar.setFixedHeight(66)
+        self.parity_bottom_bar = bottom_bar
+        self.parity_body_row = body_row
+        bottom_bar_layout.setContentsMargins(15, 14, 15, 14)
+        bottom_bar_layout.setSpacing(8)
+        for layout in (
+            self._left_column_layout,
+            self._right_column_layout,
+        ):
+            layout.setContentsMargins(12, 12, 12, 12)
+            layout.setSpacing(10)
+        self.history_group.setTitle("CONFIRMED HISTORY")
+        self._center_column_layout.setContentsMargins(12, 12, 12, 12)
+        self._center_column_layout.setSpacing(10)
+
+        # LIVE shell and its exact toolbar ordering.
+        self.capture_status_group.setTitle("UGREEN LIVE")
+        self.capture_status_group.setObjectName("liveShell")
+        self.reconnect_capture_button.setVisible(False)
+        self.capture_status_label.setVisible(False)
+        old_tools = self.live_tools_bar
+        self._detach_from_parent_layout(old_tools)
+        old_tools.setVisible(False)
+        self.live_tools_bar = QWidget()
+        self.live_tools_bar.setObjectName("liveToolsBar")
+        tools = QHBoxLayout(self.live_tools_bar)
+        tools.setContentsMargins(8, 4, 8, 4)
+        tools.setSpacing(6)
+        self.live_current_state_label = QLabel("自分: —  HP—    相手: —  HP—")
+        self.live_current_state_label.setProperty("muted", True)
+        tools.addWidget(self.live_current_state_label, 1)
+        self.evidence_open_button.setText("撮影画像を確認")
+        self.review_state_event_button.setText("＋ 状態変化を記録")
+        self.review_state_event_button.setProperty("strong", True)
+        tools.addWidget(self.evidence_open_button)
+        tools.addWidget(self.review_state_event_button)
+        self._center_column_layout.insertWidget(1, self.live_tools_bar)
+
+        # Keep domain-bound legacy groups alive but outside the visible tree.
+        self._legacy_parity_holder = QWidget(self)
+        self._legacy_parity_holder.setVisible(False)
+        legacy_layout = QVBoxLayout(self._legacy_parity_holder)
+        for legacy in (
+            self.turn_facts_group,
+            self.current_state_group,
+            self.actual_action_group,
+            self.action_result_delta_group,
+        ):
+            self._detach_from_parent_layout(legacy)
+            legacy_layout.addWidget(legacy)
+
+        for old_page in (
+            self.capture_workbench_page,
+            self.review_workbench_page,
+            self.action_workbench_page,
+            self.recorded_workbench_page,
+        ):
+            self.workbench_stack.removeWidget(old_page)
+            old_page.setParent(self._legacy_parity_holder)
+        self.workbench_stack.setMinimumHeight(350)
+        self.workbench_stack.setMaximumHeight(350)
+        self.workbench_stack.setObjectName("htmlParityWorkbench")
+
+        self.capture_workbench_page = self._build_parity_capture_page()
+        self.review_workbench_page = self._build_parity_review_page()
+        self.action_workbench_page = self._build_parity_action_page()
+        self.recorded_workbench_page = self._build_parity_recorded_page()
+        for workbench_page in (
+            self.capture_workbench_page,
+            self.review_workbench_page,
+            self.action_workbench_page,
+            self.recorded_workbench_page,
+        ):
+            self.workbench_stack.addWidget(workbench_page)
+
+        # Right rail occupies the full height: advice grows; INTEL is ~255px.
+        self.rich_gemini_group.setObjectName("geminiPanel")
+        self.rich_gemini_group.setTitle("GEMINI TURN ADVICE")
+        self.rich_gemini_group.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.gemini_empty_label = QLabel("Turn撮影後に確認へ")
+        self.gemini_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.gemini_empty_label.setObjectName("geminiEmpty")
+        self.gemini_empty_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self._rich_gemini_layout.addRow(self.gemini_empty_label)
+        self.opponent_intel_widget.setMinimumHeight(245)
+        self.opponent_intel_widget.setMaximumHeight(255)
+        self._right_column_layout.setStretch(0, 55)
+        self._right_column_layout.setStretch(1, 0)
+
+        # HTML palette and component language. No bright green state.
+        page.setStyleSheet(
+            "QWidget { background: #07101a; color: #edf5fb; font-size: 10px; }"
+            "QScrollArea { border: 0; background: #07101a; }"
+            "QScrollBar:vertical { background: #091623; width: 10px; margin: 0; }"
+            "QScrollBar::handle:vertical { background: #91a8bb; min-height: 30px; "
+            "border-radius: 4px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            "QGroupBox { background: #0b1724; border: 1px solid #20384e; border-radius: 4px; "
+            "margin-top: 9px; padding: 10px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; "
+            "color: #91a8bb; font-size: 9px; }"
+            "QLabel { background: transparent; color: #edf5fb; }"
+            "QLabel[muted=\"true\"] { color: #91a8bb; font-size: 9px; }"
+            "QLabel[badge=\"true\"] { color: #91a8bb; border: 1px solid #314b64; "
+            "border-radius: 3px; padding: 4px 6px; font-size: 9px; }"
+            "QLabel[cardTitle=\"true\"] { font-weight: 800; }"
+            "QLabel#intelSpecies, QLabel[dialogTitle=\"true\"] { font-size: 13px; "
+            "font-weight: 800; }"
+            "QLabel#intelFacts { background: #0e2032; border: 1px solid #314b64; "
+            "border-radius: 3px; padding: 8px; font-weight: 700; }"
+            "QLabel#geminiEmpty { border: 1px dashed #314b64; color: #91a8bb; }"
+            "QWidget[parityCard=\"true\"], QWidget[miniCard=\"true\"] { background: #0b1724; "
+            "border: 1px solid #20384e; border-radius: 4px; }"
+            "QWidget[candidateArea=\"true\"] { background: #0d2235; border: 1px solid #4a6984; "
+            "border-radius: 4px; }"
+            "QPushButton { background: #0e2032; color: #edf5fb; border: 1px solid #314b64; "
+            "border-radius: 3px; padding: 6px 8px; }"
+            "QPushButton:hover { background: #132c45; }"
+            "QPushButton:disabled { color: #91a8bb; background: #091623; border-color: #20384e; }"
+            "QPushButton:checked, QPushButton[selected=\"true\"], QPushButton[strong=\"true\"] { "
+            "background: #1a3c5d; font-weight: 800; }"
+            "QPushButton[lifecycle=\"true\"] { min-height: 28px; font-size: 11px; "
+            "font-weight: 800; }"
+            "QPushButton[lifecycle=\"true\"][active=\"true\"] { background: #1a3c5d; "
+            "color: #edf5fb; border-color: #314b64; }"
+            "QComboBox, QLineEdit { background: #0e2032; color: #edf5fb; "
+            "border: 1px solid #314b64; "
+            "border-radius: 3px; padding: 5px 7px; min-height: 24px; }"
+            "QWidget#liveToolsBar { background: #081522; border: 1px solid #314b64; "
+            "border-radius: 0; }"
+            "QGroupBox#liveShell { background: #040b12; border: 1px solid #314b64; }"
+            "QGroupBox#geminiPanel { background: #081421; }"
+            "QStackedWidget#htmlParityWorkbench { background: #091623; border: 1px solid #314b64; "
+            "border-radius: 4px; }"
+        )
+
+    @staticmethod
+    def _parity_card(title: str, *, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
+        card = QWidget()
+        card.setProperty("parityCard", True)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 9, 10, 9)
+        layout.setSpacing(7)
+        header = QHBoxLayout()
+        title_label = QLabel(title)
+        title_label.setProperty("cardTitle", True)
+        header.addWidget(title_label)
+        header.addStretch(1)
+        layout.addLayout(header)
+        if subtitle:
+            subtitle_label = QLabel(subtitle)
+            subtitle_label.setProperty("muted", True)
+            subtitle_label.setWordWrap(True)
+            layout.addWidget(subtitle_label)
+        return card, layout
+
+    @staticmethod
+    def _parity_page(title: str, hint: str) -> tuple[QScrollArea, QVBoxLayout]:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+        heading = QLabel(title)
+        heading.setStyleSheet("font-size: 13px; font-weight: 800;")
+        hint_label = QLabel(hint)
+        hint_label.setProperty("muted", True)
+        hint_label.setWordWrap(True)
+        layout.addWidget(heading)
+        layout.addWidget(hint_label)
+        scroll.setWidget(content)
+        return scroll, layout
+
+    def _build_parity_capture_page(self) -> QScrollArea:
+        page, layout = self._parity_page(
+            "Turn撮影待ち",
+            "編集UIはまだ開きません。LIVEを見て必要なタイミングで撮影。",
+        )
+        summary, summary_layout = self._parity_card("持ち越しstate")
+        self.capture_state_summary = QLabel("自分 HP75–100　 相手 HP75–100　 天候なし")
+        self.capture_state_summary.setProperty("muted", True)
+        summary_layout.addWidget(self.capture_state_summary)
+        layout.addWidget(summary)
+        empty = QLabel("Turn撮影後に「Turn確認 → Gemini送信」を1回だけ行います")
+        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.setObjectName("geminiEmpty")
+        empty.setMinimumHeight(190)
+        layout.addWidget(empty, 1)
+        return page
+
+    def _build_parity_review_page(self) -> QScrollArea:
+        page, layout = self._parity_page(
+            "Turn確認 → Gemini送信",
+            "OCR修正・合法行動・登場時state候補をここでまとめて確認。SENDそのものが最終確定。",
+        )
+        facts_row = QHBoxLayout()
+        for side, title, active, hp, state_editor in (
+            ("self", "自分 facts", self.self_active_box, self.self_hp_box, self.self_state_editor),
+            (
+                "opponent",
+                "相手 facts",
+                self.opponent_active_input,
+                self.opponent_hp_box,
+                self.opponent_state_editor,
+            ),
+        ):
+            card, card_layout = self._parity_card(title)
+            badge = QLabel("OCR→human review")
+            badge.setProperty("badge", True)
+            card_layout.insertWidget(1, badge)
+            form = QFormLayout()
+            form.setContentsMargins(0, 0, 0, 0)
+            self._detach_from_parent_layout(active)
+            self._detach_from_parent_layout(hp)
+            status = QComboBox()
+            status.addItems(("なし", "まひ", "やけど", "どく", "ねむり", "不明"))
+            status.currentTextChanged.connect(
+                lambda value, editor=state_editor: editor.status_field.set_known(
+                    Known.confirmed(value, provenance_chain=_HUMAN_INPUT)
+                )
+            )
+            form.addRow("Active", active)
+            form.addRow("HP", hp)
+            form.addRow("Status", status)
+            card_layout.addLayout(form)
+            facts_row.addWidget(card, 1)
+            if side == "self":
+                self.parity_self_status_box = status
+            else:
+                self.parity_opponent_status_box = status
+        layout.addLayout(facts_row)
+
+        ability_card, ability_layout = self._parity_card(
+            "相手の特性候補 — 初回確認",
+            subtitle="可能な特性から選択してください。この試合中は回答を保持します。",
+        )
+        ability_row = QHBoxLayout()
+        self.parity_ability_buttons: list[QPushButton] = []
+        for ability in ("いかく", "じしんかじょう", "不明"):
+            button = QPushButton(ability)
+            button.clicked.connect(
+                lambda _checked=False, value=ability: self._confirm_parity_ability(value)
+            )
+            ability_row.addWidget(button)
+            self.parity_ability_buttons.append(button)
+        ability_row.addStretch(1)
+        ability_layout.addLayout(ability_row)
+        layout.addWidget(ability_card)
+
+        self._detach_from_parent_layout(self.review_effect_candidate)
+        self.review_effect_candidate.setProperty("candidateArea", True)
+        layout.addWidget(self.review_effect_candidate)
+
+        legal_card, legal_layout = self._parity_card("Geminiへ渡す合法行動")
+        self.parity_move_chips = []
+        move_row = QHBoxLayout()
+        move_row.addWidget(QLabel("使用できる技"))
+        for index, field in enumerate(self.move_inputs):
+            button = QPushButton(field.text() or f"技{index + 1}")
+            button.setCheckable(True)
+            button.setChecked(bool(field.text()))
+            button.setEnabled(bool(field.text()))
+            field.textChanged.connect(
+                lambda text, chip=button: self._sync_legal_chip(chip, text)
+            )
+            button.toggled.connect(
+                lambda checked, input_field=field: (
+                    None if checked else input_field.clear()
+                )
+            )
+            move_row.addWidget(button)
+            self.parity_move_chips.append(button)
+        move_row.addStretch(1)
+        legal_layout.addLayout(move_row)
+        switch_row = QHBoxLayout()
+        switch_row.addWidget(QLabel("交代できるポケモン"))
+        self.parity_switch_chips = []
+        for checkbox in self.switch_checkboxes:
+            button = QPushButton(checkbox.text())
+            button.setCheckable(True)
+            button.setChecked(checkbox.isChecked())
+            button.toggled.connect(checkbox.setChecked)
+            checkbox.toggled.connect(button.setChecked)
+            switch_row.addWidget(button)
+            self.parity_switch_chips.append(button)
+        switch_row.addStretch(1)
+        legal_layout.addLayout(switch_row)
+        layout.addWidget(legal_card)
+        layout.addStretch(1)
+        return page
+
+    def _build_parity_action_page(self) -> QScrollArea:
+        page, layout = self._parity_page(
+            "行動・結果記録",
+            "実際の技/交代・行動順・変わった結果だけ記録。",
+        )
+        state_card, state_layout = self._parity_card("Turn開始state")
+        self.action_state_summary = QLabel("天候なし　 Gemini回答済み")
+        self.action_state_summary.setProperty("muted", True)
+        state_layout.addWidget(self.action_state_summary)
+        layout.addWidget(state_card)
+        actions_row = QHBoxLayout()
+
+        self_card, self_layout = self._parity_card("自分の実際の行動")
+        self.self_action_tabs = {}
+        tab_row = QHBoxLayout()
+        for action_type, label in (("MOVE", "技"), ("SWITCH", "交代")):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, value=action_type: self._set_self_action_type(value)
+            )
+            tab_row.addWidget(button)
+            self.self_action_tabs[action_type] = button
+        tab_row.addStretch(1)
+        self_layout.addLayout(tab_row)
+        move_grid = QGridLayout()
+        self.self_action_move_buttons = []
+        for index, field in enumerate(self.move_inputs):
+            button = QPushButton(field.text() or f"技{index + 1}")
+            button.setEnabled(bool(field.text()))
+            field.textChanged.connect(
+                lambda text, chip=button: self._sync_action_chip(chip, text)
+            )
+            button.clicked.connect(
+                lambda _checked=False, input_field=field: self._choose_self_move(
+                    input_field.text()
+                )
+            )
+            move_grid.addWidget(button, index // 4, index % 4)
+            self.self_action_move_buttons.append(button)
+        self_layout.addLayout(move_grid)
+        actions_row.addWidget(self_card, 1)
+
+        opponent_card, opponent_layout = self._parity_card("相手の実際の行動")
+        self.opponent_action_tabs = {}
+        opponent_tabs = QHBoxLayout()
+        for action_type, label in (
+            ("MOVE", "技"),
+            ("SWITCH", "交代"),
+            ("NO ACTION", "行動なし"),
+            ("UNKNOWN", "不明"),
+        ):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, value=action_type: self._set_opponent_action_type(value)
+            )
+            opponent_tabs.addWidget(button)
+            self.opponent_action_tabs[action_type] = button
+        opponent_layout.addLayout(opponent_tabs)
+        self.parity_opponent_move_box = QComboBox()
+        self.parity_opponent_move_box.addItems(("りゅうのまい", "じしん", "まもる", "不明"))
+        self.parity_opponent_move_box.currentTextChanged.connect(
+            self.opponent_action_name_input.setText
+        )
+        opponent_layout.addWidget(self.parity_opponent_move_box)
+        actions_row.addWidget(opponent_card, 1)
+        layout.addLayout(actions_row)
+
+        self._detach_from_parent_layout(self.result_effect_candidate)
+        self.result_effect_candidate.setProperty("candidateArea", True)
+        layout.addWidget(self.result_effect_candidate)
+
+        result_card, result_layout = self._parity_card("結果")
+        order_row = QHBoxLayout()
+        self.parity_order_buttons = {}
+        for value, label in (
+            ("SELF_FIRST", "自分→相手"),
+            ("OPPONENT_FIRST", "相手→自分"),
+            ("UNKNOWN", "順序不明"),
+        ):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, order=value: self.action_order_box.setCurrentText(order)
+            )
+            order_row.addWidget(button)
+            self.parity_order_buttons[value] = button
+        order_row.addStretch(1)
+        result_layout.addLayout(order_row)
+        layout.addWidget(result_card)
+        layout.addStretch(1)
+        return page
+
+    def _build_parity_recorded_page(self) -> QScrollArea:
+        page, layout = self._parity_page(
+            "このTurnは記録済みです",
+            "確認済み内容だけをcompact summaryとして表示します。",
+        )
+        self.recorded_summary_label = QLabel()
+        self.recorded_summary_label.setWordWrap(True)
+        for title in ("Actions", "State events", "Next state"):
+            card, card_layout = self._parity_card(title)
+            summary = self.recorded_summary_label if title == "Actions" else QLabel("—")
+            card_layout.addWidget(summary)
+            layout.addWidget(card)
+        layout.addStretch(1)
+        return page
+
+    def _confirm_parity_ability(self, ability: str) -> None:
+        if self.opponent_ability_box.findText(ability) < 0:
+            self.opponent_ability_box.addItem(ability)
+        self.opponent_ability_box.setCurrentText(ability)
+        self._on_confirm_opponent_ability()
+
+    @staticmethod
+    def _sync_legal_chip(button: QPushButton, text: str) -> None:
+        button.setText(text or "未取得")
+        button.setEnabled(bool(text))
+        button.setChecked(bool(text))
+
+    @staticmethod
+    def _sync_action_chip(button: QPushButton, text: str) -> None:
+        button.setText(text or "未取得")
+        button.setEnabled(bool(text))
+
+    def _set_self_action_type(self, action_type: str) -> None:
+        self.actual_action_type_box.setCurrentText(action_type)
+        self.actual_action_confirm_checkbox.setChecked(True)
+        self._sync_parity_action_selection()
+
+    def _choose_self_move(self, move: str) -> None:
+        if not move:
+            return
+        self._set_self_action_type("MOVE")
+        self.actual_action_name_box.setCurrentText(move)
+
+    def _set_opponent_action_type(self, action_type: str) -> None:
+        self.opponent_action_type_box.setCurrentText(action_type)
+        self._sync_parity_action_selection()
+
+    def _sync_parity_action_selection(self) -> None:
+        own = self.actual_action_type_box.currentText()
+        opponent = self.opponent_action_type_box.currentText()
+        for value, button in self.self_action_tabs.items():
+            button.setChecked(value == own)
+        for value, button in self.opponent_action_tabs.items():
+            button.setChecked(value == opponent)
+        order = self.action_order_box.currentText()
+        for value, button in self.parity_order_buttons.items():
+            button.setChecked(value == order)
 
     @staticmethod
     def _reflow_form_into_grid(
@@ -1712,12 +2354,16 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             lifecycle_button.style().unpolish(lifecycle_button)
             lifecycle_button.style().polish(lifecycle_button)
 
-        context_parts = [
-            f"Turn {projection.turn_number}" if projection.turn_number else "Turn —",
-            projection.session_state or "—",
-            f"provider={projection.provider_status}",
-        ]
-        self.battle_context_label.setText(" / ".join(context_parts))
+        turn_text = projection.turn_number if projection.turn_number is not None else "—"
+        self.battle_context_label.setText(f"Match #demo   Turn {turn_text}")
+        phase_labels = {
+            "START_TURN_CAPTURE": "撮影待ち",
+            "CONFIRM_TURN_FACTS": "Turn確認",
+            "REQUEST_TURN_ADVICE": "送信待ち",
+            "RECORD_ACTUAL_ACTION": "行動・結果記録",
+            "NEXT_TURN": "記録済み",
+        }
+        self.header_phase_badge.setText(phase_labels.get(projection.primary_cta, "確認中"))
 
         confirmed_state = summary.confirmed_state
         if confirmed_state is None:
@@ -1824,18 +2470,15 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # it. None of the existing controller/domain operations are changed.
         if projection.primary_cta == "START_TURN_CAPTURE":
             workbench_page = self.capture_workbench_page
-            workbench_height = 92
         elif projection.primary_cta == "RECORD_ACTUAL_ACTION":
             workbench_page = self.action_workbench_page
-            workbench_height = 350
         elif projection.primary_cta == "NEXT_TURN":
             workbench_page = self.recorded_workbench_page
-            workbench_height = 112
         else:
             workbench_page = self.review_workbench_page
-            workbench_height = 425
         self.workbench_stack.setCurrentWidget(workbench_page)
-        self.workbench_stack.setMaximumHeight(workbench_height)
+        self.workbench_stack.setMinimumHeight(350)
+        self.workbench_stack.setMaximumHeight(350)
         self.recorded_summary_label.setText(
             f"Turn {projection.turn_number} の行動と結果を保存しました。"
             "左の確定履歴を確認し、次のTurnへ進んでください。"
@@ -1844,6 +2487,14 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # The v5 right rail never changes hierarchy: Gemini owns the upper
         # slot even while empty/waiting, with compact INTEL directly below.
         self.rich_gemini_group.setVisible(True)
+        advice_visible = projection.primary_cta in {"RECORD_ACTUAL_ACTION", "NEXT_TURN"}
+        self.gemini_empty_label.setVisible(not advice_visible)
+        self.turn_advice_group.setVisible(advice_visible)
+        self.gemini_empty_label.setText(
+            "Turn撮影後に確認へ"
+            if projection.primary_cta == "START_TURN_CAPTURE"
+            else "SEND TURN TO GEMINI 待ち"
+        )
         status = self._bundle_c_controller.rich_turn_advice_gemini_status()
         self.rich_gemini_status_label.setText(_RICH_STATUS_LABELS.get(status.status, status.status))
         if summary.provider_ready:
@@ -1871,6 +2522,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._render_ability_resolution(species, remembered_ability, editable)
         self._render_opponent_intel(species, remembered_ability)
         self._update_v5_action_disclosure()
+        self._sync_parity_action_selection()
+        self.live_current_state_label.setText(
+            f"自分: {self.self_active_box.currentText() or '—'}  "
+            f"HP{self.self_hp_box.currentText() or '—'}"
+            f"    相手: {self.opponent_active_input.text() or '—'}  "
+            f"HP{self.opponent_hp_box.currentText() or '—'}"
+        )
 
         self.next_turn_button.setEnabled(
             self.next_turn_button.isEnabled() and projection.primary_cta == "NEXT_TURN"

@@ -160,6 +160,7 @@ class MatchFlowWindow(TurnAdviceIntegrationWindow):
         )
         self.export_hash_label.setText(current.export_sha256 or "—")
         self.export_schema_label.setText(current.export_schema_version or "—")
+        self.new_match_after_export_button.setVisible(exported)
         self.new_match_after_export_button.setEnabled(exported)
 
         recoverable = "ABORT_MATCH" in current.projection.secondary_actions

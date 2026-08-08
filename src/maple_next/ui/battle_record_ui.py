@@ -1234,6 +1234,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._extract_widget(self.turn_facts_group, self.confirm_turn_facts_button)
         self._extract_widget(self.actual_action_group, self.record_action_button)
         self._extract_widget(self.history_group, self.next_turn_button)
+        self._extract_widget(self.match_export_group, self.new_match_after_export_button)
+        outer_layout.removeWidget(self.new_match_button)
         gemini_send_button = getattr(self, "turn_gemini_send_button", None)
         if gemini_send_button is not None:
             self._extract_widget(self.turn_gemini_box, gemini_send_button)
@@ -1422,6 +1424,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             if group is not None:
                 self._detach_from_parent_layout(group)
                 self.terminal_flow_drawer.add_widget(group)
+        self._left_column_layout.addWidget(self.terminal_flow_drawer)
 
         # -- fixed header for the Battle Record tab -----------------------------
         header_widget = QWidget()
@@ -1608,17 +1611,23 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
         bottom_bar = QWidget()
         bottom_bar_layout = QHBoxLayout(bottom_bar)
+        bottom_bar_layout.addWidget(self.new_match_button)
+        bottom_bar_layout.addWidget(self.new_match_after_export_button)
         bottom_bar_layout.addWidget(self.start_turn_button)
         bottom_bar_layout.addWidget(self.confirm_turn_facts_button)
         bottom_bar_layout.addWidget(self.record_action_button)
         bottom_bar_layout.addWidget(self.next_turn_button)
+        self.field_new_match_buttons = (
+            self.new_match_button,
+            self.new_match_after_export_button,
+        )
         self.lifecycle_buttons = (
             self.start_turn_button,
             self.confirm_turn_facts_button,
             self.record_action_button,
             self.next_turn_button,
         )
-        for lifecycle_button in self.lifecycle_buttons:
+        for lifecycle_button in (*self.field_new_match_buttons, *self.lifecycle_buttons):
             lifecycle_button.setProperty("lifecycle", True)
             lifecycle_button.setMinimumHeight(40)
 
@@ -1769,9 +1778,12 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.header_phase_badge.setEnabled(False)
         export_button = QPushButton("試合終了・Export")
         more_button = QPushButton("…")
-        export_button.clicked.connect(
-            lambda: self.terminal_flow_drawer.toggle_button.setChecked(True)
-        )
+
+        def open_terminal_flow() -> None:
+            self.terminal_flow_drawer.setVisible(True)
+            self.terminal_flow_drawer.toggle_button.setChecked(True)
+
+        export_button.clicked.connect(open_terminal_flow)
         more_button.clicked.connect(
             lambda: self.diagnostics_drawer.toggle_button.setChecked(True)
         )
@@ -1782,6 +1794,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         utility_corner.show()
         utility_corner.raise_()
         self.parity_utility_corner = utility_corner
+        self.header_export_button = export_button
 
         def sync_contextual_header(index: int) -> None:
             # Selection has no Turn/Battle utility context.  The same widget is
@@ -1967,15 +1980,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         selection_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         selection_page.setObjectName("selectionV3Page")
 
-        # NEW MATCH remains wired for non-Selection lifecycle ownership, but the
-        # accepted Selection tab never presents it.
-        outer_layout = self.centralWidget().layout()
-        if outer_layout is not None:
-            outer_layout.removeWidget(self.new_match_button)
+        # Compatibility-only Selection controls remain alive in this hidden
+        # owner. NEW MATCH is intentionally not reparented here: its two
+        # canonical state-specific buttons live only in the Battle Record
+        # lifecycle bar.
         self._selection_v3_legacy_holder = QWidget(self)
         self._selection_v3_legacy_holder.setVisible(False)
         legacy_layout = QVBoxLayout(self._selection_v3_legacy_holder)
-        legacy_layout.addWidget(self.new_match_button)
 
         while self._selection_layout.count():
             self._selection_layout.takeAt(0)
@@ -2981,13 +2992,15 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.next_turn_button.setText("NEXT TURN")
 
         active_button_by_cta = {
+            "CREATE_NEW_MATCH": self.new_match_button,
+            "NEW_MATCH": self.new_match_after_export_button,
             "START_TURN_CAPTURE": self.start_turn_button,
             "CONFIRM_TURN_FACTS": self.confirm_turn_facts_button,
             "RECORD_ACTUAL_ACTION": self.record_action_button,
             "NEXT_TURN": self.next_turn_button,
         }
         active_button = active_button_by_cta.get(projection.primary_cta)
-        for lifecycle_button in self.lifecycle_buttons:
+        for lifecycle_button in (*self.field_new_match_buttons, *self.lifecycle_buttons):
             lifecycle_button.setProperty("active", lifecycle_button is active_button)
             lifecycle_button.style().unpolish(lifecycle_button)
             lifecycle_button.style().polish(lifecycle_button)

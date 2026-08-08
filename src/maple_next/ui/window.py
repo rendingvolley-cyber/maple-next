@@ -1278,8 +1278,9 @@ class MapleMainWindow(QMainWindow):
         self.error_label.setText(current.error_message or "")
         self.error_label.setVisible(current.error_message is not None)
 
-        self.new_match_button.setVisible(projection.primary_cta == "CREATE_NEW_MATCH")
-        self.new_match_button.setEnabled(projection.primary_cta_enabled)
+        create_new_match = projection.primary_cta == "CREATE_NEW_MATCH"
+        self.new_match_button.setVisible(create_new_match)
+        self.new_match_button.setEnabled(create_new_match and projection.primary_cta_enabled)
         selection_open = projection.session_state == "SELECTION_OPEN"
         no_active_match = projection.session_state is None
         self_team_prep_visible = no_active_match or selection_open

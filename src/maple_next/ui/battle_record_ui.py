@@ -323,7 +323,12 @@ class _DeltaSideEffectsField(QWidget):
 def _add_compact_stage_grid(
     layout: QVBoxLayout, fields: Mapping[str, QWidget], stage_names: tuple[tuple[str, str], ...]
 ) -> None:
-    """4-columns-wide label-over-field grid -- ~2 rows instead of 7."""
+    """4-columns-wide grid, label beside (not above) its field -- ~1 row of
+    height per 4 fields instead of 2 (a label-over-field row pair each),
+    so the two stacked stage grids in the fixed, non-scrolling center
+    column (self/opponent state or self/opponent result-delta) claim
+    roughly half the vertical space they used to for the same 7 fields.
+    """
 
     grid = QGridLayout()
     grid.setHorizontalSpacing(3)
@@ -331,10 +336,15 @@ def _add_compact_stage_grid(
     columns = 4
     for index, (key, label) in enumerate(stage_names):
         row, col = divmod(index, columns)
+        cell = QWidget()
+        cell_layout = QHBoxLayout(cell)
+        cell_layout.setContentsMargins(0, 0, 0, 0)
+        cell_layout.setSpacing(1)
         label_widget = QLabel(label)
         label_widget.setStyleSheet("font-size: 9px;")
-        grid.addWidget(label_widget, row * 2, col)
-        grid.addWidget(fields[key], row * 2 + 1, col)
+        cell_layout.addWidget(label_widget)
+        cell_layout.addWidget(fields[key])
+        grid.addWidget(cell, row, col)
     layout.addLayout(grid)
 
 
@@ -400,22 +410,24 @@ class _SideDeltaEditor(QGroupBox):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(1)
-        active_hp_row = QHBoxLayout()
-        active_hp_row.addWidget(QLabel("active"))
+        # active/HP and status/other share one row (4 fields) instead of
+        # two stacked rows -- this editor only ever appears in the
+        # RECORD_ACTUAL_ACTION completion phase, where LIVE must stay the
+        # dominant region even with this editor also on screen.
+        top_row = QHBoxLayout()
+        top_row.addWidget(QLabel("active"))
         self.active_field = _DeltaTextField("変更時のみ")
-        active_hp_row.addWidget(self.active_field, 1)
-        active_hp_row.addWidget(QLabel("HP"))
+        top_row.addWidget(self.active_field, 1)
+        top_row.addWidget(QLabel("HP"))
         self.hp_field = _DeltaHpField()
-        active_hp_row.addWidget(self.hp_field, 1)
-        layout.addLayout(active_hp_row)
-        status_row = QHBoxLayout()
-        status_row.addWidget(QLabel("状態異常"))
+        top_row.addWidget(self.hp_field, 1)
+        top_row.addWidget(QLabel("状態異常"))
         self.status_field = _DeltaTextField("変更時のみ")
-        status_row.addWidget(self.status_field, 1)
-        status_row.addWidget(QLabel("その他"))
+        top_row.addWidget(self.status_field, 1)
+        top_row.addWidget(QLabel("その他"))
         self.side_effects_field = _DeltaSideEffectsField()
-        status_row.addWidget(self.side_effects_field, 1)
-        layout.addLayout(status_row)
+        top_row.addWidget(self.side_effects_field, 1)
+        layout.addLayout(top_row)
         self.stage_fields: dict[str, _DeltaIntField] = {}
         for key, _label in _STAGE_FIELDS:
             self.stage_fields[key] = _DeltaIntField()
@@ -657,6 +669,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             )
         actual_action_form = self.actual_action_group.layout()
         if isinstance(actual_action_form, QFormLayout):
+            # 3 columns (2 rows for 6 fields) instead of 2 (3 rows) -- this
+            # group is only ever shown in the RECORD_ACTUAL_ACTION
+            # completion phase, where LIVE must stay the dominant region
+            # even with ActionResultDelta also on screen (5223937478 item
+            # 3/5), so it gets the same row-count trim.
             self._reflow_form_into_grid(
                 actual_action_form,
                 [
@@ -667,9 +684,21 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                     self.action_order_box,
                     self.actual_action_confirm_checkbox,
                 ],
+                columns=6,
             )
 
-        # -- diagnostics drawer: technical/dev-only material -------------------
+        # These two forms still carry Qt's roomy default (9,9,9,9) content
+        # margins -- every other group in this fixed, non-scrolling column
+        # was already tightened, but these two were not; closing that gap
+        # is part of keeping RECORD_ACTUAL_ACTION's non-LIVE editors as
+        # small as the mock's progressive-disclosure intent while LIVE
+        # stays the dominant region (5223937478 item 3/4).
+        for compact_form in (turn_facts_form, actual_action_form):
+            if compact_form is not None:
+                compact_form.setContentsMargins(3, 3, 3, 3)
+                compact_form.setSpacing(0)
+
+        # -- diagnostics drawer: technical/dev-only material --------------------
         self.diagnostics_drawer = _CollapsibleSection("診断情報 / Diagnostics")
         self.diagnostics_drawer.add_widget(status_frame)
         ocr_group = getattr(self, "ocr_candidates_group", None)
@@ -843,6 +872,14 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             # Initial width; kept in sync with the live window width by
             # resizeEvent -> _apply_fixed_turn_image_width thereafter.
             turn_snapshot_group.setFixedWidth(_FIXED_TURN_IMAGE_MAX_WIDTH)
+            # The base class's QVBoxLayout still reserves its default
+            # inter-item spacing around the now-empty (rows hidden, not
+            # removed) metadata/crop/origins sub-layouts above -- zero it
+            # out so only real content (status, image, retake button)
+            # contributes height.
+            snapshot_layout = turn_snapshot_group.layout()
+            if snapshot_layout is not None:
+                snapshot_layout.setSpacing(0)
             for never_shrink in (turn_snapshot_group, self.turn_facts_group):
                 never_shrink.setSizePolicy(
                     QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum

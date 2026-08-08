@@ -112,6 +112,12 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
         metadata.addRow("Frame", self.turn_snapshot_frame_label)
         metadata.addRow("ROI", self.turn_snapshot_roi_label)
         layout.addLayout(metadata)
+        # Exposed so a compacting subclass (Bundle C) can fully collapse
+        # these diagnostic rows -- including their auto-generated row
+        # labels -- via QFormLayout.setRowVisible instead of only hiding
+        # the value widget, which otherwise leaves the row's height
+        # reserved in this fixed, non-scrolling group.
+        self._turn_snapshot_metadata_form = metadata
 
         self.turn_snapshot_image_label = QLabel("固定画像なし")
         self.turn_snapshot_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -123,6 +129,7 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
 
         crop_grid = QGridLayout()
         self._turn_snapshot_crop_labels: dict[str, QLabel] = {}
+        self._turn_snapshot_crop_title_labels: dict[str, QLabel] = {}
         for index, (field_key, title) in enumerate(
             (
                 (OcrFieldKey.SELF_ACTIVE.value, "自分 active ROI"),
@@ -143,6 +150,7 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
             crop_grid.addWidget(title_label, row, column)
             crop_grid.addWidget(crop_label, row + 1, column)
             self._turn_snapshot_crop_labels[field_key] = crop_label
+            self._turn_snapshot_crop_title_labels[field_key] = title_label
         layout.addLayout(crop_grid)
 
         origins = QFormLayout()
@@ -157,6 +165,10 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
             self._turn_snapshot_origin_labels[field_key] = label
             origins.addRow(title, label)
         layout.addLayout(origins)
+        # Exposed for the same reason as ``_turn_snapshot_metadata_form``
+        # above -- lets Bundle C fully collapse these rows via
+        # setRowVisible rather than leaving their height reserved.
+        self._turn_snapshot_origins_form = origins
 
         self.retake_turn_snapshot_button = QPushButton("このTurnを撮り直す")
         self.retake_turn_snapshot_button.clicked.connect(self._on_retake_turn_snapshot)

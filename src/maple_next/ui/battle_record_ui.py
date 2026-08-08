@@ -26,6 +26,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -504,6 +505,33 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             )
         self.resize(target_width, target_height)
 
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if hasattr(self, "turn_snapshot_group"):
+            self._apply_fixed_turn_image_width()
+
+    def _apply_fixed_turn_image_width(self) -> None:
+        """Fixed Turn image thumbnail width tracks the mock's two named
+        targets (~230px @1440x900, ~185px @1280x720), interpolating between
+        them for in-between window widths rather than pinning to whichever
+        bound a plain min/max-width pair happens to resolve to under the
+        row's HBoxLayout stretch.
+        """
+
+        width = self.width()
+        if width >= _DEFAULT_LAUNCH_WIDTH:
+            target = _FIXED_TURN_IMAGE_MAX_WIDTH
+        elif width <= _MINIMUM_SUPPORTED_WIDTH:
+            target = _FIXED_TURN_IMAGE_MIN_WIDTH
+        else:
+            span = _DEFAULT_LAUNCH_WIDTH - _MINIMUM_SUPPORTED_WIDTH
+            ratio = (width - _MINIMUM_SUPPORTED_WIDTH) / span
+            target = round(
+                _FIXED_TURN_IMAGE_MIN_WIDTH
+                + ratio * (_FIXED_TURN_IMAGE_MAX_WIDTH - _FIXED_TURN_IMAGE_MIN_WIDTH)
+            )
+        self.turn_snapshot_group.setFixedWidth(target)
+
     # -- new Bundle A/B widgets ------------------------------------------------
 
     def _build_bundle_c_state_widgets(self) -> None:
@@ -675,6 +703,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # compact evidentiary thumbnails and duplicated (above) in the
         # diagnostics drawer -- hide the originals in center so the
         # thumbnails' own status text is the only thing shown there.
+        # Hiding only the value widget leaves QFormLayout's own
+        # auto-generated row label (e.g. "Identity") visible and the row's
+        # height still reserved in this fixed, non-scrolling group, so the
+        # row label must be hidden via setRowVisible too.
+        metadata_form = getattr(self, "_turn_snapshot_metadata_form", None)
         for detail_label in (
             capture_freshness,
             capture_device,
@@ -684,6 +717,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         ):
             if detail_label is not None:
                 detail_label.setVisible(False)
+                if metadata_form is not None and metadata_form.indexOf(detail_label) != -1:
+                    metadata_form.setRowVisible(detail_label, False)
 
         # ROI crop images and per-field origin/provenance rows are raw
         # capture diagnostics -- keep them out of the fixed, non-scrolling
@@ -691,12 +726,21 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # to the diagnostics drawer). The fixed Turn image itself (the
         # evidence thumbnail) stays in center.
         crop_labels = getattr(self, "_turn_snapshot_crop_labels", None)
+        crop_title_labels = getattr(self, "_turn_snapshot_crop_title_labels", None)
         origin_labels = getattr(self, "_turn_snapshot_origin_labels", None)
+        origins_form = getattr(self, "_turn_snapshot_origins_form", None)
         if crop_labels or origin_labels:
             roi_widget = QWidget()
             roi_layout = QVBoxLayout(roi_widget)
             roi_layout.setContentsMargins(0, 0, 0, 0)
             if crop_labels:
+                # The grid title labels (e.g. "自分 active ROI") are plain
+                # QLabels the original crop_grid still owns -- only the
+                # value labels get reparented into the drawer below, so the
+                # titles must be hidden explicitly or they keep occupying a
+                # row in the original, now half-empty grid.
+                for title_label in (crop_title_labels or {}).values():
+                    title_label.setVisible(False)
                 for label in crop_labels.values():
                     label.setVisible(False)
                     label.setParent(None)
@@ -706,13 +750,22 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                     crop_row.addWidget(label)
                 roi_layout.addLayout(crop_row)
             if origin_labels:
-                origins_form = QFormLayout()
+                new_origins_form = QFormLayout()
                 for field_key, label in origin_labels.items():
+                    # QFormLayout.addRow(str, widget) auto-creates the row's
+                    # title label; reparenting only the value label away
+                    # leaves that auto title behind, still visible, in the
+                    # original origins form -- hide it there before moving
+                    # the value label to the drawer's new form.
+                    if origins_form is not None:
+                        original_title = origins_form.labelForField(label)
+                        if original_title is not None:
+                            original_title.setVisible(False)
                     label.setVisible(False)
                     label.setParent(None)
                     label.setVisible(True)
-                    origins_form.addRow(field_key, label)
-                roi_layout.addLayout(origins_form)
+                    new_origins_form.addRow(field_key, label)
+                roi_layout.addLayout(new_origins_form)
             self.diagnostics_drawer.add_widget(roi_widget)
 
         # -- terminal-flow drawer: match end/export/recovery -------------------
@@ -787,8 +840,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if turn_snapshot_group is not None:
             self._detach_from_parent_layout(turn_snapshot_group)
             self._detach_from_parent_layout(self.turn_facts_group)
-            turn_snapshot_group.setMaximumWidth(_FIXED_TURN_IMAGE_MAX_WIDTH)
-            turn_snapshot_group.setMinimumWidth(_FIXED_TURN_IMAGE_MIN_WIDTH)
+            # Initial width; kept in sync with the live window width by
+            # resizeEvent -> _apply_fixed_turn_image_width thereafter.
+            turn_snapshot_group.setFixedWidth(_FIXED_TURN_IMAGE_MAX_WIDTH)
             for never_shrink in (turn_snapshot_group, self.turn_facts_group):
                 never_shrink.setSizePolicy(
                     QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum

@@ -149,7 +149,7 @@ def main(output_directory: Path) -> int:
     window.opponent_action_name_input.setText("りゅうのまい")
     _save(app, window, output_directory / "04-action-result-phase.png")
 
-    _save(app, window.opponent_intel_widget, output_directory / "05-compact-intel.png")
+    _save(app, window, output_directory / "05-compact-intel-below-gemini.png")
     window.opponent_intel_widget.detail_button.click()
     detail = window.opponent_intel_widget._detail_dialog  # noqa: SLF001
     if detail is None:

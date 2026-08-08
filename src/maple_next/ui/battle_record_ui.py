@@ -42,7 +42,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QStackedWidget,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -798,6 +797,7 @@ class _OpponentIntelWidget(QGroupBox):
         layout.addWidget(self.detail_button)
         self._view: OpponentIntelView | None = None
         self._detail_dialog: QDialog | None = None
+        self._detail_sections: dict[str, QGroupBox] = {}
         self.detail_button.clicked.connect(self._open_detail)
 
     def render_intel(self, view: OpponentIntelView) -> None:
@@ -826,30 +826,64 @@ class _OpponentIntelWidget(QGroupBox):
         dialog = QDialog(self)
         dialog.setWindowTitle("Opponent INTEL 詳細")
         layout = QVBoxLayout(dialog)
-        tabs = QLabel(f"相手個体: {view.species}")
-        layout.addWidget(tabs)
-        details = QTextEdit()
-        details.setReadOnly(True)
+        species = QLabel(f"相手個体: {view.species}")
+        species.setObjectName("intelDetailSpecies")
+        layout.addWidget(species)
         if view.meta is None:
-            source_text = "source/regulation/snapshot: データなし"
-            ranking_text = "usage ranking: データなし"
+            move_ranking = "データなし"
+            ability_ranking = "データなし"
+            item_ranking = "データなし"
+            source = regulation = snapshot = "データなし"
         else:
-            source_text = (
-                f"source: {view.meta.source}\nregulation: {view.meta.regulation}\n"
-                f"snapshot: {view.meta.snapshot_date}"
-            )
-            ranking_text = (
-                f"moves: {_format_rankings(view.meta.moves)}\n"
-                f"abilities: {_format_rankings(view.meta.abilities)}\n"
-                f"items: {_format_rankings(view.meta.items)}"
-            )
+            move_ranking = _format_rankings(view.meta.moves)
+            ability_ranking = _format_rankings(view.meta.abilities)
+            item_ranking = _format_rankings(view.meta.items)
+            source = view.meta.source or "データなし"
+            regulation = view.meta.regulation or "データなし"
+            snapshot = view.meta.snapshot_date or "データなし"
         possible = ", ".join(view.possible_abilities) or "データなし"
-        details.setPlainText(
-            f"current-match facts\nability: {view.ability}\nitem: {view.item}\n"
-            f"moves: {', '.join(view.moves) or '不明'}\n\npossible abilities: {possible}\n\n"
-            f"{ranking_text}\n\n{source_text}"
+        sections: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
+            (
+                "current_match_facts",
+                "Current-match facts",
+                (
+                    ("ability", view.ability),
+                    ("item", view.item),
+                    ("moves", ", ".join(view.moves) or "不明"),
+                ),
+            ),
+            ("moves", "Moves", (("usage", move_ranking),)),
+            (
+                "abilities",
+                "Abilities",
+                (("possible", possible), ("usage", ability_ranking)),
+            ),
+            ("items", "Items", (("usage", item_ranking),)),
+            (
+                "source",
+                "Source / regulation / snapshot",
+                (("source", source), ("regulation", regulation), ("snapshot", snapshot)),
+            ),
         )
-        layout.addWidget(details)
+        self._detail_sections = {}
+        for key, title, rows in sections:
+            section = QGroupBox(title)
+            section.setObjectName(f"intelDetail_{key}")
+            form = QFormLayout(section)
+            for label, value in rows:
+                value_label = QLabel(value)
+                value_label.setWordWrap(True)
+                form.addRow(label, value_label)
+            self._detail_sections[key] = section
+            layout.addWidget(section)
+        layout.addStretch(1)
+        dialog.setStyleSheet(
+            "QDialog { background: #0b1220; color: #dbeafe; }"
+            "QLabel { color: #dbeafe; font-size: 11px; }"
+            "QGroupBox { background: #111827; border: 1px solid #334155; "
+            "border-radius: 6px; margin-top: 8px; padding: 7px; color: #93c5fd; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+        )
         dialog.resize(620, 520)
         dialog.setModal(False)
         self._detail_dialog = dialog
@@ -1003,9 +1037,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.review_effect_candidate = _EffectCandidateCard(self._apply_review_effect)
         editor_layout.addWidget(self.review_effect_candidate)
         self.review_state_event_button = QPushButton("＋ 状態変化を記録")
-        self.review_state_event_button.clicked.connect(
-            lambda: self._open_state_event_dialog("review")
-        )
+        self.review_state_event_button.clicked.connect(self._open_common_state_event_dialog)
         editor_layout.addWidget(self.review_state_event_button)
         state_layout.addWidget(self.current_state_editor_container)
 
@@ -1121,6 +1153,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.confirm_turn_facts_button.setText("SEND TURN TO GEMINI")
         self.record_action_button.setText("行動・結果記録")
         self.next_turn_button.setText("NEXT TURN")
+
         if gemini_send_button is not None:
             gemini_send_button.setVisible(False)
             self._bundle_c_gemini_send_button = gemini_send_button
@@ -1374,24 +1407,31 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             evidence_holder_layout = QVBoxLayout(self._evidence_holder)
             evidence_holder_layout.addWidget(turn_snapshot_group)
 
-            evidence_control = QWidget()
-            evidence_control_layout = QVBoxLayout(evidence_control)
-            evidence_control_layout.setContentsMargins(0, 0, 0, 0)
-            evidence_control_layout.setSpacing(1)
             self.evidence_open_button = QPushButton("撮影画像を確認")
             self.evidence_open_button.clicked.connect(self._on_open_evidence_overlay)
-            evidence_control_layout.addWidget(self.evidence_open_button)
             self.evidence_status_label = QLabel()
-            self.evidence_status_label.setWordWrap(True)
-            self.evidence_status_label.setStyleSheet("font-size: 9px;")
-            evidence_control_layout.addWidget(self.evidence_status_label)
-            evidence_control_layout.addStretch(1)
-            evidence_control.setMaximumWidth(_FIXED_TURN_IMAGE_MIN_WIDTH)
+            self.evidence_status_label.setWordWrap(False)
+            self.evidence_status_label.setObjectName("liveToolStatus")
+
+            # These are current-turn tools, not phase-form fields. Keep them
+            # immediately below LIVE in every phase; render_view only changes
+            # whether state mutation is currently allowed.
+            self._detach_from_parent_layout(self.review_state_event_button)
+            self._detach_from_parent_layout(self.result_state_event_button)
+            self.result_state_event_button.setVisible(False)
+            self.live_tools_bar = QWidget()
+            self.live_tools_bar.setObjectName("liveToolsBar")
+            live_tools_layout = QHBoxLayout(self.live_tools_bar)
+            live_tools_layout.setContentsMargins(6, 3, 6, 3)
+            live_tools_layout.setSpacing(6)
+            live_tools_layout.addWidget(self.evidence_open_button)
+            live_tools_layout.addWidget(self.review_state_event_button)
+            live_tools_layout.addWidget(self.evidence_status_label, 1)
+            self._center_column_layout.insertWidget(1, self.live_tools_bar)
 
             fixed_image_facts_row = QWidget()
             fixed_image_facts_layout = QHBoxLayout(fixed_image_facts_row)
             fixed_image_facts_layout.setContentsMargins(0, 0, 0, 0)
-            fixed_image_facts_layout.addWidget(evidence_control, 0)
             fixed_image_facts_layout.addWidget(self.turn_facts_group, 1)
             self._review_facts_row = fixed_image_facts_row
 
@@ -1493,6 +1533,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             lifecycle_button.setMinimumHeight(40)
 
         page = QWidget()
+        self.battle_record_page = page
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(2, 2, 2, 2)
         page_layout.setSpacing(3)
@@ -1507,13 +1548,29 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # center now renders only one lifecycle surface at a time, the old
         # dense 9px legacy-graft styling is no longer necessary.
         page.setStyleSheet(
-            "QGroupBox { margin-top: 7px; padding: 5px; font-size: 11px; "
-            "border: 1px solid #cbd5e1; border-radius: 6px; }"
+            "QWidget { background: #0b1220; color: #dbeafe; }"
+            "QScrollArea { border: none; background: #0b1220; }"
+            "QGroupBox { background: #111827; margin-top: 7px; padding: 5px; "
+            "font-size: 11px; border: 1px solid #334155; border-radius: 6px; }"
             "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
-            "QLabel { font-size: 11px; }"
-            "QPushButton { padding: 4px 8px; font-size: 11px; }"
-            "QPushButton[lifecycle=\"true\"] { font-size: 13px; font-weight: 700; }"
-            "QComboBox, QLineEdit, QSpinBox, QCheckBox { font-size: 11px; padding: 2px 4px; }"
+            "QLabel { background: transparent; color: #dbeafe; font-size: 11px; }"
+            "QPushButton { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; "
+            "border-radius: 5px; padding: 4px 8px; font-size: 11px; }"
+            "QPushButton:hover { background: #334155; border-color: #60a5fa; }"
+            "QPushButton:disabled { background: #111827; color: #64748b; border-color: #243244; }"
+            "QPushButton[lifecycle=\"true\"] { font-size: 13px; font-weight: 700; "
+            "min-height: 30px; }"
+            "QPushButton[lifecycle=\"true\"][active=\"true\"] { background: #22c55e; "
+            "color: #03140a; border-color: #4ade80; }"
+            "QWidget#liveToolsBar { background: #111827; border: 1px solid #334155; "
+            "border-radius: 6px; }"
+            "QLabel#liveToolStatus { color: #94a3b8; }"
+            "QComboBox, QLineEdit, QSpinBox { background: #0f172a; color: #f8fafc; "
+            "border: 1px solid #475569; border-radius: 4px; }"
+            "QComboBox:disabled, QLineEdit:disabled, QSpinBox:disabled { color: #64748b; "
+            "border-color: #243244; }"
+            "QCheckBox { background: transparent; color: #dbeafe; font-size: 11px; "
+            "padding: 2px 4px; }"
             "QComboBox, QLineEdit, QSpinBox { min-height: 22px; max-height: 26px; }"
         )
         self.battle_context_label.setMaximumHeight(22)
@@ -1643,6 +1700,18 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.record_action_button.setText("行動・結果記録")
         self.next_turn_button.setText("NEXT TURN")
 
+        active_button_by_cta = {
+            "START_TURN_CAPTURE": self.start_turn_button,
+            "CONFIRM_TURN_FACTS": self.confirm_turn_facts_button,
+            "RECORD_ACTUAL_ACTION": self.record_action_button,
+            "NEXT_TURN": self.next_turn_button,
+        }
+        active_button = active_button_by_cta.get(projection.primary_cta)
+        for lifecycle_button in self.lifecycle_buttons:
+            lifecycle_button.setProperty("active", lifecycle_button is active_button)
+            lifecycle_button.style().unpolish(lifecycle_button)
+            lifecycle_button.style().polish(lifecycle_button)
+
         context_parts = [
             f"Turn {projection.turn_number}" if projection.turn_number else "Turn —",
             projection.session_state or "—",
@@ -1714,6 +1783,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         turn_snapshot_status_label = getattr(self, "turn_snapshot_status_label", None)
         if evidence_status_label is not None and turn_snapshot_status_label is not None:
             evidence_status_label.setText(turn_snapshot_status_label.text())
+        self.evidence_open_button.setEnabled(turn_state)
+        self.review_state_event_button.setEnabled(
+            current.persistence_reads_allowed
+            and (editable or projection.primary_cta == "RECORD_ACTUAL_ACTION")
+        )
 
         # Collapse the legal-action prefill rows (moves/switches) once they
         # are no longer editable -- same fixed-height rationale as above.
@@ -1767,7 +1841,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             "左の確定履歴を確認し、次のTurnへ進んでください。"
         )
 
-        self.rich_gemini_group.setVisible(turn_state)
+        # The v5 right rail never changes hierarchy: Gemini owns the upper
+        # slot even while empty/waiting, with compact INTEL directly below.
+        self.rich_gemini_group.setVisible(True)
         status = self._bundle_c_controller.rich_turn_advice_gemini_status()
         self.rich_gemini_status_label.setText(_RICH_STATUS_LABELS.get(status.status, status.status))
         if summary.provider_ready:
@@ -1987,6 +2063,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         dialog = _StateEventDialog(self, context=context, apply_callback=callback)
         self._state_event_dialog = dialog
         dialog.show()
+
+    def _open_common_state_event_dialog(self, _checked: bool = False) -> None:
+        primary_cta = self._bundle_c_controller.refresh().projection.primary_cta
+        context = "result" if primary_cta == "RECORD_ACTUAL_ACTION" else "review"
+        self._open_state_event_dialog(context)
 
     def _propose_actual_action_effect(self, name: str) -> None:
         if self.actual_action_type_box.currentText() != "MOVE":

@@ -1,4 +1,4 @@
-"""Acceptance for Issue #31 comments 5225090761 and 5225207250 (Battle Record v5)."""
+"""Acceptance for Issue #31 Battle Record v5, through final closure 5225265176."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QGroupBox
+from PySide6.QtWidgets import QGroupBox, QLabel
 from test_issue31_turn_state_ui_bundle_c import (
     _advance_to_turn_capture_pending,
     _fill_minimal_current_state,
@@ -104,6 +104,71 @@ def test_visual_remediation_hides_legacy_state_grids_and_presets(tmp_path: Path)
         assert editor.event_preview_button.isHidden()
         assert editor.event_apply_button.isHidden()
         assert editor.detail_section.isHidden()
+    repository.close()
+
+
+def test_final_visual_right_rail_keeps_gemini_above_intel_while_waiting(tmp_path: Path) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    controller.new_match()
+    controller.confirm_selection_facts(
+        ["Meowscarada", "Gholdengo", "Dragonite", "Dondozo", "Flutter Mane", "Urshifu"],
+        ["Salamence", "Gholdengo", "Dragonite", "Flutter Mane", "Tyranitar", "Pelipper"],
+    )
+    controller.submit_mock_advice(
+        ["Meowscarada", "Gholdengo", "Dragonite"], "Meowscarada"
+    )
+    controller.apply_selection(
+        ["Meowscarada", "Gholdengo", "Dragonite"], "Meowscarada", human_confirmed=True
+    )
+    window.render_view()
+
+    assert not window.rich_gemini_group.isHidden()
+    assert window._right_column_layout.indexOf(window.rich_gemini_group) == 0
+    assert window._right_column_layout.indexOf(window.opponent_intel_widget) == 1
+    repository.close()
+
+
+def test_final_visual_common_tools_live_directly_below_live_surface(tmp_path: Path) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+
+    assert window.evidence_open_button.parentWidget() is window.live_tools_bar
+    assert window.review_state_event_button.parentWidget() is window.live_tools_bar
+    assert window.result_state_event_button.isHidden()
+    assert window.evidence_open_button.isEnabled()
+    assert window.review_state_event_button.isEnabled()
+    repository.close()
+
+
+def test_final_visual_intel_detail_has_structured_fail_soft_sections(tmp_path: Path) -> None:
+    repository, _controller, window, _transport = build_window(tmp_path)
+    window.opponent_intel_widget.detail_button.click()
+
+    assert set(window.opponent_intel_widget._detail_sections) == {
+        "current_match_facts",
+        "moves",
+        "abilities",
+        "items",
+        "source",
+    }
+    for key in ("moves", "abilities", "items", "source"):
+        section = window.opponent_intel_widget._detail_sections[key]
+        text = " ".join(label.text() for label in section.findChildren(QLabel))
+        assert "データなし" in text
+    repository.close()
+
+
+def test_final_visual_uses_dark_cards_and_active_lifecycle_state(tmp_path: Path) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+
+    style = window.battle_record_page.styleSheet()
+    assert "#0b1220" in style
+    assert "#111827" in style
+    assert window.confirm_turn_facts_button.property("active") is True
+    assert window.start_turn_button.property("active") is False
     repository.close()
 
 

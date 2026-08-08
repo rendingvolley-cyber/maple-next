@@ -1,4 +1,4 @@
-"""Focused acceptance for Issue #31 comment 5225090761 (Battle Record v5)."""
+"""Acceptance for Issue #31 comments 5225090761 and 5225207250 (Battle Record v5)."""
 
 from __future__ import annotations
 
@@ -63,6 +63,47 @@ def test_fixed_geometry_exact_four_lifecycle_buttons_and_no_legacy_phase(
     )
     assert "facts/state確定" not in {button.text() for button in window.lifecycle_buttons}
     assert window._bundle_c_gemini_send_button.isHidden()
+    repository.close()
+
+
+def test_visual_remediation_uses_one_four_phase_workbench_surface(tmp_path: Path) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+
+    assert window.workbench_stack.count() == 4
+    assert window.workbench_stack.currentWidget() is window.review_workbench_page
+    assert window.workbench_stack.maximumHeight() == 425
+    assert window.diagnostics_drawer.isHidden()
+    assert window.terminal_flow_drawer.isHidden()
+    assert window.turn_facts_confirm_checkbox.isHidden()
+
+    _fill_minimal_current_state(window)
+    window._on_confirm_turn_facts()
+    window.mock_turn_action_type_box.setCurrentText("MOVE")
+    window.mock_turn_action_name_box.setCurrentText("Flower Trick")
+    window.mock_turn_prediction_input.setText("opponent move")
+    window.mock_turn_rationale_input.setText("fake/injected test")
+    window._on_trusted_send_turn_to_gemini()
+    assert window.workbench_stack.currentWidget() is window.action_workbench_page
+    assert window.action_result_delta_group.isVisible()
+    assert not window.current_state_group.isVisible()
+    repository.close()
+
+
+def test_visual_remediation_hides_legacy_state_grids_and_presets(tmp_path: Path) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+
+    assert window.self_state_editor.stage_grid_widget.isHidden()
+    assert window.opponent_state_editor.stage_grid_widget.isHidden()
+    for editor in (window.self_delta_editor, window.opponent_delta_editor):
+        assert editor.status_preset_box.isHidden()
+        assert editor.event_preset_box.isHidden()
+        assert editor.event_preview_button.isHidden()
+        assert editor.event_apply_button.isHidden()
+        assert editor.detail_section.isHidden()
     repository.close()
 
 

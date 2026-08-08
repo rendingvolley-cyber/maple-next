@@ -1,4 +1,4 @@
-"""Create the six offscreen Battle Record v5 candidate screenshots.
+"""Create the six offscreen Battle Record v5 remediation screenshots.
 
 Uses only the fake/injected Turn provider and writes outside the repository
 by default. No capture device, network provider, or game input is touched.
@@ -82,10 +82,13 @@ def main(output_directory: Path) -> int:
     controller.confirm_selection_facts(list(SELF_TEAM), list(OPPONENT_TEAM))
     controller.submit_mock_advice(list(SELECTED_THREE), SELECTED_THREE[0])
     controller.apply_selection(list(SELECTED_THREE), SELECTED_THREE[0], human_confirmed=True)
-    controller.start_turn_capture()
     window.render_view()
     window.header_tabs.setCurrentIndex(1)
     window.show()
+    _save(app, window, output_directory / "01-turn-capture.png")
+
+    controller.start_turn_capture()
+    window.render_view()
     window.self_active_box.setCurrentText(SELECTED_THREE[0])
     window.opponent_active_input.setText("Garchomp")
     window.self_hp_box.setCurrentText("100")
@@ -101,21 +104,13 @@ def main(output_directory: Path) -> int:
     window.terrain_field.unknown_box.setChecked(False)
     window.terrain_field.line.setText("NONE")
 
-    _save(app, window, output_directory / "01-turn-review.png")
     window.opponent_active_input.setText("Salamence")
-    _save(app, window, output_directory / "02-ability-first-confirmation.png")
+    _save(app, window, output_directory / "02-turn-review.png")
     intimidate = find_effect("intimidate")
     if intimidate is None:
         raise RuntimeError("catalog missing intimidate")
     window.review_effect_candidate.propose(intimidate, prefix="相手のいかく")
     _save(app, window, output_directory / "03-catalog-effect-candidate.png")
-    _save(app, window.opponent_intel_widget, output_directory / "04-compact-intel.png")
-    window.opponent_intel_widget.detail_button.click()
-    detail = window.opponent_intel_widget._detail_dialog  # noqa: SLF001
-    if detail is None:
-        raise RuntimeError("INTEL detail dialog did not open")
-    _save(app, detail, output_directory / "05-intel-detail.png")
-    detail.close()
 
     window._on_confirm_turn_facts()  # noqa: SLF001 - human SEND click simulation
     summary = controller.turn_state_summary()
@@ -152,7 +147,15 @@ def main(output_directory: Path) -> int:
     window._on_trusted_send_turn_to_gemini()  # noqa: SLF001
     window.opponent_action_type_box.setCurrentText("MOVE")
     window.opponent_action_name_input.setText("りゅうのまい")
-    _save(app, window, output_directory / "06-action-result-phase.png")
+    _save(app, window, output_directory / "04-action-result-phase.png")
+
+    _save(app, window.opponent_intel_widget, output_directory / "05-compact-intel.png")
+    window.opponent_intel_widget.detail_button.click()
+    detail = window.opponent_intel_widget._detail_dialog  # noqa: SLF001
+    if detail is None:
+        raise RuntimeError("INTEL detail dialog did not open")
+    _save(app, detail, output_directory / "06-intel-detail.png")
+    detail.close()
 
     print(f"screenshots=6 fake_provider_dispatch={transport.call_count}")
     print("real_provider_network_send=0 game_action=0 meta_runtime_network_fetch=0")

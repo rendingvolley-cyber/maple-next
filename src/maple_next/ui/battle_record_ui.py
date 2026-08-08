@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -381,7 +382,7 @@ class _DeltaSideEffectsField(QWidget):
 
 def _add_compact_stage_grid(
     layout: QVBoxLayout, fields: Mapping[str, QWidget], stage_names: tuple[tuple[str, str], ...]
-) -> None:
+) -> QWidget:
     """4-columns-wide grid, label beside (not above) its field -- ~1 row of
     height per 4 fields instead of 2 (a label-over-field row pair each),
     so the two stacked stage grids in the fixed, non-scrolling center
@@ -389,7 +390,9 @@ def _add_compact_stage_grid(
     roughly half the vertical space they used to for the same 7 fields.
     """
 
-    grid = QGridLayout()
+    container = QWidget()
+    grid = QGridLayout(container)
+    grid.setContentsMargins(0, 0, 0, 0)
     grid.setHorizontalSpacing(3)
     grid.setVerticalSpacing(0)
     columns = 4
@@ -404,7 +407,8 @@ def _add_compact_stage_grid(
         cell_layout.addWidget(label_widget)
         cell_layout.addWidget(fields[key])
         grid.addWidget(cell, row, col)
-    layout.addLayout(grid)
+    layout.addWidget(container)
+    return container
 
 
 class _SideStateEditor(QGroupBox):
@@ -426,7 +430,9 @@ class _SideStateEditor(QGroupBox):
         self.stage_fields: dict[str, _KnownIntField] = {}
         for key, _label in _STAGE_FIELDS:
             self.stage_fields[key] = _KnownIntField()
-        _add_compact_stage_grid(layout, self.stage_fields, _STAGE_FIELDS)
+        self.stage_grid_widget = _add_compact_stage_grid(
+            layout, self.stage_fields, _STAGE_FIELDS
+        )
 
     def to_side_state(self, *, active: Known[str], hp_bucket: Known[HpBucket]) -> SideState:
         return SideState(
@@ -504,7 +510,8 @@ class _SideDeltaEditor(QGroupBox):
         layout.addLayout(top_row)
 
         status_row = QHBoxLayout()
-        status_row.addWidget(QLabel("状態異常"))
+        self.status_preset_label = QLabel("状態異常")
+        status_row.addWidget(self.status_preset_label)
         self.status_preset_box = QComboBox()
         self.status_preset_box.addItem("選択してください")
         self.status_preset_box.addItems(MAJOR_STATUS_PRESETS)
@@ -521,7 +528,8 @@ class _SideDeltaEditor(QGroupBox):
         layout.addWidget(self.status_field)
 
         event_row = QHBoxLayout()
-        event_row.addWidget(QLabel("能力変化"))
+        self.event_preset_label = QLabel("能力変化")
+        event_row.addWidget(self.event_preset_label)
         self.event_preset_box = QComboBox()
         self.event_preset_box.addItem("選択してください", "")
         for preset in STAGE_EVENT_PRESETS:
@@ -550,6 +558,23 @@ class _SideDeltaEditor(QGroupBox):
         _add_compact_stage_grid(detail_layout, self.stage_fields, _STAGE_FIELDS)
         self.detail_section.add_widget(detail_widget)
         layout.addWidget(self.detail_section)
+
+        # v5 operator composition: catalog/context cards are the primary
+        # route. These legacy preset/manual-stage controls stay available to
+        # tests/domain wiring but are not permanently exposed in the normal
+        # workbench; the timing-grouped fallback dialog owns that role.
+        for legacy_control in (
+            self.status_preset_label,
+            self.status_preset_box,
+            self.status_apply_button,
+            self.event_preset_label,
+            self.event_preset_box,
+            self.event_preview_button,
+            self.event_apply_button,
+            self.event_preview_label,
+            self.detail_section,
+        ):
+            legacy_control.setVisible(False)
 
     def _on_preview_stage_event(self, _checked: bool = False) -> None:
         preset_key = self.event_preset_box.currentData()
@@ -930,7 +955,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
     # -- new Bundle A/B widgets ------------------------------------------------
 
     def _build_bundle_c_state_widgets(self) -> None:
-        self.current_state_group = QGroupBox("現在のTurn state — 人間が確認・修正")
+        self.current_state_group = QGroupBox("Turn確認 — 状態 / OCR修正")
         state_layout = QVBoxLayout(self.current_state_group)
         state_layout.setContentsMargins(2, 2, 2, 2)
         state_layout.setSpacing(0)
@@ -962,6 +987,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         sides_row = QHBoxLayout()
         self.self_state_editor = _SideStateEditor("自分")
         self.opponent_state_editor = _SideStateEditor("相手")
+        self.self_state_editor.stage_grid_widget.setVisible(False)
+        self.opponent_state_editor.stage_grid_widget.setVisible(False)
         sides_row.addWidget(self.self_state_editor)
         sides_row.addWidget(self.opponent_state_editor)
         editor_layout.addLayout(sides_row)
@@ -982,9 +1009,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         editor_layout.addWidget(self.review_state_event_button)
         state_layout.addWidget(self.current_state_editor_container)
 
-        self.action_result_delta_group = QGroupBox(
-            "ActionResultDelta — CHANGED / UNCHANGED / UNKNOWN を明示"
-        )
+        self.action_result_delta_group = QGroupBox("結果 — 変わった項目だけ記録")
         delta_layout = QVBoxLayout(self.action_result_delta_group)
         delta_layout.setContentsMargins(2, 2, 2, 2)
         delta_layout.setSpacing(0)
@@ -1020,6 +1045,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
         self.rich_gemini_group = QGroupBox("Gemini Turn Advice — rich state")
         rich_layout = QFormLayout(self.rich_gemini_group)
+        self._rich_gemini_layout = rich_layout
         self.rich_gemini_status_label = QLabel()
         self.rich_gemini_denial_label = QLabel()
         self.rich_gemini_denial_label.setWordWrap(True)
@@ -1048,7 +1074,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # Top guidance removal (5224224375): the "今なにをすべきか" heading,
         # the state-specific subtitle, and the paragraph under it are
         # removed entirely -- not hidden -- so their vertical space returns
-        # to the body/LIVE area below. The fixed 5-button footer's
+        # to the body/LIVE area below. The fixed four-button footer's
         # visible/enabled state plus the compact Turn/state/provider line
         # and per-section labels already carry this information; no
         # replacement banner or text is added. error_label (anomaly
@@ -1072,6 +1098,12 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         left_container = self._left_column_layout.parentWidget()
         center_container = self._center_column_layout.parentWidget()
         right_container = self._right_column_layout.parentWidget()
+        self.history_group.setTitle("確定履歴 / Latest confirmed state")
+        history_layout = self.history_group.layout()
+        if isinstance(history_layout, QVBoxLayout):
+            self.latest_confirmed_state_label = QLabel("確定済みstateはまだありません。")
+            self.latest_confirmed_state_label.setWordWrap(True)
+            history_layout.insertWidget(0, self.latest_confirmed_state_label)
 
         # Extract the four v5 lifecycle buttons. The legacy standalone
         # Gemini button remains callable internally but is not an operator
@@ -1092,6 +1124,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if gemini_send_button is not None:
             gemini_send_button.setVisible(False)
             self._bundle_c_gemini_send_button = gemini_send_button
+        self.turn_facts_confirm_checkbox.setVisible(False)
 
         # Compact 2-column reflow: same widgets, same signal wiring, just
         # laid out 2-per-row instead of 1-per-row so the fixed,
@@ -1128,7 +1161,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                     self.action_order_box,
                     self.actual_action_confirm_checkbox,
                 ],
-                columns=6,
+                columns=2,
             )
             # An unbounded QComboBox/QLineEdit sizeHint here (content-driven,
             # easily 150px+ each) times 6-across was what pushed center's
@@ -1272,25 +1305,20 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         header_layout = QVBoxLayout(header_widget)
         header_layout.setContentsMargins(0, 0, 0, 0)
         self.battle_context_label = QLabel()
-        self.battle_context_label.setWordWrap(True)
+        self.battle_context_label.setWordWrap(False)
         self.battle_context_label.setStyleSheet("font-weight: 600;")
         header_layout.addWidget(self.battle_context_label)
-        drawer_row = QHBoxLayout()
-        drawer_row.addWidget(self.diagnostics_drawer)
-        drawer_row.addWidget(self.terminal_flow_drawer)
-        drawer_row.addStretch(1)
-        header_layout.addLayout(drawer_row)
+        self.diagnostics_drawer.setVisible(False)
+        self.terminal_flow_drawer.setVisible(False)
 
-        # -- left / center / right, plus the two new Bundle A/B groups ---------
-        # Preferred/Minimum (never shrink below sizeHint) on every non-live
-        # row -- only the live preview (Expanding, below) is allowed to give
-        # up space first when the fixed-height center column runs tight, so
-        # these editable facts/state rows never get compressed into an
-        # unusable, overlapping size.
+        # -- phase-specific center workbench / clean right rail ---------------
         for non_preview_row in (self.current_state_group, self.action_result_delta_group):
             non_preview_row.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        self._center_column_layout.addWidget(self.current_state_group)
-        self._center_column_layout.addWidget(self.action_result_delta_group)
+
+        self._detach_from_parent_layout(self.turn_advice_group)
+        self._rich_gemini_layout.addRow(self.turn_advice_group)
+        self._detach_from_parent_layout(self.rich_gemini_group)
+        self._detach_from_parent_layout(self.opponent_intel_widget)
         self._right_column_layout.insertWidget(0, self.rich_gemini_group)
         self._right_column_layout.insertWidget(1, self.opponent_intel_widget)
 
@@ -1365,7 +1393,65 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             fixed_image_facts_layout.setContentsMargins(0, 0, 0, 0)
             fixed_image_facts_layout.addWidget(evidence_control, 0)
             fixed_image_facts_layout.addWidget(self.turn_facts_group, 1)
-            self._center_column_layout.insertWidget(1, fixed_image_facts_row)
+            self._review_facts_row = fixed_image_facts_row
+
+        # The accepted v5 HTML is a lifecycle workbench, not a collection of
+        # simultaneously visible legacy groups. Exactly one page is rendered
+        # below LIVE at any time; signal wiring and domain objects are reused.
+        self.workbench_stack = QStackedWidget()
+        self.workbench_stack.setObjectName("battleRecordLifecycleWorkbench")
+        self.workbench_stack.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+
+        self.capture_workbench_page = QWidget()
+        capture_page_layout = QVBoxLayout(self.capture_workbench_page)
+        capture_page_layout.setContentsMargins(6, 6, 6, 6)
+        capture_title = QLabel("Turn撮影")
+        capture_title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        capture_page_layout.addWidget(capture_title)
+        self.capture_phase_hint = QLabel(
+            "UGREEN LIVEを確認し、準備ができたら下の「Turn撮影」を押します。"
+            "映像がなくてもmanual-safe入力で続行できます。"
+        )
+        self.capture_phase_hint.setWordWrap(True)
+        capture_page_layout.addWidget(self.capture_phase_hint)
+        capture_page_layout.addStretch(1)
+
+        self.review_workbench_page = QWidget()
+        review_page_layout = QVBoxLayout(self.review_workbench_page)
+        review_page_layout.setContentsMargins(0, 0, 0, 0)
+        review_page_layout.setSpacing(3)
+        review_page_layout.addWidget(self._review_facts_row)
+        review_page_layout.addWidget(self.current_state_group)
+
+        self.action_workbench_page = QWidget()
+        action_page_layout = QVBoxLayout(self.action_workbench_page)
+        action_page_layout.setContentsMargins(0, 0, 0, 0)
+        action_page_layout.setSpacing(3)
+        self._detach_from_parent_layout(self.actual_action_group)
+        action_page_layout.addWidget(self.actual_action_group)
+        action_page_layout.addWidget(self.action_result_delta_group)
+
+        self.recorded_workbench_page = QWidget()
+        recorded_page_layout = QVBoxLayout(self.recorded_workbench_page)
+        recorded_page_layout.setContentsMargins(8, 8, 8, 8)
+        recorded_title = QLabel("このTurnは記録済みです")
+        recorded_title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        self.recorded_summary_label = QLabel()
+        self.recorded_summary_label.setWordWrap(True)
+        recorded_page_layout.addWidget(recorded_title)
+        recorded_page_layout.addWidget(self.recorded_summary_label)
+        recorded_page_layout.addStretch(1)
+
+        for workbench_page in (
+            self.capture_workbench_page,
+            self.review_workbench_page,
+            self.action_workbench_page,
+            self.recorded_workbench_page,
+        ):
+            self.workbench_stack.addWidget(workbench_page)
+        self._center_column_layout.addWidget(self.workbench_stack, 0)
 
         # Only left (confirmed log) and right (Gemini detail) get their own
         # scroll container -- center is the primary work area and must never
@@ -1402,6 +1488,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self.record_action_button,
             self.next_turn_button,
         )
+        for lifecycle_button in self.lifecycle_buttons:
+            lifecycle_button.setProperty("lifecycle", True)
+            lifecycle_button.setMinimumHeight(40)
 
         page = QWidget()
         page_layout = QVBoxLayout(page)
@@ -1414,24 +1503,25 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         bottom_bar_layout.setContentsMargins(0, 0, 0, 0)
         bottom_bar_layout.setSpacing(4)
         header_layout.setSpacing(2)
-        # Compact chrome app-wide within this tab: every QGroupBox/QLabel's
-        # margins and spacing add up across the ~6 groups always live in
-        # the center column -- this is what actually makes 900/720px
-        # reachable without dropping any operator-visible field.
+        # The completed HTML uses readable, restrained cards. Since the
+        # center now renders only one lifecycle surface at a time, the old
+        # dense 9px legacy-graft styling is no longer necessary.
         page.setStyleSheet(
-            "QGroupBox { margin-top: 2px; padding: 0px; font-size: 9px; }"
-            "QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 0 2px; }"
-            "QLabel { font-size: 10px; }"
-            "QPushButton { padding: 1px 5px; font-size: 10px; }"
-            "QComboBox, QLineEdit, QSpinBox, QCheckBox { font-size: 10px; padding: 0px 2px; }"
-            "QComboBox, QLineEdit, QSpinBox { min-height: 15px; max-height: 17px; }"
+            "QGroupBox { margin-top: 7px; padding: 5px; font-size: 11px; "
+            "border: 1px solid #cbd5e1; border-radius: 6px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+            "QLabel { font-size: 11px; }"
+            "QPushButton { padding: 4px 8px; font-size: 11px; }"
+            "QPushButton[lifecycle=\"true\"] { font-size: 13px; font-weight: 700; }"
+            "QComboBox, QLineEdit, QSpinBox, QCheckBox { font-size: 11px; padding: 2px 4px; }"
+            "QComboBox, QLineEdit, QSpinBox { min-height: 22px; max-height: 26px; }"
         )
-        self.battle_context_label.setMaximumHeight(16)
+        self.battle_context_label.setMaximumHeight(22)
         capture_status_layout = self.capture_status_group.layout()
         if capture_status_layout is not None:
             capture_status_layout.setContentsMargins(4, 4, 4, 4)
             capture_status_layout.setSpacing(2)
-        self.reconnect_capture_button.setMaximumHeight(16)
+        self.reconnect_capture_button.setMaximumHeight(24)
         self.capture_status_label.setMaximumHeight(28)
         turn_snapshot_status_label = getattr(self, "turn_snapshot_status_label", None)
         if turn_snapshot_status_label is not None:
@@ -1444,7 +1534,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 turn_snapshot_layout.setSpacing(2)
         retake_button = getattr(self, "retake_turn_snapshot_button", None)
         if retake_button is not None:
-            retake_button.setMaximumHeight(16)
+            retake_button.setMaximumHeight(24)
         self._center_column_layout.setSpacing(0)
         self._center_column_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -1503,11 +1593,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # The base render_view calls setVisible(...) tied to primary_cta on
         # these three buttons because, in the original (pre-Bundle-C)
         # layout, hiding the button was how their whole one-button group
-        # left the screen. Bundle C already reparented all five primary
-        # operations into the fixed bottom bar, so that base-class
+        # left the screen. v5 reparented the four lifecycle operations into
+        # the fixed bottom bar, so that base-class
         # visibility toggle now hides a slot in the bar entirely instead of
-        # just disabling it -- the fixed 5-operation bar must always show
-        # all five slots (5223937478/5224076761); only enabled/disabled
+        # just disabling it -- the fixed four-operation bar must always show
+        # all four slots; only enabled/disabled
         # reflects whether the state currently allows that action.
         for always_visible_operation in (
             self.start_turn_button,
@@ -1521,7 +1611,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         projection = current.projection
         summary = self._bundle_c_controller.turn_state_summary()
 
-        # Narrow footer enablement fix (5224124798): the base class's
+        # The base class's
         # setEnabled(...) for these three buttons was written for a UI
         # where each button's own group was also hidden outside its cta
         # (e.g. confirm_turn_facts_button stays enabled through the whole
@@ -1530,7 +1620,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # a state the fixed 5-slot bar should show as a live primary
         # operation once the actual primary_cta has moved on to
         # RECORD_ACTUAL_ACTION). Re-gate strictly to "this button's slot is
-        # today's canonical primary_cta", reusing primary_cta_enabled and
+        # current canonical primary_cta", reusing primary_cta_enabled and
         # each button's own existing readiness condition -- no new legal
         # operation is invented here.
         self.start_turn_button.setEnabled(
@@ -1559,6 +1649,22 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             f"provider={projection.provider_status}",
         ]
         self.battle_context_label.setText(" / ".join(context_parts))
+
+        confirmed_state = summary.confirmed_state
+        if confirmed_state is None:
+            self.latest_confirmed_state_label.setText(
+                "確定済みstateはまだありません。撮影後に確認した内容だけがここへ残ります。"
+            )
+        else:
+            self_active = confirmed_state.self_side.active.value or "不明"
+            opponent_active = confirmed_state.opponent_side.active.value or "不明"
+            self_hp = confirmed_state.self_side.hp_bucket.value
+            opponent_hp = confirmed_state.opponent_side.hp_bucket.value
+            self.latest_confirmed_state_label.setText(
+                f"Turn {confirmed_state.identity.turn_number}\n"
+                f"自分: {self_active} / HP {self_hp.value if self_hp else '不明'}\n"
+                f"相手: {opponent_active} / HP {opponent_hp.value if opponent_hp else '不明'}"
+            )
 
         turn_state = projection.session_state in {
             "TURN_CAPTURE_PENDING",
@@ -1638,6 +1744,28 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             legacy_gemini_box.setVisible(False)
 
         self.action_result_delta_group.setVisible(projection.primary_cta == "RECORD_ACTUAL_ACTION")
+
+        # The center follows the completed HTML's lifecycle composition:
+        # LIVE is persistent and exactly one compact work surface sits below
+        # it. None of the existing controller/domain operations are changed.
+        if projection.primary_cta == "START_TURN_CAPTURE":
+            workbench_page = self.capture_workbench_page
+            workbench_height = 92
+        elif projection.primary_cta == "RECORD_ACTUAL_ACTION":
+            workbench_page = self.action_workbench_page
+            workbench_height = 350
+        elif projection.primary_cta == "NEXT_TURN":
+            workbench_page = self.recorded_workbench_page
+            workbench_height = 112
+        else:
+            workbench_page = self.review_workbench_page
+            workbench_height = 425
+        self.workbench_stack.setCurrentWidget(workbench_page)
+        self.workbench_stack.setMaximumHeight(workbench_height)
+        self.recorded_summary_label.setText(
+            f"Turn {projection.turn_number} の行動と結果を保存しました。"
+            "左の確定履歴を確認し、次のTurnへ進んでください。"
+        )
 
         self.rich_gemini_group.setVisible(turn_state)
         status = self._bundle_c_controller.rich_turn_advice_gemini_status()

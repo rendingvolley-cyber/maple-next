@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -142,6 +144,15 @@ def _ready_fake_gemini(
     window.render_view()
 
 
+def _make_current_advice_mismatch(repository: SQLiteRepository) -> None:
+    session = repository.load_active_session()
+    assert session is not None
+    with repository.transaction():
+        repository.save_session(
+            replace(session, battle_revision=session.battle_revision + 1)
+        )
+
+
 def test_fixed_three_region_layout_has_no_selection_new_match_or_page_scroll(
     tmp_path: Path,
 ) -> None:
@@ -274,6 +285,113 @@ def test_gemini_defaults_numbered_selection_and_human_toggle_renumbers(
         assert applied is not None
         assert applied.selected_three == (SELF_TEAM[0], SELF_TEAM[2], SELF_TEAM[3])
         assert applied.lead == SELF_TEAM[0]
+    finally:
+        window.close()
+        repository.close()
+
+
+def test_mismatch_status_is_visible_fail_closed_and_does_not_seed_defaults(
+    tmp_path: Path,
+) -> None:
+    repository, controller, window = _build_window(tmp_path)
+    try:
+        _ready_fake_gemini(controller, window)
+        window._selection_v3_actual_order = []  # noqa: SLF001
+        window._selection_v3_loaded_advice_id = None  # noqa: SLF001
+        _make_current_advice_mismatch(repository)
+
+        status = controller.selection_advice_status()
+        assert status.status == "MISMATCH"
+        assert status.can_apply is False
+        window.render_view(controller.refresh())
+
+        validity = window.selection_v3_advice_validity.text()
+        assert "STALE_OR_MISMATCH" in validity
+        assert "CURRENT" not in validity
+        assert "VALID" not in validity
+        assert window._selection_v3_actual_order == []  # noqa: SLF001
+        assert not window.apply_button.isEnabled()
+    finally:
+        window.close()
+        repository.close()
+
+
+def test_direct_apply_rechecks_stale_identity_and_preserves_canonical_selection(
+    tmp_path: Path,
+) -> None:
+    repository, controller, window = _build_window(tmp_path)
+    try:
+        _ready_fake_gemini(controller, window)
+        window._toggle_selection_v3_actual(1)  # noqa: SLF001
+        window._toggle_selection_v3_actual(3)  # noqa: SLF001
+        human_order = [SELF_TEAM[0], SELF_TEAM[2], SELF_TEAM[3]]
+        assert window._selection_v3_actual_order == human_order  # noqa: SLF001
+        assert window.apply_button.isEnabled()
+
+        _make_current_advice_mismatch(repository)
+        window._on_apply()  # noqa: SLF001 - direct handler/TOCTOU probe
+
+        session = repository.load_active_session()
+        assert session is not None
+        assert session.state.value == "SELECTION_ADVICE_READY"
+        assert session.current_applied_selection_id is None
+        assert controller.refresh().applied_selection is None
+        assert window._selection_v3_actual_order == human_order  # noqa: SLF001
+        assert not window.apply_button.isEnabled()
+    finally:
+        window.close()
+        repository.close()
+
+
+def test_valid_current_default_selection_confirms_unchanged(tmp_path: Path) -> None:
+    repository, controller, window = _build_window(tmp_path)
+    try:
+        _ready_fake_gemini(controller, window)
+        assert controller.selection_advice_status().can_apply is True
+        assert window._selection_v3_actual_order == list(GEMINI_THREE)  # noqa: SLF001
+        assert window.apply_button.isEnabled()
+
+        window._on_apply()  # noqa: SLF001 - explicit human confirmation
+
+        applied = controller.refresh().applied_selection
+        assert controller.refresh().session_state == "BATTLE_READY"
+        assert applied is not None
+        assert applied.selected_three == GEMINI_THREE
+        assert applied.lead == GEMINI_THREE[0]
+        assert not window.apply_button.isEnabled()
+        assert "CURRENT" not in window.selection_v3_advice_validity.text()
+        assert "VALID" not in window.selection_v3_advice_validity.text()
+    finally:
+        window.close()
+        repository.close()
+
+
+def test_persistence_unavailable_render_and_direct_apply_remain_fail_closed(
+    tmp_path: Path,
+) -> None:
+    repository, controller, window = _build_window(tmp_path)
+    try:
+        _ready_fake_gemini(controller, window)
+        safe_view = controller.refresh()
+        window.render_view(replace(safe_view, persistence_reads_allowed=False))
+
+        assert not window.apply_button.isEnabled()
+        assert "CURRENT" not in window.selection_v3_advice_validity.text()
+        assert "VALID" not in window.selection_v3_advice_validity.text()
+        with (
+            patch.object(controller, "selection_advice_status") as status_spy,
+            patch.object(
+                controller, "apply_selection_with_current_gemini_context"
+            ) as apply_spy,
+        ):
+            window._on_apply()  # noqa: SLF001 - direct persistence failure probe
+
+        assert status_spy.call_count == 0
+        assert apply_spy.call_count == 0
+        session = repository.load_active_session()
+        assert session is not None
+        assert session.state.value == "SELECTION_ADVICE_READY"
+        assert session.current_applied_selection_id is None
     finally:
         window.close()
         repository.close()

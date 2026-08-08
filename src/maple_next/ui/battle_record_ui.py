@@ -2303,6 +2303,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             holder_layout.addWidget(hidden)
         self._selection_v3_actual_order: list[str] = []
         self._selection_v3_loaded_advice_id: str | None = None
+        self._selection_v3_advice_can_apply = False
 
     def _toggle_selection_v3_team_editor(self, checked: bool) -> None:
         self.selection_v3_team_editor.setVisible(checked)
@@ -2362,6 +2363,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             valid
             and getattr(self, "_persistence_reads_allowed", True)
             and self._last_rendered_session_state == "SELECTION_ADVICE_READY"
+            and self._selection_v3_advice_can_apply
         )
         self.apply_button.setEnabled(can_apply)
         self.selection_v3_actual_status.setText(
@@ -2441,9 +2443,39 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
         advice_id = current.projection.current_selection_advice_id
         advice = current.advice
-        has_advice = advice is not None and advice_id is not None
-        self.selection_v3_advice_waiting.setVisible(not has_advice)
-        if has_advice and advice is not None:
+        advice_status = (
+            self._bundle_c_controller.selection_advice_status()
+            if current.persistence_reads_allowed
+            else None
+        )
+        current_valid_advice = bool(
+            advice_status is not None
+            and advice_status.status == "SUCCESS"
+            and advice_status.can_apply
+            and advice_status.advice_id is not None
+            and advice_status.advice_id == advice_id
+            and advice is not None
+        )
+        display_advice = bool(
+            advice_status is not None
+            and advice_status.advice_id is not None
+            and advice_status.advice_id == advice_id
+            and advice is not None
+        )
+        display_binding = (
+            advice_status.binding_status if advice_status is not None else "NOT_CHECKED"
+        )
+        display_legality = (
+            advice_status.legality_status if advice_status is not None else "NOT_CHECKED"
+        )
+        if advice_status is not None and not advice_status.can_apply:
+            if display_binding == "CURRENT":
+                display_binding = "NOT_CURRENT"
+            if display_legality == "VALID":
+                display_legality = "NOT_APPLICABLE"
+        self._selection_v3_advice_can_apply = current_valid_advice
+        self.selection_v3_advice_waiting.setVisible(not display_advice)
+        if display_advice and advice is not None and advice_status is not None:
             for label, name in zip(
                 self.selection_v3_advice_pick_labels,
                 advice.selected_three,
@@ -2452,9 +2484,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 label.setText(name)
             self.selection_v3_advice_lead.setText(advice.lead)
             self.selection_v3_advice_validity.setText(
-                f"{advice.source_type} · CURRENT · VALID"
+                f"{advice_status.source_type} · {display_binding} · {display_legality}"
             )
-            if advice_id != self._selection_v3_loaded_advice_id:
+            if current_valid_advice and advice_id != self._selection_v3_loaded_advice_id:
                 self._selection_v3_loaded_advice_id = advice_id
                 self._selection_v3_actual_order = [
                     advice.lead,
@@ -2464,7 +2496,14 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             for label in self.selection_v3_advice_pick_labels:
                 label.setText("—")
             self.selection_v3_advice_lead.setText("—")
-            self.selection_v3_advice_validity.setText("WAITING")
+            if advice_status is None:
+                self.selection_v3_advice_validity.setText(
+                    "UNAVAILABLE · NOT_CHECKED · NOT_CHECKED"
+                )
+            else:
+                self.selection_v3_advice_validity.setText(
+                    f"{advice_status.source_type} · {display_binding} · {display_legality}"
+                )
         self._sync_selection_v3_actual_controls()
 
     def _render_selection_roi_slot(
@@ -2484,7 +2523,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             return
         if not self._mutation_slots_allowed() or len(self._selection_v3_actual_order) != 3:
             return
-        view = self._controller.apply_selection(
+        view = self._bundle_c_controller.apply_selection_with_current_gemini_context(
             self._selection_v3_actual_order,
             self._selection_v3_actual_order[0],
             human_confirmed=True,

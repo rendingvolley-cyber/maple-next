@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import cast
 
@@ -157,6 +158,57 @@ class SelectionAdviceIntegrationController(ExplicitTurnNumberController):
             self._error_message = (
                 "表示中のGemini AdviceをAPPLYできませんでした。"
                 "canonical stateは変更されていません。"
+            )
+        else:
+            self._error_message = None
+        return self.refresh()
+
+    def apply_selection_with_current_gemini_context(
+        self,
+        selected_three: Sequence[str],
+        lead: str,
+        *,
+        human_confirmed: bool,
+    ) -> OperatorView:
+        """Apply a human-edited selection only while Gemini context is current.
+
+        Selection v3 lets the operator modify Gemini's default numbered order.
+        This controller-owned boundary preserves that choice while re-checking
+        the authoritative advice identity immediately before the domain apply.
+        """
+
+        if not human_confirmed:
+            self._error_message = "APPLY前に人間の明示確認が必要です。"
+            return self.refresh()
+        if len(selected_three) != 3:
+            self._error_message = (
+                "選出をAPPLYできませんでした。canonical stateは変更されていません。"
+            )
+            return self.refresh()
+        selected = (selected_three[0], selected_three[1], selected_three[2])
+        status = self.selection_advice_status()
+        if not status.can_apply or status.advice_id is None:
+            self._error_message = (
+                "表示中のGemini Adviceが現在のSelection identityと一致しないため"
+                "APPLYできません。"
+            )
+            return self.refresh()
+        try:
+            stored = self._repository.get_selection_advice(status.advice_id)
+            if not self._is_current_advice(stored):
+                self._error_message = (
+                    "表示中のGemini Adviceが現在のSelection identityと一致しないため"
+                    "APPLYできません。"
+                )
+                return self.refresh()
+            self._application.apply_selection(
+                selected_three=selected,
+                lead=lead,
+                human_confirmed=True,
+            )
+        except (DomainError, KeyError, RuntimeError):
+            self._error_message = (
+                "選出をAPPLYできませんでした。canonical stateは変更されていません。"
             )
         else:
             self._error_message = None

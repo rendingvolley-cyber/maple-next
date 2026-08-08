@@ -72,6 +72,16 @@ _MINIMUM_SUPPORTED_HEIGHT = 720
 # window is resized between the two targets.
 _FIXED_TURN_IMAGE_MAX_WIDTH = 230
 _FIXED_TURN_IMAGE_MIN_WIDTH = 185
+# Column-ratio floors (5224076761): approximate the mock's 18/52/30 body
+# split at both the 1280 and 1440 default widths (1280*0.18=230,
+# 1440*0.18=259; 1280*0.30=384, 1440*0.30=432) without pinning an exact
+# percentage, so center can still flex for its own content.
+_LEFT_COLUMN_MINIMUM_WIDTH = 220
+_RIGHT_COLUMN_MINIMUM_WIDTH = 340
+# Bounds a single reflowed RECORD_ACTUAL_ACTION field so 6-across does not
+# balloon center's minimum width past its share and collapse the left/right
+# internal-scroll columns below their floor above.
+_ACTUAL_ACTION_FIELD_MAX_WIDTH = 120
 _HUMAN_INPUT = (ProvenanceStep.HUMAN_INPUT,)
 
 _STAGE_FIELDS: tuple[tuple[str, str], ...] = (
@@ -686,6 +696,19 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 ],
                 columns=6,
             )
+            # An unbounded QComboBox/QLineEdit sizeHint here (content-driven,
+            # easily 150px+ each) times 6-across was what pushed center's
+            # minimum width past its 52% share and collapsed left/right
+            # below their floor -- bound each field so the row's total
+            # width demand stays reasonable (5224076761 item 2).
+            for reflowed_field in (
+                self.actual_action_type_box,
+                self.actual_action_name_box,
+                self.opponent_action_type_box,
+                self.opponent_action_name_input,
+                self.action_order_box,
+            ):
+                reflowed_field.setMaximumWidth(_ACTUAL_ACTION_FIELD_MAX_WIDTH)
 
         # These two forms still carry Qt's roomy default (9,9,9,9) content
         # margins -- every other group in this fixed, non-scrolling column
@@ -906,6 +929,12 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         right_scroll.setWidgetResizable(True)
         right_scroll.setWidget(right_container)
         right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Floor widths so a wide row inside center (e.g. RECORD_ACTUAL_ACTION's
+        # reflowed editors) cannot squeeze these two internal-scroll columns
+        # into an unreadable sliver -- 18/52/30 is a target ratio, not just a
+        # stretch-factor hint, once center's own minimum width is respected.
+        left_scroll.setMinimumWidth(_LEFT_COLUMN_MINIMUM_WIDTH)
+        right_scroll.setMinimumWidth(_RIGHT_COLUMN_MINIMUM_WIDTH)
 
         body_row = QHBoxLayout()
         body_row.addWidget(left_scroll, 18)
@@ -1027,6 +1056,21 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
     def render_view(self, view: OperatorView | None = None) -> None:
         super().render_view(view)
+        # The base render_view calls setVisible(...) tied to primary_cta on
+        # these three buttons because, in the original (pre-Bundle-C)
+        # layout, hiding the button was how their whole one-button group
+        # left the screen. Bundle C already reparented all five primary
+        # operations into the fixed bottom bar, so that base-class
+        # visibility toggle now hides a slot in the bar entirely instead of
+        # just disabling it -- the fixed 5-operation bar must always show
+        # all five slots (5223937478/5224076761); only enabled/disabled
+        # reflects whether the state currently allows that action.
+        for always_visible_operation in (
+            self.start_turn_button,
+            self.confirm_turn_facts_button,
+            self.next_turn_button,
+        ):
+            always_visible_operation.setVisible(True)
         if not hasattr(self, "current_state_group"):
             return
         current = view if view is not None else self._bundle_c_controller.refresh()

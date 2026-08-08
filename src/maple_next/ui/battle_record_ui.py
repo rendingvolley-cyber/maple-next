@@ -1783,6 +1783,15 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         utility_corner.raise_()
         self.parity_utility_corner = utility_corner
 
+        def sync_contextual_header(index: int) -> None:
+            # Selection has no Turn/Battle utility context.  The same widget is
+            # restored unchanged for Battle Record, preserving its accepted
+            # pixels and controls.
+            utility_corner.setVisible(index == _BATTLE_RECORD_TAB_INDEX)
+
+        self.header_tabs.currentChanged.connect(sync_contextual_header)
+        sync_contextual_header(self.header_tabs.currentIndex())
+
         self.header_tabs.setStyleSheet(
             "QTabWidget { background: #081421; }"
             "QTabWidget::pane { border: 0; background: #07101a; }"
@@ -2153,11 +2162,16 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
         self.selection_v3_slot_badges: list[QLabel] = []
         self.selection_v3_manual_buttons: list[QPushButton] = []
+        self.selection_v3_opponent_cards: list[QWidget] = []
         grid = QGridLayout()
         grid.setSpacing(7)
+        grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         for slot in range(1, 7):
             card, card_layout = self._selection_v3_card()
             card.setObjectName(f"selectionOpponentCard{slot}")
+            card.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+            )
             header_widget = QWidget()
             header_widget.setMaximumHeight(26)
             header = QHBoxLayout(header_widget)
@@ -2203,9 +2217,10 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             manual_row.addWidget(manual)
             card_layout.addLayout(manual_row)
             grid.addWidget(card, (slot - 1) // 3, (slot - 1) % 3)
+            self.selection_v3_opponent_cards.append(card)
             self.selection_v3_slot_badges.append(badge)
             self.selection_v3_manual_buttons.append(manual)
-        layout.addLayout(grid, 1)
+        layout.addLayout(grid)
 
         send_row = QHBoxLayout()
         send_row.addStretch(1)
@@ -2213,6 +2228,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.selection_roi_send_button.setMaximumWidth(300)
         send_row.addWidget(self.selection_roi_send_button)
         layout.addLayout(send_row)
+        layout.addStretch(1)
 
     def _build_selection_v3_right(self, layout: QVBoxLayout) -> None:
         layout.addWidget(
@@ -2268,7 +2284,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.selection_v3_actual_status.setProperty("muted", True)
         actual_layout.addWidget(self.selection_v3_actual_status)
         self.apply_button.setText("この選出を確定")
-        actual_layout.addWidget(self.apply_button)
+        self.apply_button.setMaximumWidth(220)
+        confirm_row = QHBoxLayout()
+        confirm_row.addStretch(1)
+        confirm_row.addWidget(self.apply_button)
+        actual_layout.addLayout(confirm_row)
         layout.addWidget(actual_card)
         layout.addStretch(1)
 
@@ -2354,13 +2374,17 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if not getattr(self, "_selection_v3_ready", False):
             return
         build = current.self_team_build or self._staged_self_team_build
-        build_name = (
-            build.name
-            if build is not None
-            else self.self_team_preset_name.text().strip() or "未選択"
-        )
+        entered_team = tuple(field.text().strip() for field in self.self_team_inputs)
+        if build is not None:
+            build_name = build.name
+        elif len(current.self_team) == 6:
+            build_name = "現在のPT（名前登録）"
+        elif all(entered_team):
+            build_name = "編集中のPT（未確定）"
+        else:
+            build_name = "PT未登録"
         self.selection_v3_build_name.setText(build_name)
-        team = current.self_team or tuple(field.text().strip() for field in self.self_team_inputs)
+        team = current.self_team or entered_team
         for index, (name_label, detail_label) in enumerate(
             zip(
                 self.selection_v3_team_name_labels,
@@ -2395,12 +2419,14 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             badge.style().polish(badge)
             field = self.opponent_team_inputs[slot - 1]
             field.setReadOnly(confirmed)
+            card = self.selection_v3_opponent_cards[slot - 1]
+            card.setMaximumHeight(184 if confirmed else 258)
             self.selection_v3_manual_buttons[slot - 1].setText(
                 "修正" if confirmed else "手入力"
             )
             candidate_visible = not confirmed
             self._selection_roi_candidate_labels[slot].setVisible(candidate_visible)
-            self._selection_roi_origin_labels[slot].setVisible(True)
+            self._selection_roi_origin_labels[slot].setVisible(not confirmed)
             for button in self._selection_roi_candidate_buttons[slot]:
                 button.setVisible(candidate_visible and bool(button.text()))
         self.selection_v3_confirmed_status.setText(f"確認済み {confirmed_count} / 6")

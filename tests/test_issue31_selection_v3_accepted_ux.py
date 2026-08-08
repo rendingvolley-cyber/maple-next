@@ -161,9 +161,15 @@ def test_fixed_three_region_layout_has_no_selection_new_match_or_page_scroll(
         )
         assert widths[1] > widths[2] > widths[0]
         assert not window.new_match_button.isVisible()
+        assert not window.parity_utility_corner.isVisible()
+        window.header_tabs.setCurrentIndex(1)
+        QApplication.processEvents()
+        assert window.parity_utility_corner.isVisible()
+        window.header_tabs.setCurrentIndex(0)
         assert len(window.selection_v3_team_name_labels) == 6
         assert len(window.selection_v3_slot_badges) == 6
         assert len(window.selection_v3_actual_buttons) == 6
+        assert window.apply_button.maximumWidth() == 220
         assert not window.selection_v3_team_editor.isVisible()
         assert not window.selection_v3_management.isVisible()
     finally:
@@ -201,6 +207,8 @@ def test_selection_send_requires_six_human_confirmed_values(tmp_path: Path) -> N
         window.render_view()
         for field, name in zip(window.self_team_inputs, SELF_TEAM, strict=True):
             field.setText(name)
+        window._render_selection_v3(controller.refresh())  # noqa: SLF001
+        assert window.selection_v3_build_name.text() == "編集中のPT（未確定）"
         for slot, name in enumerate(OPPONENT_TEAM, start=1):
             window._set_selection_slot_value(  # noqa: SLF001
                 slot,
@@ -237,6 +245,7 @@ def test_gemini_defaults_numbered_selection_and_human_toggle_renumbers(
     try:
         _ready_fake_gemini(controller, window)
         assert controller.refresh().session_state == "SELECTION_ADVICE_READY"
+        assert window.selection_v3_build_name.text() == "現在のPT（名前登録）"
         assert window._selection_v3_actual_order == list(GEMINI_THREE)  # noqa: SLF001
         assert [button.text().split()[0] for button in window.selection_v3_actual_buttons[:3]] == [
             "1",

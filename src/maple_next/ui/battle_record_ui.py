@@ -57,11 +57,12 @@ from maple_next.ui.turn_snapshot_official_window import TurnSnapshotMatchFlowWin
 from maple_next.ui.turn_state_flow import TurnStateFlowController, TurnStateSummaryView
 
 _BATTLE_RECORD_TAB_INDEX = 1
-# Default official-launch client size (visual-parity remediation,
-# 5223723582; raised from 1440x900 to 1920x1080 per 5224228965): resizable,
-# not fixed -- the human can freely resize the window. 1280x720 remains the
-# supported functional-minimum viewport (mock 5203292374/5203546707) and is
-# exercised by manual resize, not by this constant.
+# Official Battle Record window client size, fixed (5224282289 withdraws
+# the earlier resizable-1920x1080-default/1280x720-floor contract from
+# 5223723582/5224228965 for this single-operator, single-environment
+# surface). _MINIMUM_SUPPORTED_WIDTH/HEIGHT remain only as the lower bound
+# used internally by the fixed Turn image width interpolation below --
+# they no longer describe a reachable window size.
 _DEFAULT_LAUNCH_WIDTH = 1920
 _DEFAULT_LAUNCH_HEIGHT = 1080
 _MINIMUM_SUPPORTED_WIDTH = 1280
@@ -504,28 +505,14 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.render_view()
 
     def _apply_default_launch_geometry(self) -> None:
-        """Default official-launch client size is 1920x1080 (resizable).
-
-        Not a fixed size -- ``setMinimumSize`` only floors manual resize at
-        the 1280x720 functional-minimum viewport; the human can resize
-        larger or down to that floor freely. When the available screen work
-        area is smaller than 1920x1080, degrade to the largest safe size
-        that still keeps at least the 1280x720 floor when the screen can
-        offer it, rather than opening off-screen.
+        """Official Battle Record window client size is fixed at 1920x1080
+        (5224282289 -- withdraws the earlier "1920x1080 default, resizable,
+        1280x720 floor with screen-too-small degrade" contract for this
+        single-operator, single-environment surface). Ordinary operator
+        resize is not possible; there is no screen-size degrade path.
         """
 
-        self.setMinimumSize(_MINIMUM_SUPPORTED_WIDTH, _MINIMUM_SUPPORTED_HEIGHT)
-        target_width, target_height = _DEFAULT_LAUNCH_WIDTH, _DEFAULT_LAUNCH_HEIGHT
-        screen = self.screen()
-        if screen is not None:
-            available = screen.availableGeometry()
-            target_width = min(target_width, available.width())
-            target_height = min(target_height, available.height())
-            target_width = max(target_width, min(_MINIMUM_SUPPORTED_WIDTH, available.width()))
-            target_height = max(
-                target_height, min(_MINIMUM_SUPPORTED_HEIGHT, available.height())
-            )
-        self.resize(target_width, target_height)
+        self.setFixedSize(_DEFAULT_LAUNCH_WIDTH, _DEFAULT_LAUNCH_HEIGHT)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)

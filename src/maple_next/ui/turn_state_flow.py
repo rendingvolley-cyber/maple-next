@@ -660,7 +660,7 @@ class TurnStateFlowController(MatchFlowController):
 
         Active identity changes to the destination, every ability stage
         resets to 0 (active-slot-only, never carried across a switch),
-        active-only side effects clear, and HP/major-status are restored
+        side-wide effects remain unchanged, and HP/major-status are restored
         from this match's per-Pokemon memory for the destination Pokemon --
         UNKNOWN (never a guessed default) when it has not appeared before
         this match. Read-only against persistence; writes nothing.
@@ -694,7 +694,7 @@ class TurnStateFlowController(MatchFlowController):
             active=FieldDelta.changed(name, provenance_chain=_HUMAN_INPUT_CHAIN),
             hp_bucket=hp_delta,
             status=status_delta,
-            side_effects=FieldDelta.changed((), provenance_chain=_HUMAN_INPUT_CHAIN),
+            side_effects=FieldDelta.unchanged(),
             **stage_deltas,
         )
 

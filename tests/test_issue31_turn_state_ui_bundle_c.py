@@ -19,9 +19,19 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from maple_next.application.match_service import MatchApplication
+from maple_next.capture.contracts import (
+    DeviceOpenResult,
+    SourceFramePacket,
+    VideoCaptureBackend,
+)
 from maple_next.domain.turn_state import ChangeObservation, KnowledgeStatus
 from maple_next.persistence.sqlite import SQLiteRepository
-from maple_next.providers.transport import ProviderTransportError, SanitizedProviderResult
+from maple_next.providers.transport import (
+    ProviderConfig,
+    ProviderTransportError,
+    SanitizedProviderResult,
+)
+from maple_next.providers.turn_advice_rich_state import RichStateTurnAdviceRequest
 from maple_next.providers.turn_transport import (
     FAKE_TURN_ADVICE_SOURCE_TYPE,
     FakeTurnAdviceTransport,
@@ -62,12 +72,69 @@ class SyncDispatch:
             self._on_succeeded(result)
 
 
+class ProductionCompatibleRichTransport:
+    """Non-fake transport double; returns a request-bound sanitized result."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def send(
+        self, request: RichStateTurnAdviceRequest, config: ProviderConfig
+    ) -> SanitizedProviderResult:
+        del config
+        self.call_count += 1
+        action = request.legal_actions[0]
+        return SanitizedProviderResult(
+            payload={
+                "recommended_action": {
+                    "action_id": action.action_id,
+                    "action_type": action.action_type.value,
+                    "action_name": action.action_name,
+                },
+                "reasons": ["bounded non-network transport double"],
+                "warnings": [],
+                "opponent_prediction": {
+                    "category": "UNKNOWN",
+                    "predicted_action": "UNKNOWN",
+                    "summary": "UNKNOWN",
+                    "confidence": 0.0,
+                },
+            },
+            source_type="GEMINI",
+            model="bounded-test-model",
+        )
+
+
+class CountingCaptureBackend:
+    def __init__(self) -> None:
+        self.start_count = 0
+
+    def start(self, selector: str, on_frame=None) -> DeviceOpenResult:
+        del selector, on_frame
+        self.start_count += 1
+        return DeviceOpenResult(False, False, None, "CAPTURE_DEVICE_UNAVAILABLE")
+
+    def stop(self) -> None:
+        return None
+
+    def get_latest_frame(self) -> SourceFramePacket | None:
+        return None
+
+    def is_running(self) -> bool:
+        return False
+
+
 _BuiltWindow = tuple[
     SQLiteRepository, TurnStateFlowController, BattleRecordUiWindow, FakeTurnAdviceTransport
 ]
 
 
-def build_window(tmp_path: Path) -> _BuiltWindow:
+def build_window(
+    tmp_path: Path,
+    *,
+    capture_backend: VideoCaptureBackend | None = None,
+    auto_start_capture: bool = True,
+) -> _BuiltWindow:
     qt_application()
     repository = SQLiteRepository(tmp_path / "bundle_c.db")
     export_dir = tmp_path / "export"
@@ -86,8 +153,57 @@ def build_window(tmp_path: Path) -> _BuiltWindow:
     )
     ocr_dir = tmp_path / "ocr"
     ocr_dir.mkdir()
-    window = BattleRecordUiWindow(controller, ocr_data_directory=ocr_dir)
+    window = BattleRecordUiWindow(
+        controller,
+        ocr_data_directory=ocr_dir,
+        capture_backend=capture_backend,
+        auto_start_capture=auto_start_capture,
+    )
     return repository, controller, window, transport
+
+
+def build_production_compatible_window(
+    tmp_path: Path,
+) -> tuple[
+    SQLiteRepository,
+    TurnStateFlowController,
+    BattleRecordUiWindow,
+    ProductionCompatibleRichTransport,
+    GeminiRichTurnAdviceAdapter,
+]:
+    qt_application()
+    repository = SQLiteRepository(tmp_path / "production-compatible.db")
+    export_dir = tmp_path / "production-export"
+    export_dir.mkdir()
+    application = MatchApplication(repository, export_dir)
+    transport = ProductionCompatibleRichTransport()
+    rich_adapter = GeminiRichTurnAdviceAdapter(
+        transport,
+        lambda: ProviderConfig(
+            api_key="bounded-test-key",
+            model="bounded-test-model",
+            timeout_seconds=5.0,
+        ),
+        dispatch_factory=SyncDispatch,
+    )
+    controller = TurnStateFlowController(
+        application,
+        repository,
+        MockSelectionAdviceAdapter(),
+        MockTurnAdviceAdapter(),
+        None,
+        None,
+        rich_adapter,
+    )
+    ocr_dir = tmp_path / "production-ocr"
+    ocr_dir.mkdir()
+    window = BattleRecordUiWindow(
+        controller,
+        ocr_data_directory=ocr_dir,
+        capture_backend=CountingCaptureBackend(),
+        auto_start_capture=False,
+    )
+    return repository, controller, window, transport, rich_adapter
 
 
 def _advance_to_turn_capture_pending(controller: TurnStateFlowController) -> None:
@@ -129,6 +245,41 @@ def test_window_constructs_with_fixed_header_body_and_bottom_bar(tmp_path: Path)
     assert window.next_turn_button.text() == "NEXT TURN"
     assert window.diagnostics_drawer is not None
     assert window.terminal_flow_drawer is not None
+    repository.close()
+
+
+def test_visible_v5_send_dispatches_production_compatible_transport_once(
+    tmp_path: Path,
+) -> None:
+    repository, controller, window, transport, adapter = (
+        build_production_compatible_window(tmp_path)
+    )
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+
+    assert not window.confirm_turn_facts_button.isHidden()
+    assert window.confirm_turn_facts_button.isEnabled()
+    window.confirm_turn_facts_button.click()
+
+    assert transport.call_count == 1
+    assert adapter.dispatch_count == 1
+    window.confirm_turn_facts_button.click()
+    assert transport.call_count == 1
+    assert adapter.dispatch_count == 1
+    repository.close()
+
+
+def test_auto_start_false_keeps_capture_backend_start_count_zero(tmp_path: Path) -> None:
+    backend = CountingCaptureBackend()
+    repository, _controller, window, _transport = build_window(
+        tmp_path,
+        capture_backend=backend,
+        auto_start_capture=False,
+    )
+    assert backend.start_count == 0
+    window.close()
+    assert backend.start_count == 0
     repository.close()
 
 

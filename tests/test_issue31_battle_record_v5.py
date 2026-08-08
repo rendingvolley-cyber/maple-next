@@ -35,6 +35,9 @@ def test_catalog_has_pinned_provenance_and_representative_exact_effects() -> Non
     assert len(EFFECT_CATALOG) >= 50
     assert len({entry.id for entry in EFFECT_CATALOG}) == len(EFFECT_CATALOG)
     assert all(entry.source_commit == SHOWDOWN_SOURCE_COMMIT for entry in EFFECT_CATALOG)
+    assert all(find_effect(entry.id) is entry for entry in EFFECT_CATALOG)
+    assert all(entry.source_reference.endswith(f"#{entry.id}") for entry in EFFECT_CATALOG)
+    assert find_effect("Metal Sound") is find_effect("metalsound")
     assert find_effect("からをやぶる").deterministic_effects == (
         "攻撃+2",
         "防御-1",
@@ -313,13 +316,21 @@ def test_local_meta_cache_and_absent_cache_fail_soft_without_runtime_network(
         encoding="utf-8",
     )
     provider = LocalJsonOpponentMetaProvider(cache)
+    meta_only = build_opponent_intel(
+        species="ボーマンダ",
+        match_facts=MatchOpponentFacts(),
+        provider=provider,
+    )
+    assert meta_only.observed_moves == ()
+    assert meta_only.meta is not None
+    assert tuple(entry.name for entry in meta_only.meta.moves) == ("りゅうのまい",)
     confirmed = build_opponent_intel(
         species="ボーマンダ",
         match_facts=MatchOpponentFacts(ability="じしんかじょう", moves=("まもる",)),
         provider=provider,
     )
     assert confirmed.ability == "じしんかじょう"
-    assert confirmed.moves == ("まもる",)
+    assert confirmed.observed_moves == ("まもる",)
     assert confirmed.meta is not None
 
 

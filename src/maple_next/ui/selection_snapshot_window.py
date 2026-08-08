@@ -18,6 +18,7 @@ from maple_next.capture.contracts import (
     CaptureStatusCode,
     FrameKind,
     FramePacket,
+    VideoCaptureBackend,
 )
 from maple_next.selection_roi.contracts import (
     SELECTION_SLOT_COUNT,
@@ -38,9 +39,16 @@ class SelectionSnapshotMatchFlowWindow(SelectionRoiMatchFlowWindow):
         controller: MatchFlowController,
         *,
         ocr_data_directory: Path,
+        capture_backend: VideoCaptureBackend | None = None,
+        auto_start_capture: bool = True,
     ) -> None:
         self._new_match_snapshot_counter = 0
-        super().__init__(controller, ocr_data_directory=ocr_data_directory)
+        super().__init__(
+            controller,
+            ocr_data_directory=ocr_data_directory,
+            capture_backend=capture_backend,
+            auto_start_capture=auto_start_capture,
+        )
         self._stop_selection_roi_timer()
         self._hide_legacy_selection_controls()
         self._autoload_last_used_self_team_preset()

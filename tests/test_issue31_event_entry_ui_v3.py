@@ -242,6 +242,8 @@ def test_confirmed_switch_resets_every_stage_to_zero_for_outgoing_and_incoming(
         assert field_delta.observation is ChangeObservation.CHANGED
         assert field_delta.after_value == 0
     assert delta.active.after_value == SELECTED_THREE[1]
+    assert delta.side_effects.observation is ChangeObservation.UNCHANGED
+    assert delta.side_effects.after_value is None
 
 
 def test_record_action_uses_computed_switch_delta_with_zero_extra_input(

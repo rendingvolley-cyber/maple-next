@@ -22,6 +22,7 @@ from maple_next.capture.contracts import (
     CaptureStatusCode,
     FrameKind,
     FramePacket,
+    VideoCaptureBackend,
 )
 from maple_next.ocr.contracts import OcrCandidate, OcrFieldKey
 from maple_next.turn_ocr import (
@@ -53,6 +54,8 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
         controller: MatchFlowController,
         *,
         ocr_data_directory: Path,
+        capture_backend: VideoCaptureBackend | None = None,
+        auto_start_capture: bool = True,
     ) -> None:
         self._turn_snapshot_ready = False
         self._turn_snapshot_generation = 0
@@ -72,7 +75,12 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
         self._turn_snapshot_origins = {
             field_key: "未入力" for field_key in self._turn_snapshot_field_locks
         }
-        super().__init__(controller, ocr_data_directory=ocr_data_directory)
+        super().__init__(
+            controller,
+            ocr_data_directory=ocr_data_directory,
+            capture_backend=capture_backend,
+            auto_start_capture=auto_start_capture,
+        )
 
         config_path = ocr_data_directory / "turn" / "config" / "roi_config.json"
         try:

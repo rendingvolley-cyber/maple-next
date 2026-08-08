@@ -126,7 +126,7 @@ class OpponentIntelView:
     species: str
     ability: str
     item: str
-    moves: tuple[str, ...]
+    observed_moves: tuple[str, ...]
     possible_abilities: tuple[str, ...]
     meta: OpponentMetaSnapshot | None
 
@@ -150,14 +150,11 @@ def build_opponent_intel(
     if not ability:
         ability = " / ".join(possible) if possible else "不明"
     item = match_facts.item or "不明"
-    moves = match_facts.moves
-    if not moves and meta is not None:
-        moves = tuple(entry.name for entry in meta.moves[:3])
     return OpponentIntelView(
         species=species_key or "不明",
         ability=ability,
         item=item,
-        moves=moves,
+        observed_moves=match_facts.moves,
         possible_abilities=possible,
         meta=meta,
     )

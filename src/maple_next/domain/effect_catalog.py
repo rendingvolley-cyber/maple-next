@@ -157,7 +157,7 @@ EFFECT_CATALOG: tuple[EffectCatalogEntry, ...] = (
     _move("featherdance", "フェザーダンス", "攻撃-2", target=EffectTarget.OPPONENT),
     _move("screech", "いやなおと", "防御-2", target=EffectTarget.OPPONENT),
     _move("faketears", "うそなき", "特防-2", target=EffectTarget.OPPONENT),
-    _move("metal sound", "きんぞくおん", "特防-2", target=EffectTarget.OPPONENT),
+    _move("metalsound", "きんぞくおん", "特防-2", target=EffectTarget.OPPONENT),
     _move("scaryface", "こわいかお", "素早さ-2", target=EffectTarget.OPPONENT),
     _move("nobleroar", "おたけび", "攻撃-1", "特攻-1", target=EffectTarget.OPPONENT),
     _move(

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from maple_next.capture.contracts import CaptureStatusCode
+from maple_next.capture.contracts import CaptureStatusCode, VideoCaptureBackend
 from maple_next.selection_roi.contracts import (
     SELECTION_SLOT_COUNT,
     UNKNOWN_LABEL,
@@ -72,6 +72,8 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
         controller: MatchFlowController,
         *,
         ocr_data_directory: Path,
+        capture_backend: VideoCaptureBackend | None = None,
+        auto_start_capture: bool = True,
     ) -> None:
         self._selection_roi_ready = False
         self._selection_roi_service = SelectionRoiService(ocr_data_directory)
@@ -91,7 +93,11 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
         }
         self._selection_roi_candidate_values: dict[tuple[int, int], str] = {}
         self._selection_roi_feedback_recorded_ids: set[str] = set()
-        super().__init__(controller)
+        super().__init__(
+            controller,
+            capture_backend=capture_backend,
+            auto_start_capture=auto_start_capture,
+        )
         self._connect_selection_input_tracking()
         self._build_selection_roi_group()
         # The former explicit confirmation remains available internally for

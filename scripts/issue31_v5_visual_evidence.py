@@ -19,6 +19,7 @@ from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 from maple_next.application.match_service import MatchApplication
+from maple_next.capture.contracts import DeviceOpenResult, SourceFramePacket
 from maple_next.domain.effect_catalog import find_effect
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers.transport import ProviderTransportError, SanitizedProviderResult
@@ -34,6 +35,26 @@ from maple_next.ui.turn_state_flow import GeminiRichTurnAdviceAdapter, TurnState
 SELF_TEAM = ("Meowscarada", "Gholdengo", "Dragonite", "Dondozo", "Flutter Mane", "Urshifu")
 OPPONENT_TEAM = ("Salamence", "Gholdengo", "Dragonite", "Flutter Mane", "Tyranitar", "Pelipper")
 SELECTED_THREE = SELF_TEAM[:3]
+
+
+class _EvidenceCaptureBackend:
+    """Hardware-free backend; auto-start stays disabled for visual evidence."""
+
+    def __init__(self) -> None:
+        self.start_count = 0
+
+    def start(self, selector: str, on_frame=None) -> DeviceOpenResult:
+        self.start_count += 1
+        return DeviceOpenResult(False, False, None, "CAPTURE_DEVICE_UNAVAILABLE")
+
+    def stop(self) -> None:
+        return None
+
+    def get_latest_frame(self) -> SourceFramePacket | None:
+        return None
+
+    def is_running(self) -> bool:
+        return False
 
 
 class _SyncDispatch:
@@ -158,7 +179,15 @@ def main(output_directory: Path, reference_directory: Path) -> int:
     )
     ocr_directory = output_directory / "ocr"
     ocr_directory.mkdir(exist_ok=True)
-    window = BattleRecordUiWindow(controller, ocr_data_directory=ocr_directory)
+    capture_backend = _EvidenceCaptureBackend()
+    window = BattleRecordUiWindow(
+        controller,
+        ocr_data_directory=ocr_directory,
+        capture_backend=capture_backend,
+        auto_start_capture=False,
+    )
+    if capture_backend.start_count != 0:
+        raise RuntimeError("visual evidence must never start capture hardware")
     controller.new_match()
     controller.confirm_selection_facts(list(SELF_TEAM), list(OPPONENT_TEAM))
     controller.submit_mock_advice(list(SELECTED_THREE), SELECTED_THREE[0])
@@ -249,7 +278,10 @@ def main(output_directory: Path, reference_directory: Path) -> int:
 
     print(f"qt_screenshots=6 comparisons=6 fake_provider_dispatch={transport.call_count}")
     print("qt_capture=1920x1080 side_by_side=3840x1080 reference_left=1")
-    print("real_provider_network_send=0 game_action=0 meta_runtime_network_fetch=0")
+    print(
+        "real_provider_network_send=0 real_capture_start=0 "
+        "game_action=0 meta_runtime_network_fetch=0"
+    )
     window.close()
     repository.close()
     return 0

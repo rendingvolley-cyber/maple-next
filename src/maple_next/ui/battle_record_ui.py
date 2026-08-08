@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from maple_next.capture.contracts import VideoCaptureBackend
 from maple_next.domain.battle_events import (
     MAJOR_STATUS_CLEAR_LABEL,
     MAJOR_STATUS_PRESETS,
@@ -830,7 +831,7 @@ class _OpponentIntelWidget(QGroupBox):
     def render_intel(self, view: OpponentIntelView) -> None:
         self._view = view
         self.species_label.setText(view.species)
-        moves = ", ".join(view.moves) or "不明"
+        moves = ", ".join(view.observed_moves) or "不明"
         self.facts_label.setText(
             f"この対戦で判明：特性 {view.ability} / 持ち物 {view.item} / 観測技 {moves}"
         )
@@ -909,7 +910,7 @@ class _OpponentIntelWidget(QGroupBox):
                 (
                     ("ability", view.ability),
                     ("item", view.item),
-                    ("moves", ", ".join(view.moves) or "不明"),
+                    ("moves", ", ".join(view.observed_moves) or "不明"),
                 ),
             ),
             (
@@ -988,8 +989,15 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         *,
         ocr_data_directory: Path,
         opponent_meta_provider: OpponentMetaProvider | None = None,
+        capture_backend: VideoCaptureBackend | None = None,
+        auto_start_capture: bool = True,
     ) -> None:
-        super().__init__(controller, ocr_data_directory=ocr_data_directory)
+        super().__init__(
+            controller,
+            ocr_data_directory=ocr_data_directory,
+            capture_backend=capture_backend,
+            auto_start_capture=auto_start_capture,
+        )
         self._apply_official_windows_font()
         self._bundle_c_controller: TurnStateFlowController = controller
         self._opponent_meta_provider = opponent_meta_provider or LocalJsonOpponentMetaProvider(
@@ -2607,12 +2615,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
         self.render_view(view)
         # v5 has no separate facts/state phase. This trusted click is the
-        # final pre-send confirmation and may dispatch only through the
-        # fake/injected transport authorized for this implementation bundle.
+        # final pre-send confirmation and enters the existing rich-provider
+        # dispatch path. The controller/adapter retain every provider-ready,
+        # one-attempt, authorization, and fail-closed gate for both injected
+        # and production-compatible transports.
         if (
             view.error_message is None
             and view.projection.session_state == "TURN_REVIEWED"
-            and self._bundle_c_controller.rich_turn_advice_is_injected()
         ):
             self._on_trusted_send_turn_to_gemini()
 

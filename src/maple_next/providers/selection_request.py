@@ -20,6 +20,7 @@ CONTRACT_VERSION_V1: Final[str] = "maple-selection-advice.v1"
 CONTRACT_VERSION_V2: Final[str] = "maple-selection-advice.v2"
 SELECTION_ADVICE_CONTRACT_VERSION_V1: Final[str] = CONTRACT_VERSION_V1
 SELECTION_ADVICE_CONTRACT_VERSION_V2: Final[str] = CONTRACT_VERSION_V2
+SELECTION_PROMPT_VERSION: Final[str] = "maple-selection-prompt.v1"
 
 #: Fixed and deterministic. Never derived from a live provider schema.
 REQUESTED_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
@@ -36,6 +37,43 @@ REQUESTED_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
     "required": ["selected_three", "lead"],
     "additionalProperties": False,
 }
+
+_SELECTION_INITIAL_PROMPT: Final[str] = (
+    """You are assisting a human Pokémon Champions player during Team Selection
+for one SINGLE_3 official match.
+
+The request contains canonical facts confirmed by Maple.
+
+Confirmed information may include self_team, opponent_team, and a detailed
+self_team_build. self_team_build may be absent.
+
+When self_team_build is absent, do not assume the player's moves, held items,
+abilities, natures, or stat allocations.
+
+The opponent's team contains names only. Do not state that an opponent has a
+particular move, item, ability, nature, stat allocation, or role as a confirmed fact.
+
+You may use general Pokémon Champions knowledge to interpret confirmed names,
+but unconfirmed opponent details must remain uncertainty.
+
+Before choosing, silently:
+1. Evaluate all six members of self_team.
+2. Consider the major threats represented by all six opponent names.
+3. Compare multiple possible three-Pokémon combinations.
+4. Prefer coherent and complementary purposes across the selected trio.
+5. Avoid unnecessary role duplication that leaves a major threat unanswered.
+6. Do not select only by input order, familiarity, apparent raw offense,
+   or one favorable matchup.
+7. Choose a lead useful against multiple plausible opponent leads.
+8. Consider whether the other two selected Pokémon provide continuation
+   when the lead matchup is unfavorable.
+9. Use only exact names in self_team.
+10. Select exactly three distinct Pokémon and one selected lead.
+
+Follow requested_output_schema exactly.
+Return strict JSON only. Do not add explanations, confidence, roles,
+alternative teams, markdown, or additional fields."""
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,36 +195,15 @@ def request_payload_hash(request: SelectionAdviceRequest) -> str:
 
 
 def build_provider_prompt(request: SelectionAdviceRequest) -> str:
-    """Deterministic natural-language prompt body. Pure function, no secrets."""
+    """Build the deterministic, secret-free Initial Prompt v1."""
 
-    self_team = ", ".join(request.self_team)
-    opponent_team = ", ".join(request.opponent_team)
-    prompt = (
-        "You are assisting a human Pokemon Champions player during Team "
-        "Selection for a single official match.\n"
-        f"Your own confirmed team (exact six, in order): {self_team}\n"
-        f"The opponent's confirmed team (exact six, in order): {opponent_team}\n"
-        "Choose exactly three Pokemon from your own team above to bring into "
-        "the match, and choose which of those three should lead.\n"
-        "Respond with strict JSON only, matching exactly this shape, with no "
-        "markdown, no code fence, and no additional commentary:\n"
-        '{"selected_three": ["<name>", "<name>", "<name>"], "lead": "<name>"}\n'
-        "selected_three must contain three distinct names taken only from "
-        "your own confirmed team above. lead must be one of those three names."
+    canonical = json.dumps(
+        canonical_request_dict(request),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
-    if request.self_team_build is not None:
-        details = json.dumps(
-            request.self_team_build.to_canonical_dict(),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        prompt += (
-            "\nDetailed self-team build (confirmed; use only these values): "
-            f"{details}\n"
-            f"self_team_build_sha256={request.self_team_build_sha256}"
-        )
-    return prompt
+    return f"{_SELECTION_INITIAL_PROMPT}\n\nCanonical request:\n{canonical}"
 
 
 def build_provider_request_body(request: SelectionAdviceRequest) -> dict[str, Any]:

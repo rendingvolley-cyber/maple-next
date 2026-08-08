@@ -290,6 +290,7 @@ def test_injected_non_black_frame_is_drawn_with_matching_identity(tmp_path: Path
     )
     window.resize(1000, 800)
     window.show()
+    window.header_tabs.setCurrentIndex(1)  # Battle Record tab: preview/OCR polling runs here only
     window._start_capture()  # noqa: SLF001
     QApplication.processEvents()
 
@@ -323,6 +324,7 @@ def test_preview_keeps_aspect_ratio_after_resize(tmp_path: Path) -> None:
     )
     window.resize(1000, 800)
     window.show()
+    window.header_tabs.setCurrentIndex(1)  # Battle Record tab: preview/OCR polling runs here only
     window._start_capture()  # noqa: SLF001
     QApplication.processEvents()
     window.capture_preview_label.resize(800, 450)
@@ -374,6 +376,7 @@ def test_unavailable_stale_and_invalid_frames_use_truthful_placeholder(
             capture_backend=backend,
             ocr_backend=FakeOcrBackend(()),
         )
+        window.header_tabs.setCurrentIndex(1)  # Battle Record tab: polling runs here only
         window._start_capture()  # noqa: SLF001
         pixmap = window.capture_preview_label.pixmap()
         assert pixmap is None or pixmap.isNull()
@@ -432,6 +435,11 @@ def test_running_capture_polling_stops_during_persistence_fallback_and_recovers(
         tmp_path, capture_backend=backend, ocr_backend=ocr_backend
     )
     try:
+        # Reach a battle-record session state first: render_view auto-selects
+        # the Battle Record tab for it, and keeps it selected across the
+        # fallback/recovery renders below (persistence-unavailable and
+        # TURN_CAPTURE_PENDING views neither one switches tabs away from it).
+        advance_to_turn_reviewable(window)
         window._start_capture()  # noqa: SLF001 - explicit lifecycle probe
         assert window._capture_timer.isActive() is True  # noqa: SLF001
         safe_view = window._controller.refresh()  # noqa: SLF001
@@ -576,7 +584,13 @@ def test_initial_constructor_fallback_defers_auto_capture_until_recovery(
 
     qt_application()
     repository, controller = build_controller(tmp_path)
-    safe_view = controller.refresh()
+    # A battle-record session state so render_view auto-selects the Battle
+    # Record tab: preview/OCR polling (issue #31 tab lifecycle) only ever
+    # runs there.
+    safe_view = replace(
+        controller.refresh(),
+        projection=replace(controller.refresh().projection, session_state="TURN_CAPTURE_PENDING"),
+    )
     fallback_view = _make_no_cache_fallback(safe_view)
     backend = FakeCaptureBackend(_fresh_frame("initial-fallback-frame"))
     ocr_backend = FakeOcrBackend(())
@@ -595,7 +609,10 @@ def test_initial_constructor_fallback_defers_auto_capture_until_recovery(
 
         window.render_view(safe_view)
         assert backend.start_calls == 1
-        assert backend.latest_frame_calls == 2
+        # One call from CaptureService.start()'s own internal latest_status()
+        # check, plus one each from the preview-only and OCR-only catch-up
+        # polls that _resume_capture_polling() runs once when polling starts.
+        assert backend.latest_frame_calls == 3
         assert ocr_backend.generate_calls == 1
         assert window._capture_timer.isActive() is True  # noqa: SLF001
 

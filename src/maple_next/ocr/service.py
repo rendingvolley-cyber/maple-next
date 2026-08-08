@@ -18,6 +18,7 @@ from maple_next.capture.contracts import (
     CANONICAL_FRAME_HEIGHT,
     CANONICAL_FRAME_WIDTH,
     CaptureStatus,
+    FrameKind,
     FramePacket,
 )
 from maple_next.ocr.contracts import (
@@ -49,7 +50,8 @@ class OcrCandidateService:
         """Produce a candidate bundle for the given (already-fetched) frame.
 
         Callers own frame retrieval (typically via a CaptureService) so this
-        module never has to reach into capture internals.
+        module never has to reach into capture internals. SOURCE-kind packets
+        fail closed before any OCR backend method is called.
         """
 
         if frame is None:
@@ -70,7 +72,11 @@ class OcrCandidateService:
                 candidates=(),
                 error_code=None,
             )
-        if frame.width != CANONICAL_FRAME_WIDTH or frame.height != CANONICAL_FRAME_HEIGHT:
+        if (
+            frame.frame_kind is not FrameKind.CANONICAL
+            or frame.width != CANONICAL_FRAME_WIDTH
+            or frame.height != CANONICAL_FRAME_HEIGHT
+        ):
             return self._bundle(
                 OcrBundleStatus.FRAME_NOT_CANONICAL,
                 frame_id=frame.frame_id,

@@ -5,11 +5,12 @@
 
 .DESCRIPTION
     Resolves the repository root from this script's own location (never the
-    caller's current working directory), resolves a Python 3.11 interpreter,
-    resolves the official runtime root (repository-external), and starts the
-    app via the existing `python -m maple_next --database ... --export-directory ...`
-    entrypoint. Does not read, write, or print `.env`. Does not create or
-    delete runtime state beyond `mkdir -p`-style directory creation.
+    caller's current working directory), imports only allowlisted provider
+    settings from the repository-local `.env` without printing secret values,
+    resolves a Python 3.11 interpreter, resolves the official runtime root
+    (repository-external), and starts the app via the existing
+    `python -m maple_next --database ... --export-directory ...` entrypoint.
+    Does not modify `.env` and never writes provider values to the launcher log.
 
 .PARAMETER RuntimeRoot
     Overrides the runtime root (highest priority). Falls back to
@@ -42,6 +43,103 @@ $ErrorActionPreference = "Stop"
 # from scripts\start_maple_next.ps1 -- never from the caller's CWD.
 $RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $ScriptsDirectory = $PSScriptRoot
+
+function Import-MapleProviderEnvironment {
+    <#
+    Imports only the provider variables Maple Next explicitly supports from
+    <repository>\.env into this launcher's process environment. Existing process
+    values always win. Secret values are never returned, printed, or logged.
+
+    Legacy Selection/Turn variable names are accepted only as fallback sources
+    for MAPLE_NEXT_GEMINI_API_KEY so an existing local operator configuration
+    does not have to duplicate the credential.
+    #>
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    $dotenvPath = Join-Path $RepoRoot ".env"
+    if (-not (Test-Path -LiteralPath $dotenvPath -PathType Leaf)) {
+        return @()
+    }
+
+    $currentKeys = @(
+        "MAPLE_NEXT_GEMINI_API_KEY",
+        "MAPLE_NEXT_GEMINI_SELECTION_PRIMARY_MODEL",
+        "MAPLE_NEXT_GEMINI_SELECTION_FALLBACK_MODEL",
+        "MAPLE_NEXT_GEMINI_TIMEOUT_SECONDS",
+        "MAPLE_NEXT_GEMINI_TURN_MODEL"
+    )
+    $legacyKeys = @(
+        "MAPLE_SELECTION_ADVISOR_API_KEY",
+        "MAPLE_TURN_ADVISOR_API_KEY"
+    )
+    $allowedKeys = $currentKeys + $legacyKeys
+    $parsed = @{}
+
+    foreach ($rawLine in Get-Content -LiteralPath $dotenvPath -Encoding UTF8) {
+        $line = $rawLine.Trim()
+        if (-not $line -or $line.StartsWith("#")) {
+            continue
+        }
+        if ($line.StartsWith("export ")) {
+            $line = $line.Substring(7).TrimStart()
+        }
+
+        $separatorIndex = $line.IndexOf("=")
+        if ($separatorIndex -lt 1) {
+            continue
+        }
+        $key = $line.Substring(0, $separatorIndex).Trim()
+        if ($allowedKeys -notcontains $key) {
+            continue
+        }
+        $value = $line.Substring($separatorIndex + 1).Trim()
+        if ($value.Length -ge 2) {
+            $first = $value.Substring(0, 1)
+            $last = $value.Substring($value.Length - 1, 1)
+            if (($first -eq '"' -and $last -eq '"') -or ($first -eq "'" -and $last -eq "'")) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+        }
+        if ($value) {
+            $parsed[$key] = $value
+        }
+    }
+
+    $loadedNames = @()
+    foreach ($key in $currentKeys) {
+        $existing = [Environment]::GetEnvironmentVariable($key, "Process")
+        if ([string]::IsNullOrWhiteSpace($existing) -and $parsed.ContainsKey($key)) {
+            [Environment]::SetEnvironmentVariable($key, [string]$parsed[$key], "Process")
+            $loadedNames += $key
+        }
+    }
+
+    $targetKey = "MAPLE_NEXT_GEMINI_API_KEY"
+    $targetValue = [Environment]::GetEnvironmentVariable($targetKey, "Process")
+    if ([string]::IsNullOrWhiteSpace($targetValue)) {
+        foreach ($legacyKey in $legacyKeys) {
+            if ($parsed.ContainsKey($legacyKey)) {
+                [Environment]::SetEnvironmentVariable(
+                    $targetKey,
+                    [string]$parsed[$legacyKey],
+                    "Process"
+                )
+                $loadedNames += $targetKey
+                break
+            }
+        }
+    }
+
+    return $loadedNames
+}
+
+# Load provider configuration before Python starts. The Python entrypoint keeps
+# its own identical fail-safe loader, but the official Windows launcher is the
+# authoritative boundary for field use and must pass the key into the child
+# process explicitly.
+$LoadedProviderEnvironmentNames = @(
+    Import-MapleProviderEnvironment -RepoRoot $RepositoryRoot
+)
 
 function Resolve-MaplePython {
     param([string]$RepoRoot)
@@ -188,6 +286,11 @@ Write-Log "resolved runtime root: $ResolvedRuntimeRoot"
 Write-Log "database path: $DatabasePath"
 Write-Log "export directory: $ExportsDirectory"
 Write-Log "log path: $LogPath"
+if ($LoadedProviderEnvironmentNames.Count -gt 0) {
+    Write-Log "provider environment loaded from repository-local .env"
+} else {
+    Write-Log "provider environment used existing process values or no allowlisted .env value was found"
+}
 
 # UGREEN/device availability is not a startup precondition in this lane --
 # capture/OCR integration (Lane C) determines availability at runtime and

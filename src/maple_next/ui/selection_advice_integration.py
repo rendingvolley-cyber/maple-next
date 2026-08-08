@@ -8,6 +8,7 @@ from typing import cast
 from PySide6.QtWidgets import QFormLayout, QLabel, QVBoxLayout
 
 from maple_next.application.service import DomainError
+from maple_next.capture.contracts import VideoCaptureBackend
 from maple_next.domain.enums import BattleState, JobStatus, ResultDisposition
 from maple_next.providers.transport import GEMINI_SOURCE_TYPE
 from maple_next.ui.controller import OperatorView
@@ -186,11 +187,21 @@ class SelectionAdviceIntegrationController(ExplicitTurnNumberController):
 class SelectionAdviceIntegrationWindow(ExplicitTurnNumberWindow):
     """Minimal Selection Gemini status and explicit APPLY presentation."""
 
-    def __init__(self, controller: SelectionAdviceIntegrationController) -> None:
+    def __init__(
+        self,
+        controller: SelectionAdviceIntegrationController,
+        *,
+        capture_backend: VideoCaptureBackend | None = None,
+        auto_start_capture: bool = True,
+    ) -> None:
         self._selection_gemini_controller = controller
         self._selection_integration_ready = False
         self._loaded_gemini_advice_id: str | None = None
-        super().__init__(controller)
+        super().__init__(
+            controller,
+            capture_backend=capture_backend,
+            auto_start_capture=auto_start_capture,
+        )
         self._selection_integration_ready = True
         self.render_view()
 

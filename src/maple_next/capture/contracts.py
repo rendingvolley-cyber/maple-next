@@ -31,7 +31,7 @@ CAPTURE_DEVICE_ENV_VAR = "MAPLE_NEXT_CAPTURE_DEVICE"
 #: the OS-reported video input descriptions.
 DEFAULT_DEVICE_SELECTOR = "UGREEN"
 
-#: Single canonical pixel coordinate space shared by preview and future OCR.
+#: Single canonical pixel coordinate space shared by OCR consumers.
 CANONICAL_FRAME_WIDTH = 1280
 CANONICAL_FRAME_HEIGHT = 720
 CANONICAL_FRAME_ASPECT_RATIO = (16, 9)
@@ -56,6 +56,13 @@ class CaptureErrorCode(StrEnum):
     CAPTURE_FRAME_UNAVAILABLE = "CAPTURE_FRAME_UNAVAILABLE"
     CAPTURE_FRAME_STALE = "CAPTURE_FRAME_STALE"
     CAPTURE_FAILED = "CAPTURE_FAILED"
+
+
+class FrameKind(StrEnum):
+    """Explicit pixel-space identity carried by every frame packet."""
+
+    SOURCE = "SOURCE"
+    CANONICAL = "CANONICAL"
 
 
 #: Fixed, sanitized Japanese operator messages. Never concatenate raw exception
@@ -136,11 +143,12 @@ class CaptureStatus:
 
 @dataclass(frozen=True, slots=True)
 class FramePacket:
-    """A canonical working frame shared unchanged by preview and future OCR.
+    """A canonical 1280x720 OCR working frame.
 
-    ``width``/``height`` describe the 1280x720 working image. Source dimensions
-    remain metadata only; consumers must use the canonical pixel coordinate
-    space and must not create their own resized working copies.
+    ``width``/``height`` describe the canonical canvas, never the raw capture
+    dimensions. ``source_width``/``source_height`` preserve the source size and
+    ``content_rect`` identifies the real pixels inside any letterbox/pillarbox
+    padding. OCR consumers accept packets whose ``frame_kind`` is CANONICAL.
     """
 
     frame_id: str
@@ -156,8 +164,22 @@ class FramePacket:
     #: (x, y, width, height) of the actual scaled source content inside the
     #: 1280x720 canonical canvas. Any area outside this rect is letterbox or
     #: pillarbox padding, not source content, and OCR/consumers must not treat
-    #: it as captured pixels. None until a packet has been canonicalized.
+    #: it as captured pixels.
     content_rect: tuple[int, int, int, int] | None = None
+    frame_kind: FrameKind = FrameKind.CANONICAL
+
+
+@dataclass(frozen=True, slots=True)
+class SourceFramePacket(FramePacket):
+    """One raw source frame for preview and canonicalization input.
+
+    The distinct runtime type and SOURCE kind make the boundary explicit while
+    retaining ``FramePacket`` compatibility for existing display-only widgets.
+    ``width``/``height`` and ``image`` describe exactly what the capture backend
+    produced. OCR rejects SOURCE packets before backend recognition.
+    """
+
+    frame_kind: FrameKind = FrameKind.SOURCE
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,11 +203,11 @@ class VideoCaptureBackend(Protocol):
     """
 
     def start(
-        self, selector: str, on_frame: Callable[[FramePacket], None] | None = None
+        self, selector: str, on_frame: Callable[[SourceFramePacket], None] | None = None
     ) -> DeviceOpenResult: ...
 
     def stop(self) -> None: ...
 
-    def get_latest_frame(self) -> FramePacket | None: ...
+    def get_latest_frame(self) -> SourceFramePacket | None: ...
 
     def is_running(self) -> bool: ...

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from enum import StrEnum
-from typing import Final
+from typing import Final, Protocol, runtime_checkable
 
 from maple_next.domain.enums import ActionType
 from maple_next.providers.turn_request import TurnAdviceRequest, request_payload_hash
@@ -26,6 +26,39 @@ from maple_next.providers.turn_response import (
     TurnAdviceSchemaError,
     turn_advice_body_from_dict,
 )
+
+
+@runtime_checkable
+class _LegalActionLike(Protocol):
+    @property
+    def action_id(self) -> str: ...
+    @property
+    def action_type(self) -> ActionType: ...
+    @property
+    def action_name(self) -> str: ...
+    @property
+    def owner_active(self) -> str | None: ...
+    @property
+    def switch_target(self) -> str | None: ...
+
+
+@runtime_checkable
+class LegalActionBindingRequest(Protocol):
+    """Structural contract :func:`validate_turn_advice_legality` actually needs.
+
+    Both the legacy :class:`~maple_next.providers.turn_request.TurnAdviceRequest`
+    and the additive Bundle B
+    :class:`~maple_next.providers.turn_advice_rich_state.RichStateTurnAdviceRequest`
+    satisfy this shape, so the same legality check applies to both lanes
+    without reimplementation.
+    """
+
+    @property
+    def self_active(self) -> str: ...
+    @property
+    def selected_three(self) -> tuple[str, str, str]: ...
+    @property
+    def legal_actions(self) -> tuple[_LegalActionLike, ...]: ...
 
 
 class TurnAdviceResultCode(StrEnum):
@@ -175,7 +208,7 @@ def validate_turn_advice_binding(
 
 
 def validate_turn_advice_legality(
-    request: TurnAdviceRequest, result: NormalizedTurnAdviceResult
+    request: LegalActionBindingRequest, result: NormalizedTurnAdviceResult
 ) -> TurnAdviceResultCode:
     """Exact 3-way legal-action match plus MOVE/SWITCH ownership re-check.
 

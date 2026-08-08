@@ -29,6 +29,7 @@ from maple_next.capture.contracts import (
     CaptureStatus,
     CaptureStatusCode,
     FramePacket,
+    SourceFramePacket,
     VideoCaptureBackend,
     sanitized_capture_message,
 )
@@ -69,9 +70,11 @@ def resolve_device_selector(explicit_selector: str | None = None) -> str:
 class CaptureService(QObject):
     """Loosely coupled orchestrator around a VideoCaptureBackend.
 
-    Qt signals (frame_ready, status_changed) are best-effort UI hooks; the
-    service is fully usable without a Qt event loop via latest_status()/
-    latest_frame() polling, which is what the test suite and the probe CLI use.
+    ``latest_preview_snapshot()`` exposes a raw ``SourceFramePacket`` and never
+    canonicalizes it. ``latest_snapshot()`` is the OCR-only boundary and always
+    returns a canonical ``FramePacket``. Keeping the two immutable types
+    distinct prevents a future OCR consumer from accidentally treating source
+    pixels as the 1280x720 working canvas.
     """
 
     if _QT_CORE_AVAILABLE:
@@ -97,8 +100,10 @@ class CaptureService(QObject):
         self._status = self._stopped_status()
         self._canonical_frame: FramePacket | None = None
         self._source_frame_id: str | None = None
+        self._ocr_sample_count = 0
+        self._ocr_conversion_count = 0
 
-    # -- public UI-facing interface -------------------------------------------------
+    # -- public UI-facing interface ---------------------------------------------
 
     def start(self) -> CaptureStatus:
         if self._backend.is_running():
@@ -146,6 +151,8 @@ class CaptureService(QObject):
             self._backend.stop()
         self._canonical_frame = None
         self._source_frame_id = None
+        self._ocr_sample_count = 0
+        self._ocr_conversion_count = 0
         status = self._stopped_status()
         self._set_status(status)
         return status
@@ -155,17 +162,13 @@ class CaptureService(QObject):
         return status
 
     def latest_snapshot(self) -> tuple[CaptureStatus, FramePacket | None]:
-        """Read the latest status and frame from one backend snapshot.
-
-        Consumers that display both metadata and pixels must use this method so
-        a status frame id cannot accidentally describe a different backend read
-        than the image sent to the preview or OCR path.
-        """
+        """OCR-oriented read: status plus the canonical 1280x720 packet."""
 
         if not self._backend.is_running():
             return self._status, None
+        self._ocr_sample_count += 1
         try:
-            source_frame = self._backend.get_latest_frame()
+            source_frame = self._coerce_source_frame(self._backend.get_latest_frame())
         except Exception:  # noqa: BLE001
             status = self._build_status(
                 CaptureStatusCode.CAPTURE_ERROR,
@@ -183,25 +186,83 @@ class CaptureService(QObject):
         _status, frame = self.latest_snapshot()
         return frame
 
+    def latest_preview_snapshot(
+        self,
+    ) -> tuple[CaptureStatus, SourceFramePacket | None]:
+        """Preview-oriented read: status plus the raw, un-resized source packet."""
+
+        if not self._backend.is_running():
+            return self._status, None
+        try:
+            frame = self._coerce_source_frame(self._backend.get_latest_frame())
+        except Exception:  # noqa: BLE001
+            status = self._build_status(
+                CaptureStatusCode.CAPTURE_ERROR,
+                error_code=CaptureErrorCode.CAPTURE_FAILED,
+                device_label=self._status.device_label,
+            )
+            self._set_status(status)
+            return status, None
+        status = self._status_from_frame(frame)
+        self._set_status(status)
+        return status, frame
+
+    def capture_metrics(self) -> dict[str, object]:
+        """Sanitized counters merging service-level and backend-level metrics."""
+
+        backend_metrics = getattr(self._backend, "metrics", None)
+        merged: dict[str, object] = {
+            "ocr_sample_count": self._ocr_sample_count,
+            "ocr_conversion_count": self._ocr_conversion_count,
+        }
+        if callable(backend_metrics):
+            with contextlib.suppress(Exception):
+                merged.update(backend_metrics())
+        return merged
+
     # -- internals --------------------------------------------------------------
 
-    def _on_frame(self, frame: FramePacket) -> None:
+    @staticmethod
+    def _coerce_source_frame(
+        frame: SourceFramePacket | FramePacket | None,
+    ) -> SourceFramePacket | None:
+        """Normalize legacy fake-backend FramePacket values without copying pixels."""
+
+        if frame is None:
+            return None
+        if isinstance(frame, SourceFramePacket):
+            return frame
+        return SourceFramePacket(
+            frame_id=frame.frame_id,
+            source=frame.source,
+            captured_at_utc=frame.captured_at_utc,
+            captured_monotonic_ns=frame.captured_monotonic_ns,
+            width=frame.width,
+            height=frame.height,
+            image=frame.image,
+        )
+
+    def _on_frame(self, frame: SourceFramePacket) -> None:
         canonical = self._canonicalize_once(frame)
         status = self._status_from_frame(canonical or frame)
         self._set_status(status)
         if _QT_CORE_AVAILABLE and canonical is not None:
             self.frame_ready.emit(canonical)
 
-    def _canonicalize_once(self, frame: FramePacket | None) -> FramePacket | None:
+    def _canonicalize_once(self, frame: SourceFramePacket | None) -> FramePacket | None:
         if frame is None:
             return None
         if frame.frame_id == self._source_frame_id:
             return self._canonical_frame
         self._source_frame_id = frame.frame_id
         self._canonical_frame = canonicalize_frame_packet(frame)
+        if self._canonical_frame is not None:
+            self._ocr_conversion_count += 1
         return self._canonical_frame
 
-    def _status_from_frame(self, frame: FramePacket | None) -> CaptureStatus:
+    def _status_from_frame(
+        self, frame: SourceFramePacket | FramePacket | None
+    ) -> CaptureStatus:
         if frame is None:
             return self._build_status(
                 CaptureStatusCode.FRAME_UNAVAILABLE,

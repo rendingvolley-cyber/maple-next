@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "maple-turn-roi.v1",
+  "title": "Maple Next Turn OCR ROI configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "canvas_width",
+    "canvas_height",
+    "layout",
+    "provisional",
+    "rois"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "maple-turn-roi.v1"
+    },
+    "canvas_width": {
+      "const": 1280
+    },
+    "canvas_height": {
+      "const": 720
+    },
+    "layout": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provisional": {
+      "type": "boolean"
+    },
+    "rois": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "self_active",
+        "opponent_active",
+        "self_hp",
+        "opponent_hp"
+      ],
+      "properties": {
+        "self_active": {
+          "$ref": "#/$defs/roi"
+        },
+        "opponent_active": {
+          "$ref": "#/$defs/roi"
+        },
+        "self_hp": {
+          "$ref": "#/$defs/roi"
+        },
+        "opponent_hp": {
+          "$ref": "#/$defs/roi"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "roi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1279
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 719
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1280
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 720
+        }
+      }
+    }
+  }
+}

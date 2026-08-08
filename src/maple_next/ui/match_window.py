@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 
+from maple_next.capture.contracts import VideoCaptureBackend
 from maple_next.domain.enums import MatchOutcome
 from maple_next.ui.controller import OperatorView
 from maple_next.ui.match_controller import MatchFlowController, MatchOperatorView
@@ -25,10 +26,20 @@ _PLACEHOLDER = "選択してください"
 class MatchFlowWindow(TurnAdviceIntegrationWindow):
     """Supported operator window with explicit terminal match commands."""
 
-    def __init__(self, controller: MatchFlowController) -> None:
+    def __init__(
+        self,
+        controller: MatchFlowController,
+        *,
+        capture_backend: VideoCaptureBackend | None = None,
+        auto_start_capture: bool = True,
+    ) -> None:
         self._match_controller = controller
         self._match_widgets_ready = False
-        super().__init__(controller)
+        super().__init__(
+            controller,
+            capture_backend=capture_backend,
+            auto_start_capture=auto_start_capture,
+        )
         self._build_match_end_group()
         self._build_match_summary_group()
         self._build_match_export_group()

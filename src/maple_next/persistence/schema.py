@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 15
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -255,7 +255,176 @@ def migrate(connection: sqlite3.Connection) -> None:
         );
         INSERT OR IGNORE INTO operator_preferences(singleton_id) VALUES (1);
 
-        UPDATE schema_meta SET schema_version = 12 WHERE singleton_id = 1;
+        CREATE TABLE IF NOT EXISTS fixed_evidence_metadata (
+            evidence_id TEXT PRIMARY KEY,
+            relative_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            recorded_at_utc TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS confirmed_turn_states (
+            confirmed_state_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            turn_id TEXT NOT NULL,
+            turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            battle_revision INTEGER NOT NULL CHECK (battle_revision >= 0),
+            previous_confirmed_state_id TEXT NULL,
+            self_side_json TEXT NOT NULL,
+            opponent_side_json TEXT NOT NULL,
+            weather_json TEXT NOT NULL,
+            terrain_json TEXT NOT NULL,
+            confirmed_by_human INTEGER NOT NULL CHECK (confirmed_by_human IN (0, 1)),
+            confirmed_at_utc TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            evidence_id TEXT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(session_id, turn_id, battle_revision),
+            FOREIGN KEY(previous_confirmed_state_id)
+                REFERENCES confirmed_turn_states(confirmed_state_id),
+            FOREIGN KEY(evidence_id) REFERENCES fixed_evidence_metadata(evidence_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS action_result_deltas (
+            delta_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            turn_id TEXT NOT NULL,
+            turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            battle_revision INTEGER NOT NULL CHECK (battle_revision >= 0),
+            based_on_confirmed_state_id TEXT NOT NULL,
+            self_side_json TEXT NOT NULL,
+            opponent_side_json TEXT NOT NULL,
+            weather_json TEXT NOT NULL,
+            terrain_json TEXT NOT NULL,
+            confirmed_by_human INTEGER NOT NULL CHECK (confirmed_by_human IN (0, 1)),
+            confirmed_at_utc TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(based_on_confirmed_state_id)
+                REFERENCES confirmed_turn_states(confirmed_state_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS next_turn_state_drafts (
+            draft_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            turn_id TEXT NOT NULL,
+            turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            battle_revision INTEGER NOT NULL CHECK (battle_revision >= 0),
+            based_on_confirmed_state_id TEXT NOT NULL,
+            source_delta_id TEXT NOT NULL,
+            self_side_json TEXT NOT NULL,
+            opponent_side_json TEXT NOT NULL,
+            weather_json TEXT NOT NULL,
+            terrain_json TEXT NOT NULL,
+            derived_at_utc TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(session_id, turn_id, battle_revision),
+            FOREIGN KEY(based_on_confirmed_state_id)
+                REFERENCES confirmed_turn_states(confirmed_state_id),
+            FOREIGN KEY(source_delta_id) REFERENCES action_result_deltas(delta_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS legal_action_prefill_drafts (
+            prefill_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            turn_id TEXT NOT NULL,
+            turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            battle_revision INTEGER NOT NULL CHECK (battle_revision >= 0),
+            based_on_confirmed_state_id TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            action_name TEXT NOT NULL,
+            confidence REAL NULL,
+            derived_at_utc TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(based_on_confirmed_state_id)
+                REFERENCES confirmed_turn_states(confirmed_state_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS confirmed_legal_action_selections (
+            confirmation_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            turn_id TEXT NOT NULL,
+            turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            battle_revision INTEGER NOT NULL CHECK (battle_revision >= 0),
+            action_type TEXT NOT NULL,
+            action_name TEXT NOT NULL,
+            confirmed_by_human INTEGER NOT NULL CHECK (confirmed_by_human IN (0, 1)),
+            confirmed_at_utc TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            source_prefill_id TEXT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(source_prefill_id) REFERENCES legal_action_prefill_drafts(prefill_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS rich_action_completions (
+            transaction_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            turn_id TEXT NOT NULL UNIQUE,
+            turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            battle_revision INTEGER NOT NULL CHECK (battle_revision >= 0),
+            based_on_confirmed_state_id TEXT NOT NULL,
+            own_action_type TEXT NOT NULL,
+            own_action_name TEXT NOT NULL,
+            opponent_action_type TEXT NOT NULL,
+            opponent_action_name TEXT NOT NULL,
+            action_order TEXT NOT NULL,
+            delta_id TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(delta_id) REFERENCES action_result_deltas(delta_id),
+            FOREIGN KEY(based_on_confirmed_state_id)
+                REFERENCES confirmed_turn_states(confirmed_state_id)
+        );
+
+        UPDATE schema_meta SET schema_version = 14 WHERE singleton_id = 1;
+
+        -- Event-entry UI v3 (Issue #31, 00 comment 5224627634): per-Pokemon
+        -- match-local memory. Additive only -- no existing table is changed.
+        -- Holds the most recently confirmed HP bucket / major status for one
+        -- (session, match, generation, side, pokemon_name) so a Pokemon that
+        -- switches out and later switches back in can have its HP/status
+        -- restored instead of the operator re-entering it. Ability stages are
+        -- deliberately NOT stored here -- they are active-slot-only per the
+        -- accepted design and always reset to 0 on an ordinary switch.
+        CREATE TABLE IF NOT EXISTS pokemon_local_state (
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            side TEXT NOT NULL CHECK (side IN ('SELF', 'OPPONENT')),
+            pokemon_name TEXT NOT NULL,
+            hp_bucket_json TEXT NOT NULL,
+            status_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, match_id, generation, side, pokemon_name)
+        );
+
+        UPDATE schema_meta SET schema_version = 15 WHERE singleton_id = 1;
+
+        -- Battle Record v5: human-confirmed opponent ability memory. UNKNOWN
+        -- is represented by absence, never by a false confirmed value.
+        CREATE TABLE IF NOT EXISTS opponent_ability_memory (
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            opponent_entity_id TEXT NOT NULL,
+            species TEXT NOT NULL,
+            ability TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, match_id, generation, opponent_entity_id)
+        );
+
+        UPDATE schema_meta SET schema_version = 16 WHERE singleton_id = 1;
         """
     )
     _ensure_column(
@@ -335,6 +504,15 @@ def migrate(connection: sqlite3.Connection) -> None:
         "self_team_presets",
         "team_build_sha256",
         "TEXT NULL",
+    )
+    # Additive migration for existing candidate DBs whose rich_action_completions
+    # table predates these columns. No backfill: historical rows keep NULL for
+    # values that were never recorded, rather than guessing them.
+    _ensure_column(connection, "rich_action_completions", "match_id", "TEXT NULL")
+    _ensure_column(connection, "rich_action_completions", "generation", "INTEGER NULL")
+    _ensure_column(connection, "rich_action_completions", "battle_revision", "INTEGER NULL")
+    _ensure_column(
+        connection, "rich_action_completions", "based_on_confirmed_state_id", "TEXT NULL"
     )
     _sanitize_async_job_result_payloads(connection)
     connection.execute(

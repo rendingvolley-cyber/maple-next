@@ -74,6 +74,8 @@ from maple_next.domain.turn_state import (
     SideDelta,
     SideState,
 )
+from maple_next.selection_roi.contracts import SelectionSlotMatch
+from maple_next.selection_roi.input_policy import SelectionInputOrigin
 from maple_next.ui.controller import OperatorView
 from maple_next.ui.turn_snapshot_official_window import TurnSnapshotMatchFlowWindow
 from maple_next.ui.turn_state_flow import TurnStateFlowController, TurnStateSummaryView
@@ -1939,6 +1941,568 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             "border-radius: 4px; }"
         )
 
+        self._apply_selection_v3_composition()
+
+    def _apply_selection_v3_composition(self) -> None:
+        """Build the accepted Selection UX from the existing bound controls."""
+
+        selection_scroll = self.header_tabs.widget(0)
+        if not isinstance(selection_scroll, QScrollArea):
+            raise RuntimeError("Selection tab must be a QScrollArea")
+        selection_page = selection_scroll.widget()
+        if selection_page is None:
+            raise RuntimeError("Selection page is missing")
+        selection_scroll.setObjectName("selectionV3Scroll")
+        selection_scroll.setWidgetResizable(True)
+        selection_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        selection_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        selection_page.setObjectName("selectionV3Page")
+
+        # NEW MATCH remains wired for non-Selection lifecycle ownership, but the
+        # accepted Selection tab never presents it.
+        outer_layout = self.centralWidget().layout()
+        if outer_layout is not None:
+            outer_layout.removeWidget(self.new_match_button)
+        self._selection_v3_legacy_holder = QWidget(self)
+        self._selection_v3_legacy_holder.setVisible(False)
+        legacy_layout = QVBoxLayout(self._selection_v3_legacy_holder)
+        legacy_layout.addWidget(self.new_match_button)
+
+        while self._selection_layout.count():
+            self._selection_layout.takeAt(0)
+        self._selection_layout.setContentsMargins(0, 58, 0, 0)
+        self._selection_layout.setSpacing(0)
+
+        body = QWidget(selection_page)
+        body.setObjectName("selectionV3Body")
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+
+        left = QWidget(body)
+        left.setObjectName("selectionV3Left")
+        left_layout = QVBoxLayout(left)
+        center = QWidget(body)
+        center.setObjectName("selectionV3Center")
+        center_layout = QVBoxLayout(center)
+        right = QWidget(body)
+        right.setObjectName("selectionV3Right")
+        right_layout = QVBoxLayout(right)
+        for layout in (left_layout, center_layout, right_layout):
+            layout.setContentsMargins(12, 12, 12, 12)
+            layout.setSpacing(8)
+        self.selection_v3_left = left
+        self.selection_v3_center = center
+        self.selection_v3_right = right
+
+        self._build_selection_v3_left(left_layout)
+        self._build_selection_v3_center(center_layout)
+        self._build_selection_v3_right(right_layout)
+        body_layout.addWidget(left, 24)
+        body_layout.addWidget(center, 44)
+        body_layout.addWidget(right, 32)
+        self._selection_layout.addWidget(body, 1)
+
+        # Old group shells and MOCK surface stay alive only as hidden owners of
+        # compatibility labels not used by the v3 workbench.
+        for legacy in (
+            self.self_team_group,
+            self.self_team_presets_group,
+            self.opponent_facts_group,
+            self.selection_roi_group,
+            self.mock_group,
+            self.gemini_group,
+            self.advice_group,
+            self.actual_group,
+        ):
+            legacy_layout.addWidget(legacy)
+        selection_page.setStyleSheet(self._selection_v3_style())
+        self._selection_v3_ready = True
+
+    @staticmethod
+    def _selection_v3_heading(title: str, subtitle: str) -> QWidget:
+        heading = QWidget()
+        heading.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        layout = QVBoxLayout(heading)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        title_label = QLabel(title)
+        title_label.setProperty("sectionTitle", True)
+        subtitle_label = QLabel(subtitle)
+        subtitle_label.setProperty("muted", True)
+        subtitle_label.setWordWrap(True)
+        layout.addWidget(title_label)
+        layout.addWidget(subtitle_label)
+        return heading
+
+    @staticmethod
+    def _selection_v3_card() -> tuple[QWidget, QVBoxLayout]:
+        card = QWidget()
+        card.setProperty("selectionCard", True)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(9, 8, 9, 8)
+        layout.setSpacing(6)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        return card, layout
+
+    def _build_selection_v3_left(self, layout: QVBoxLayout) -> None:
+        layout.addWidget(
+            self._selection_v3_heading(
+                "自分のPT登録・確認", "現在の構築を確認し、必要なときだけ編集します。"
+            )
+        )
+        build_bar, build_bar_layout = self._selection_v3_card()
+        build_row = QHBoxLayout()
+        build_title = QLabel("選択中の構築")
+        build_title.setProperty("muted", True)
+        self.selection_v3_build_name = QLabel("未選択")
+        self.selection_v3_build_name.setProperty("cardTitle", True)
+        build_row.addWidget(build_title)
+        build_row.addWidget(self.selection_v3_build_name, 1)
+        build_bar_layout.addLayout(build_row)
+        layout.addWidget(build_bar)
+
+        self.selection_v3_team_name_labels: list[QLabel] = []
+        self.selection_v3_team_detail_labels: list[QLabel] = []
+        team_grid = QGridLayout()
+        team_grid.setSpacing(6)
+        for index in range(6):
+            card, card_layout = self._selection_v3_card()
+            name = QLabel(f"Slot {index + 1}")
+            name.setProperty("cardTitle", True)
+            detail = QLabel("詳細情報なし")
+            detail.setProperty("muted", True)
+            detail.setWordWrap(True)
+            card_layout.addWidget(name)
+            card_layout.addWidget(detail)
+            team_grid.addWidget(card, index // 2, index % 2)
+            self.selection_v3_team_name_labels.append(name)
+            self.selection_v3_team_detail_labels.append(detail)
+        layout.addLayout(team_grid)
+
+        actions = QHBoxLayout()
+        self.selection_v3_change_button = QPushButton("変更")
+        self.selection_v3_change_button.setCheckable(True)
+        self.selection_v3_change_button.toggled.connect(self._toggle_selection_v3_team_editor)
+        self.edit_self_team_build_button.setText("詳細編集")
+        self.selection_v3_manage_button = QPushButton("構築管理…")
+        self.selection_v3_manage_button.setCheckable(True)
+        self.selection_v3_manage_button.toggled.connect(self._toggle_selection_v3_management)
+        for button in (
+            self.selection_v3_change_button,
+            self.edit_self_team_build_button,
+            self.selection_v3_manage_button,
+        ):
+            actions.addWidget(button)
+        layout.addLayout(actions)
+
+        self.selection_v3_team_editor = QWidget()
+        editor_grid = QGridLayout(self.selection_v3_team_editor)
+        editor_grid.setContentsMargins(0, 0, 0, 0)
+        editor_grid.setSpacing(5)
+        for index, field in enumerate(self.self_team_inputs):
+            field.setPlaceholderText(f"Slot {index + 1}")
+            editor_grid.addWidget(field, index // 2, index % 2)
+        self.selection_v3_team_editor.setVisible(False)
+        layout.addWidget(self.selection_v3_team_editor)
+
+        self.selection_v3_management = QWidget()
+        management_layout = QVBoxLayout(self.selection_v3_management)
+        management_layout.setContentsMargins(0, 0, 0, 0)
+        management_layout.setSpacing(5)
+        management_layout.addWidget(self.self_team_preset_box)
+        management_layout.addWidget(self.self_team_preset_name)
+        management_grid = QGridLayout()
+        management_buttons = (
+            self.save_self_team_preset_button,
+            self.use_self_team_preset_button,
+            self.update_self_team_preset_button,
+            self.delete_self_team_preset_button,
+            self.import_self_team_button,
+            self.export_self_team_button,
+        )
+        for index, button in enumerate(management_buttons):
+            management_grid.addWidget(button, index // 2, index % 2)
+        management_layout.addLayout(management_grid)
+        self.selection_v3_management.setVisible(False)
+        layout.addWidget(self.selection_v3_management)
+        layout.addStretch(1)
+
+    def _build_selection_v3_center(self, layout: QVBoxLayout) -> None:
+        layout.addWidget(
+            self._selection_v3_heading(
+                "相手6体 OCR / ROI確認・修正",
+                "画像・OCR候補・人の確定値を分けて確認します。",
+            )
+        )
+        status_row = QHBoxLayout()
+        self.selection_v3_confirmed_status = QLabel("確認済み 0 / 6")
+        self.selection_v3_confirmed_status.setProperty("statusChip", True)
+        self.selection_v3_ocr_detail_button = QPushButton("OCR詳細")
+        self.selection_v3_ocr_detail_button.setCheckable(True)
+        self.selection_v3_ocr_detail_button.toggled.connect(
+            self.selection_roi_status_label.setVisible
+        )
+        status_row.addWidget(self.selection_v3_confirmed_status)
+        status_row.addStretch(1)
+        status_row.addWidget(self.selection_v3_ocr_detail_button)
+        layout.addLayout(status_row)
+        self.selection_roi_status_label.setVisible(False)
+        self.selection_roi_status_label.setProperty("diagnostic", True)
+        layout.addWidget(self.selection_roi_status_label)
+
+        self.selection_v3_slot_badges: list[QLabel] = []
+        self.selection_v3_manual_buttons: list[QPushButton] = []
+        grid = QGridLayout()
+        grid.setSpacing(7)
+        for slot in range(1, 7):
+            card, card_layout = self._selection_v3_card()
+            card.setObjectName(f"selectionOpponentCard{slot}")
+            header_widget = QWidget()
+            header_widget.setMaximumHeight(26)
+            header = QHBoxLayout(header_widget)
+            header.setContentsMargins(0, 0, 0, 0)
+            title = QLabel(f"SLOT {slot}")
+            title.setProperty("cardTitle", True)
+            badge = QLabel("未確認")
+            badge.setProperty("statusChip", True)
+            badge.setMaximumHeight(24)
+            header.addWidget(title)
+            header.addStretch(1)
+            header.addWidget(badge)
+            card_layout.addWidget(header_widget)
+
+            thumbnail = self._selection_roi_thumbnail_labels[slot]
+            thumbnail.setMinimumSize(150, 84)
+            thumbnail.setMaximumHeight(84)
+            thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            thumbnail.setProperty("roiCrop", True)
+            card_layout.addWidget(thumbnail)
+            candidate = self._selection_roi_candidate_labels[slot]
+            candidate.setProperty("candidate", True)
+            card_layout.addWidget(candidate)
+            origin = self._selection_roi_origin_labels[slot]
+            origin.setProperty("muted", True)
+            card_layout.addWidget(origin)
+            candidate_row = QHBoxLayout()
+            for button in self._selection_roi_candidate_buttons[slot]:
+                candidate_row.addWidget(button)
+            candidate_row.addStretch(1)
+            card_layout.addLayout(candidate_row)
+
+            manual_row = QHBoxLayout()
+            field = self.opponent_team_inputs[slot - 1]
+            field.setPlaceholderText("ポケモン名を手入力")
+            manual = QPushButton("手入力")
+            manual.clicked.connect(
+                lambda _checked=False, selected_slot=slot: (
+                    self._activate_selection_v3_manual_input(selected_slot)
+                )
+            )
+            manual_row.addWidget(field, 1)
+            manual_row.addWidget(manual)
+            card_layout.addLayout(manual_row)
+            grid.addWidget(card, (slot - 1) // 3, (slot - 1) % 3)
+            self.selection_v3_slot_badges.append(badge)
+            self.selection_v3_manual_buttons.append(manual)
+        layout.addLayout(grid, 1)
+
+        send_row = QHBoxLayout()
+        send_row.addStretch(1)
+        self.selection_roi_send_button.setText("この6体でGeminiに送る")
+        self.selection_roi_send_button.setMaximumWidth(300)
+        send_row.addWidget(self.selection_roi_send_button)
+        layout.addLayout(send_row)
+
+    def _build_selection_v3_right(self, layout: QVBoxLayout) -> None:
+        layout.addWidget(
+            self._selection_v3_heading(
+                "Gemini推薦", "現在の対戦だけに束縛された有効な推薦を表示します。"
+            )
+        )
+        advice_card, advice_layout = self._selection_v3_card()
+        self.selection_v3_advice_waiting = QLabel("6体確認後、送信を待っています。")
+        self.selection_v3_advice_waiting.setProperty("muted", True)
+        advice_layout.addWidget(self.selection_v3_advice_waiting)
+        advice_grid = QGridLayout()
+        self.selection_v3_advice_pick_labels: list[QLabel] = []
+        for index in range(3):
+            number = QLabel(str(index + 1))
+            number.setProperty("orderBadge", True)
+            value = QLabel("—")
+            value.setProperty("cardTitle", True)
+            advice_grid.addWidget(number, index, 0)
+            advice_grid.addWidget(value, index, 1)
+            self.selection_v3_advice_pick_labels.append(value)
+        advice_grid.addWidget(QLabel("推奨先発"), 3, 0)
+        self.selection_v3_advice_lead = QLabel("—")
+        advice_grid.addWidget(self.selection_v3_advice_lead, 3, 1)
+        advice_grid.addWidget(QLabel("Source / validity"), 4, 0)
+        self.selection_v3_advice_validity = QLabel("WAITING")
+        self.selection_v3_advice_validity.setProperty("muted", True)
+        advice_grid.addWidget(self.selection_v3_advice_validity, 4, 1)
+        advice_layout.addLayout(advice_grid)
+        layout.addWidget(advice_card)
+
+        layout.addWidget(
+            self._selection_v3_heading(
+                "実際の選出", "カードを押して選出を変更。1 が先発です。"
+            )
+        )
+        actual_card, actual_layout = self._selection_v3_card()
+        self.selection_v3_actual_buttons: list[QPushButton] = []
+        actual_grid = QGridLayout()
+        actual_grid.setSpacing(6)
+        for index in range(6):
+            button = QPushButton(f"—  Slot {index + 1}")
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, selected_index=index: (
+                    self._toggle_selection_v3_actual(selected_index)
+                )
+            )
+            actual_grid.addWidget(button, index // 2, index % 2)
+            self.selection_v3_actual_buttons.append(button)
+        actual_layout.addLayout(actual_grid)
+        self.selection_v3_actual_status = QLabel("3体を選ぶと確定できます。")
+        self.selection_v3_actual_status.setProperty("muted", True)
+        actual_layout.addWidget(self.selection_v3_actual_status)
+        self.apply_button.setText("この選出を確定")
+        actual_layout.addWidget(self.apply_button)
+        layout.addWidget(actual_card)
+        layout.addStretch(1)
+
+        hidden = QWidget(self._selection_v3_legacy_holder)
+        hidden_layout = QVBoxLayout(hidden)
+        for checkbox in self.actual_checkboxes:
+            hidden_layout.addWidget(checkbox)
+        hidden_layout.addWidget(self.actual_lead_box)
+        hidden_layout.addWidget(self.apply_confirm_checkbox)
+        holder_layout = self._selection_v3_legacy_holder.layout()
+        if holder_layout is not None:
+            holder_layout.addWidget(hidden)
+        self._selection_v3_actual_order: list[str] = []
+        self._selection_v3_loaded_advice_id: str | None = None
+
+    def _toggle_selection_v3_team_editor(self, checked: bool) -> None:
+        self.selection_v3_team_editor.setVisible(checked)
+        self.selection_v3_change_button.setText("編集を閉じる" if checked else "変更")
+
+    def _toggle_selection_v3_management(self, checked: bool) -> None:
+        self.selection_v3_management.setVisible(checked)
+        self.selection_v3_manage_button.setText(
+            "構築管理を閉じる" if checked else "構築管理…"
+        )
+
+    def _activate_selection_v3_manual_input(self, slot: int) -> None:
+        field = self.opponent_team_inputs[slot - 1]
+        field.setReadOnly(False)
+        field.setFocus(Qt.FocusReason.OtherFocusReason)
+        field.selectAll()
+
+    def _toggle_selection_v3_actual(self, index: int) -> None:
+        if index >= len(self.actual_checkboxes):
+            return
+        name = self.actual_checkboxes[index].text().strip()
+        if not name:
+            return
+        if name in self._selection_v3_actual_order:
+            self._selection_v3_actual_order.remove(name)
+        elif len(self._selection_v3_actual_order) < 3:
+            self._selection_v3_actual_order.append(name)
+        self._sync_selection_v3_actual_controls()
+
+    def _sync_selection_v3_actual_controls(self) -> None:
+        order = self._selection_v3_actual_order
+        valid = len(order) == 3
+        for checkbox, button in zip(
+            self.actual_checkboxes, self.selection_v3_actual_buttons, strict=True
+        ):
+            name = checkbox.text().strip()
+            number = order.index(name) + 1 if name in order else None
+            checkbox.blockSignals(True)
+            checkbox.setChecked(number is not None)
+            checkbox.blockSignals(False)
+            button.setText(f"{number if number is not None else '—'}  {name or '—'}")
+            button.setChecked(number is not None)
+            button.setProperty("selectionOrder", number or 0)
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+        self.actual_lead_box.blockSignals(True)
+        self.actual_lead_box.clear()
+        self.actual_lead_box.addItems(order)
+        if order:
+            self.actual_lead_box.setCurrentText(order[0])
+        self.actual_lead_box.blockSignals(False)
+        self.apply_confirm_checkbox.blockSignals(True)
+        self.apply_confirm_checkbox.setChecked(valid)
+        self.apply_confirm_checkbox.blockSignals(False)
+        can_apply = (
+            valid
+            and getattr(self, "_persistence_reads_allowed", True)
+            and self._last_rendered_session_state == "SELECTION_ADVICE_READY"
+        )
+        self.apply_button.setEnabled(can_apply)
+        self.selection_v3_actual_status.setText(
+            "1 が先発です。この3体で確定できます。"
+            if valid
+            else f"あと {3 - len(order)} 体選んでください。"
+        )
+
+    def _render_selection_v3(self, current: OperatorView) -> None:
+        if not getattr(self, "_selection_v3_ready", False):
+            return
+        build = current.self_team_build or self._staged_self_team_build
+        build_name = (
+            build.name
+            if build is not None
+            else self.self_team_preset_name.text().strip() or "未選択"
+        )
+        self.selection_v3_build_name.setText(build_name)
+        team = current.self_team or tuple(field.text().strip() for field in self.self_team_inputs)
+        for index, (name_label, detail_label) in enumerate(
+            zip(
+                self.selection_v3_team_name_labels,
+                self.selection_v3_team_detail_labels,
+                strict=True,
+            )
+        ):
+            name = team[index] if index < len(team) and team[index] else f"Slot {index + 1}"
+            name_label.setText(name)
+            detail = "詳細情報なし"
+            if build is not None and name in build.pokemon_names:
+                member = build.member_by_name(name)
+                item = member.held_item or "持ち物なし"
+                detail = f"{item} · {member.ability}\n{' / '.join(member.moves)}"
+            detail_label.setText(detail)
+
+        human_origins = {
+            SelectionInputOrigin.CANDIDATE_CLICK,
+            SelectionInputOrigin.MANUAL_TEXT,
+            SelectionInputOrigin.RESTORED,
+        }
+        confirmed_count = 0
+        for slot in range(1, 7):
+            state = self._state_for_current_field(slot)
+            value = self.opponent_team_inputs[slot - 1].text().strip()
+            confirmed = bool(value) and state.origin in human_origins
+            confirmed_count += int(confirmed)
+            badge = self.selection_v3_slot_badges[slot - 1]
+            badge.setText("確認済み" if confirmed else "要確認")
+            badge.setProperty("confirmed", confirmed)
+            badge.style().unpolish(badge)
+            badge.style().polish(badge)
+            field = self.opponent_team_inputs[slot - 1]
+            field.setReadOnly(confirmed)
+            self.selection_v3_manual_buttons[slot - 1].setText(
+                "修正" if confirmed else "手入力"
+            )
+            candidate_visible = not confirmed
+            self._selection_roi_candidate_labels[slot].setVisible(candidate_visible)
+            self._selection_roi_origin_labels[slot].setVisible(True)
+            for button in self._selection_roi_candidate_buttons[slot]:
+                button.setVisible(candidate_visible and bool(button.text()))
+        self.selection_v3_confirmed_status.setText(f"確認済み {confirmed_count} / 6")
+        if not self.selection_v3_ocr_detail_button.isChecked():
+            self.selection_roi_status_label.setVisible(False)
+        self.selection_roi_send_button.setVisible(
+            current.projection.session_state == "SELECTION_OPEN"
+        )
+        self.selection_roi_send_button.setEnabled(
+            self.selection_roi_send_button.isEnabled() and confirmed_count == 6
+        )
+
+        advice_id = current.projection.current_selection_advice_id
+        advice = current.advice
+        has_advice = advice is not None and advice_id is not None
+        self.selection_v3_advice_waiting.setVisible(not has_advice)
+        if has_advice and advice is not None:
+            for label, name in zip(
+                self.selection_v3_advice_pick_labels,
+                advice.selected_three,
+                strict=True,
+            ):
+                label.setText(name)
+            self.selection_v3_advice_lead.setText(advice.lead)
+            self.selection_v3_advice_validity.setText(
+                f"{advice.source_type} · CURRENT · VALID"
+            )
+            if advice_id != self._selection_v3_loaded_advice_id:
+                self._selection_v3_loaded_advice_id = advice_id
+                self._selection_v3_actual_order = [
+                    advice.lead,
+                    *(name for name in advice.selected_three if name != advice.lead),
+                ]
+        else:
+            for label in self.selection_v3_advice_pick_labels:
+                label.setText("—")
+            self.selection_v3_advice_lead.setText("—")
+            self.selection_v3_advice_validity.setText("WAITING")
+        self._sync_selection_v3_actual_controls()
+
+    def _render_selection_roi_slot(
+        self, slot: int, match: SelectionSlotMatch | None
+    ) -> None:
+        super()._render_selection_roi_slot(slot, match)
+        thumbnail = self._selection_roi_thumbnail_labels[slot]
+        if match is None or match.crop.isNull() or thumbnail.pixmap() is None:
+            thumbnail.clear()
+            thumbnail.setText("ROI crop unavailable")
+
+    def _on_apply(self, _checked: bool = False) -> None:
+        """Apply the visible numbered selection after its explicit click."""
+
+        if not getattr(self, "_selection_v3_ready", False):
+            super()._on_apply(_checked)
+            return
+        if not self._mutation_slots_allowed() or len(self._selection_v3_actual_order) != 3:
+            return
+        view = self._controller.apply_selection(
+            self._selection_v3_actual_order,
+            self._selection_v3_actual_order[0],
+            human_confirmed=True,
+        )
+        self.render_view(view)
+
+    @staticmethod
+    def _selection_v3_style() -> str:
+        return (
+            "QWidget#selectionV3Page, QWidget#selectionV3Body { background: #07101a; "
+            "color: #edf5fb; font-size: 10px; }"
+            "QWidget#selectionV3Left, QWidget#selectionV3Right { background: #081421; }"
+            "QWidget#selectionV3Center { background: #07101a; border-left: 1px solid #20384e; "
+            "border-right: 1px solid #20384e; }"
+            "QLabel { background: transparent; color: #edf5fb; }"
+            "QLabel[sectionTitle=\"true\"] { font-size: 13px; font-weight: 800; }"
+            "QLabel[cardTitle=\"true\"] { font-weight: 800; }"
+            "QLabel[muted=\"true\"] { color: #91a8bb; font-size: 9px; }"
+            "QLabel[statusChip=\"true\"] { color: #91a8bb; border: 1px solid #314b64; "
+            "border-radius: 3px; padding: 3px 6px; }"
+            "QLabel[statusChip=\"true\"][confirmed=\"true\"] { color: #edf5fb; "
+            "background: #1a3c5d; }"
+            "QLabel[orderBadge=\"true\"] { min-width: 20px; max-width: 20px; "
+            "background: #1a3c5d; border-radius: 3px; font-weight: 800; "
+            "qproperty-alignment: AlignCenter; }"
+            "QLabel[roiCrop=\"true\"] { background: #06101a; color: #60778b; "
+            "border: 1px dashed #314b64; border-radius: 3px; }"
+            "QLabel[candidate=\"true\"] { color: #b9cadd; }"
+            "QLabel[diagnostic=\"true\"] { background: #091623; color: #91a8bb; "
+            "border: 1px solid #20384e; padding: 5px; }"
+            "QWidget[selectionCard=\"true\"] { background: #0b1724; "
+            "border: 1px solid #20384e; border-radius: 4px; }"
+            "QLineEdit, QComboBox { background: #0e2032; color: #edf5fb; "
+            "border: 1px solid #314b64; border-radius: 3px; padding: 4px 6px; "
+            "min-height: 22px; max-height: 26px; }"
+            "QPushButton { background: #0e2032; color: #edf5fb; border: 1px solid #314b64; "
+            "border-radius: 3px; padding: 5px 7px; }"
+            "QPushButton:hover { background: #132c45; }"
+            "QPushButton:checked { background: #1a3c5d; font-weight: 800; }"
+            "QPushButton[selectionOrder=\"1\"] { border-color: #7dd3fc; }"
+            "QPushButton:disabled { color: #60778b; background: #091623; "
+            "border-color: #20384e; }"
+        )
+
     @staticmethod
     def _parity_card(title: str, *, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
         card = QWidget()
@@ -2317,6 +2881,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         current = view if view is not None else self._bundle_c_controller.refresh()
         projection = current.projection
         summary = self._bundle_c_controller.turn_state_summary()
+        self._render_selection_v3(current)
 
         # The base class's
         # setEnabled(...) for these three buttons was written for a UI

@@ -1077,6 +1077,33 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         projection = current.projection
         summary = self._bundle_c_controller.turn_state_summary()
 
+        # Narrow footer enablement fix (5224124798): the base class's
+        # setEnabled(...) for these three buttons was written for a UI
+        # where each button's own group was also hidden outside its cta
+        # (e.g. confirm_turn_facts_button stays enabled through the whole
+        # TURN_CAPTURE_PENDING/TURN_REVIEWED "editable" window, which is a
+        # legitimate secondary CORRECT_TURN_FACTS affordance there but not
+        # a state the fixed 5-slot bar should show as a live primary
+        # operation once the actual primary_cta has moved on to
+        # RECORD_ACTUAL_ACTION). Re-gate strictly to "this button's slot is
+        # today's canonical primary_cta", reusing primary_cta_enabled and
+        # each button's own existing readiness condition -- no new legal
+        # operation is invented here.
+        self.start_turn_button.setEnabled(
+            current.persistence_reads_allowed
+            and projection.primary_cta == "START_TURN_CAPTURE"
+            and projection.primary_cta_enabled
+        )
+        self.confirm_turn_facts_button.setEnabled(
+            current.persistence_reads_allowed
+            and projection.primary_cta == "CONFIRM_TURN_FACTS"
+            and projection.primary_cta_enabled
+        )
+        self.record_action_button.setEnabled(
+            self.record_action_button.isEnabled()
+            and projection.primary_cta == "RECORD_ACTUAL_ACTION"
+        )
+
         self.start_turn_button.setText("Turn撮影")
         self.confirm_turn_facts_button.setText("facts/state確定")
         self.record_action_button.setText("行動・結果記録")

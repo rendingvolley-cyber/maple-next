@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -388,6 +388,28 @@ def migrate(connection: sqlite3.Connection) -> None:
         );
 
         UPDATE schema_meta SET schema_version = 14 WHERE singleton_id = 1;
+
+        -- Event-entry UI v3 (Issue #31, 00 comment 5224627634): per-Pokemon
+        -- match-local memory. Additive only -- no existing table is changed.
+        -- Holds the most recently confirmed HP bucket / major status for one
+        -- (session, match, generation, side, pokemon_name) so a Pokemon that
+        -- switches out and later switches back in can have its HP/status
+        -- restored instead of the operator re-entering it. Ability stages are
+        -- deliberately NOT stored here -- they are active-slot-only per the
+        -- accepted design and always reset to 0 on an ordinary switch.
+        CREATE TABLE IF NOT EXISTS pokemon_local_state (
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            side TEXT NOT NULL CHECK (side IN ('SELF', 'OPPONENT')),
+            pokemon_name TEXT NOT NULL,
+            hp_bucket_json TEXT NOT NULL,
+            status_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, match_id, generation, side, pokemon_name)
+        );
+
+        UPDATE schema_meta SET schema_version = 15 WHERE singleton_id = 1;
         """
     )
     _ensure_column(

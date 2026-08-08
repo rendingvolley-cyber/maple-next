@@ -565,6 +565,28 @@ def confirm_next_turn_state(
 
 
 @dataclass(frozen=True, slots=True)
+class PokemonLocalMemory:
+    """Match-local memory of one Pokemon's HP/major-status, keyed by name.
+
+    Event-entry UI v3 (Issue #31, 00 comment 5224627634): ability stages are
+    deliberately excluded here -- they belong only to the active slot and
+    always reset to 0 on an ordinary confirmed switch. HP bucket and major
+    status are the only facts that persist across a Pokemon switching out and
+    later switching back in.
+    """
+
+    pokemon_name: str
+    hp_bucket: Known[HpBucket]
+    status: Known[str]
+
+    def __post_init__(self) -> None:
+        if not self.pokemon_name.strip():
+            raise ValueError("pokemon_name must be explicit")
+        if self.status.is_confirmed:
+            _validate_field_text(self.status.value)
+
+
+@dataclass(frozen=True, slots=True)
 class LegalActionPrefillDraft:
     """A prefilled move/switch suggestion. Draft-only, never a legal action.
 

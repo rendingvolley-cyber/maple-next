@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from maple_next.domain.enums import ActionOrder, ActionType
+from maple_next.domain.enums import ActionOrder, ActionType, HpBucket
 from maple_next.domain.turn_state import (
     ActionResultDelta,
     ConfirmationMeta,
@@ -23,6 +23,7 @@ from maple_next.domain.turn_state import (
     Known,
     LegalActionPrefillDraft,
     NextTurnStateDraft,
+    PokemonLocalMemory,
     SideDelta,
     SideState,
     TurnIdentity,
@@ -775,3 +776,65 @@ class TurnStateStoreMixin(StoreBase):
             "action_order": ActionOrder(str(row["action_order"])),
             "delta_id": str(row["delta_id"]),
         }
+
+    # --- Pokemon-local match memory (event-entry UI v3, upsert) -------------
+
+    def upsert_pokemon_local_state(
+        self,
+        *,
+        session_id: str,
+        match_id: str,
+        generation: int,
+        side: str,
+        memory: PokemonLocalMemory,
+    ) -> None:
+        if side not in ("SELF", "OPPONENT"):
+            raise ValueError("side must be SELF or OPPONENT")
+        self.connection.execute(
+            """
+            INSERT INTO pokemon_local_state (
+                session_id, match_id, generation, side, pokemon_name,
+                hp_bucket_json, status_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, match_id, generation, side, pokemon_name) DO UPDATE SET
+                hp_bucket_json = excluded.hp_bucket_json,
+                status_json = excluded.status_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                session_id,
+                match_id,
+                generation,
+                side,
+                memory.pokemon_name,
+                json.dumps(known_to_json(memory.hp_bucket), ensure_ascii=False),
+                json.dumps(known_to_json(memory.status), ensure_ascii=False),
+                self._now(),
+            ),
+        )
+
+    def get_pokemon_local_state(
+        self,
+        *,
+        session_id: str,
+        match_id: str,
+        generation: int,
+        side: str,
+        pokemon_name: str,
+    ) -> PokemonLocalMemory | None:
+        row = self.connection.execute(
+            """
+            SELECT * FROM pokemon_local_state
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+              AND side = ? AND pokemon_name = ?
+            """,
+            (session_id, match_id, generation, side, pokemon_name),
+        ).fetchone()
+        if row is None:
+            return None
+        hp_bucket_payload = json.loads(str(row["hp_bucket_json"]))
+        return PokemonLocalMemory(
+            pokemon_name=str(row["pokemon_name"]),
+            hp_bucket=known_from_json(hp_bucket_payload, decode_value=HpBucket),
+            status=known_from_json(json.loads(str(row["status_json"]))),
+        )

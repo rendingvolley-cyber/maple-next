@@ -22,7 +22,7 @@ OCR polling, match export, or the turn-snapshot fixed-image flow. It only:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -30,6 +30,7 @@ from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -44,6 +45,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from maple_next.domain.battle_events import (
+    MAJOR_STATUS_CLEAR_LABEL,
+    MAJOR_STATUS_PRESETS,
+    STAGE_EVENT_PRESETS,
+)
 from maple_next.domain.enums import HpBucket
 from maple_next.domain.turn_state import (
     FieldDelta,
@@ -414,39 +420,140 @@ class _SideStateEditor(QGroupBox):
 
 
 class _SideDeltaEditor(QGroupBox):
-    """One side's SELF/OPPONENT CHANGED/UNCHANGED/UNKNOWN result fields."""
+    """One side's SELF/OPPONENT result-of-Turn editor.
 
-    def __init__(self, title: str) -> None:
+    Event-entry UI v3 (5224627634): the normal surface is a status-preset
+    quick-set + an ability-stage event candidate -> preview -> human Apply
+    flow (this class's own ``event_apply_button`` -- populating these
+    widgets is *not* a canonical write; only the existing bottom-bar
+    "行動・結果記録" click, which reads :meth:`to_side_delta`, is). Manual
+    per-stage +/- editing moves into a collapsed "詳細修正" section. There
+    is deliberately no active-identity input anywhere in this editor --
+    active identity changes only via a human-confirmed actual SWITCH action,
+    computed automatically by
+    :meth:`~maple_next.ui.turn_state_flow.TurnStateFlowController.compute_confirmed_switch_side_delta`
+    and never read from here (:meth:`to_side_delta` always reports
+    ``active=UNCHANGED``; the caller substitutes the computed delta when a
+    switch was confirmed).
+    """
+
+    def __init__(
+        self,
+        title: str,
+        *,
+        side: str,
+        preview_fn: Callable[..., dict[str, tuple[int, int]]],
+    ) -> None:
         super().__init__(title)
+        self._side = side
+        self._preview_fn = preview_fn
+        self._pending_stage_preview: dict[str, tuple[int, int]] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(1)
-        # active/HP and status/other share one row (4 fields) instead of
-        # two stacked rows -- this editor only ever appears in the
-        # RECORD_ACTUAL_ACTION completion phase, where LIVE must stay the
-        # dominant region even with this editor also on screen.
+
         top_row = QHBoxLayout()
-        top_row.addWidget(QLabel("active"))
-        self.active_field = _DeltaTextField("変更時のみ")
-        top_row.addWidget(self.active_field, 1)
         top_row.addWidget(QLabel("HP"))
         self.hp_field = _DeltaHpField()
         top_row.addWidget(self.hp_field, 1)
-        top_row.addWidget(QLabel("状態異常"))
-        self.status_field = _DeltaTextField("変更時のみ")
-        top_row.addWidget(self.status_field, 1)
         top_row.addWidget(QLabel("その他"))
         self.side_effects_field = _DeltaSideEffectsField()
         top_row.addWidget(self.side_effects_field, 1)
         layout.addLayout(top_row)
+
+        status_row = QHBoxLayout()
+        status_row.addWidget(QLabel("状態異常"))
+        self.status_preset_box = QComboBox()
+        self.status_preset_box.addItem("選択してください")
+        self.status_preset_box.addItems(MAJOR_STATUS_PRESETS)
+        self.status_preset_box.addItem(MAJOR_STATUS_CLEAR_LABEL)
+        status_row.addWidget(self.status_preset_box, 1)
+        self.status_apply_button = QPushButton("状態を適用")
+        self.status_apply_button.clicked.connect(self._on_apply_status_preset)
+        status_row.addWidget(self.status_apply_button)
+        layout.addLayout(status_row)
+        # Underlying CHANGED/UNCHANGED/UNKNOWN delta source -- the preset
+        # button above just populates it; manual text entry stays available
+        # for anything a preset doesn't cover.
+        self.status_field = _DeltaTextField("変更時のみ（手動）")
+        layout.addWidget(self.status_field)
+
+        event_row = QHBoxLayout()
+        event_row.addWidget(QLabel("能力変化"))
+        self.event_preset_box = QComboBox()
+        self.event_preset_box.addItem("選択してください", "")
+        for preset in STAGE_EVENT_PRESETS:
+            self.event_preset_box.addItem(preset.label, preset.key)
+        event_row.addWidget(self.event_preset_box, 1)
+        self.event_preview_button = QPushButton("プレビュー")
+        self.event_preview_button.clicked.connect(self._on_preview_stage_event)
+        event_row.addWidget(self.event_preview_button)
+        self.event_apply_button = QPushButton("適用")
+        self.event_apply_button.setEnabled(False)
+        self.event_apply_button.clicked.connect(self._on_apply_stage_event)
+        event_row.addWidget(self.event_apply_button)
+        layout.addLayout(event_row)
+        self.event_preview_label = QLabel("")
+        self.event_preview_label.setWordWrap(True)
+        self.event_preview_label.setStyleSheet("font-size: 9px; color: #2563eb;")
+        layout.addWidget(self.event_preview_label)
+
         self.stage_fields: dict[str, _DeltaIntField] = {}
         for key, _label in _STAGE_FIELDS:
             self.stage_fields[key] = _DeltaIntField()
-        _add_compact_stage_grid(layout, self.stage_fields, _STAGE_FIELDS)
+        self.detail_section = _CollapsibleSection("詳細修正 — 能力ランク手動編集")
+        detail_widget = QWidget()
+        detail_layout = QVBoxLayout(detail_widget)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        _add_compact_stage_grid(detail_layout, self.stage_fields, _STAGE_FIELDS)
+        self.detail_section.add_widget(detail_widget)
+        layout.addWidget(self.detail_section)
+
+    def _on_preview_stage_event(self, _checked: bool = False) -> None:
+        preset_key = self.event_preset_box.currentData()
+        if not preset_key:
+            self.event_preview_label.setText("")
+            self.event_apply_button.setEnabled(False)
+            self._pending_stage_preview = {}
+            return
+        preview = self._preview_fn(side=self._side, preset_key=preset_key)
+        self._pending_stage_preview = preview
+        if not preview:
+            self.event_preview_label.setText("確定済みのcurrent stateがまだありません。")
+            self.event_apply_button.setEnabled(False)
+            return
+        label_by_key = dict(_STAGE_FIELDS)
+        parts = []
+        for field_name, (current, candidate) in preview.items():
+            diff = candidate - current
+            sign = "+" if diff > 0 else ""
+            label = label_by_key.get(field_name, field_name)
+            parts.append(f"{label} {current}→{candidate} ({sign}{diff})")
+        self.event_preview_label.setText(" / ".join(parts))
+        self.event_apply_button.setEnabled(True)
+
+    def _on_apply_stage_event(self, _checked: bool = False) -> None:
+        for field_name, (_current, candidate) in self._pending_stage_preview.items():
+            field = self.stage_fields.get(field_name)
+            if field is None:
+                continue
+            field.mode_box.setCurrentText("CHANGED")
+            field.spin.setValue(candidate)
+        self.event_apply_button.setEnabled(False)
+        if self.event_preview_label.text():
+            self.event_preview_label.setText(self.event_preview_label.text() + "  [適用済み]")
+
+    def _on_apply_status_preset(self, _checked: bool = False) -> None:
+        text = self.status_preset_box.currentText()
+        if text == "選択してください":
+            return
+        value = "なし" if text == MAJOR_STATUS_CLEAR_LABEL else text
+        self.status_field.mode_box.setCurrentText("CHANGED")
+        self.status_field.line.setText(value)
 
     def to_side_delta(self) -> SideDelta:
         return SideDelta(
-            active=self.active_field.to_delta(),
+            active=FieldDelta.unchanged(),
             hp_bucket=self.hp_field.to_delta(),
             status=self.status_field.to_delta(),
             attack_stage=self.stage_fields["attack_stage"].to_delta(),
@@ -499,6 +606,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
     def __init__(self, controller: TurnStateFlowController, *, ocr_data_directory: Path) -> None:
         super().__init__(controller, ocr_data_directory=ocr_data_directory)
         self._bundle_c_controller: TurnStateFlowController = controller
+        self._evidence_dialog: QDialog | None = None
         self._build_bundle_c_state_widgets()
         self._restructure_battle_record_layout()
         self._apply_default_launch_geometry()
@@ -515,31 +623,40 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.setFixedSize(_DEFAULT_LAUNCH_WIDTH, _DEFAULT_LAUNCH_HEIGHT)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt override
+        # The window is fixed-size (5224282289); this override only exists
+        # to keep the base class's own resizeEvent chain (LIVE preview
+        # re-render) intact. The fixed Turn image no longer sits inline at
+        # a width that tracked window size -- it now lives in the on-demand
+        # evidence overlay (5224627634 section B).
         super().resizeEvent(event)
-        if hasattr(self, "turn_snapshot_group"):
-            self._apply_fixed_turn_image_width()
 
-    def _apply_fixed_turn_image_width(self) -> None:
-        """Fixed Turn image thumbnail width tracks the mock's two named
-        targets (~230px @1440x900, ~185px @1280x720), interpolating between
-        them for in-between window widths rather than pinning to whichever
-        bound a plain min/max-width pair happens to resolve to under the
-        row's HBoxLayout stretch.
-        """
+    def _on_open_evidence_overlay(self, _checked: bool = False) -> None:
+        turn_snapshot_group = getattr(self, "turn_snapshot_group", None)
+        if turn_snapshot_group is None:
+            return
+        self._detach_from_parent_layout(turn_snapshot_group)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("撮影画像を確認 — このTurnで固定した画像")
+        dialog_layout = QVBoxLayout(dialog)
+        turn_snapshot_group.setMinimumWidth(320)
+        turn_snapshot_group.setMaximumWidth(16777215)
+        self.turn_snapshot_image_label.setMaximumWidth(16777215)
+        dialog_layout.addWidget(turn_snapshot_group)
+        dialog.resize(420, 560)
+        dialog.setModal(False)
+        dialog.finished.connect(
+            lambda _result, widget=turn_snapshot_group: self._on_close_evidence_overlay(widget)
+        )
+        self._evidence_dialog = dialog
+        dialog.show()
 
-        width = self.width()
-        if width >= _DEFAULT_LAUNCH_WIDTH:
-            target = _FIXED_TURN_IMAGE_MAX_WIDTH
-        elif width <= _MINIMUM_SUPPORTED_WIDTH:
-            target = _FIXED_TURN_IMAGE_MIN_WIDTH
-        else:
-            span = _DEFAULT_LAUNCH_WIDTH - _MINIMUM_SUPPORTED_WIDTH
-            ratio = (width - _MINIMUM_SUPPORTED_WIDTH) / span
-            target = round(
-                _FIXED_TURN_IMAGE_MIN_WIDTH
-                + ratio * (_FIXED_TURN_IMAGE_MAX_WIDTH - _FIXED_TURN_IMAGE_MIN_WIDTH)
-            )
-        self.turn_snapshot_group.setFixedWidth(target)
+    def _on_close_evidence_overlay(self, turn_snapshot_group: QWidget) -> None:
+        self._detach_from_parent_layout(turn_snapshot_group)
+        self.turn_snapshot_image_label.setMaximumWidth(_FIXED_TURN_IMAGE_MAX_WIDTH - 12)
+        holder_layout = self._evidence_holder.layout()
+        if holder_layout is not None:
+            holder_layout.addWidget(turn_snapshot_group)
+        self._evidence_dialog = None
 
     # -- new Bundle A/B widgets ------------------------------------------------
 
@@ -596,8 +713,16 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         delta_top_row.addWidget(self.terrain_delta_field, 1)
         delta_layout.addLayout(delta_top_row)
         delta_sides_row = QHBoxLayout()
-        self.self_delta_editor = _SideDeltaEditor("自分の結果")
-        self.opponent_delta_editor = _SideDeltaEditor("相手の結果")
+        self.self_delta_editor = _SideDeltaEditor(
+            "自分の結果",
+            side="self",
+            preview_fn=self._bundle_c_controller.preview_stage_event,
+        )
+        self.opponent_delta_editor = _SideDeltaEditor(
+            "相手の結果",
+            side="opponent",
+            preview_fn=self._bundle_c_controller.preview_stage_event,
+        )
         delta_sides_row.addWidget(self.self_delta_editor)
         delta_sides_row.addWidget(self.opponent_delta_editor)
         delta_layout.addLayout(delta_sides_row)
@@ -891,36 +1016,54 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
         self._center_column_layout.insertWidget(0, self.capture_status_group, 20)
 
-        # Fixed Turn image sits beside the current Turn facts, mock-style
-        # (thumbnail column ~185-230px wide, facts filling the remainder),
-        # not stacked with live preview.
+        # Fixed Turn image becomes an on-demand evidence overlay (5224627634
+        # section B) instead of an always-visible thumbnail: the normal
+        # center-column facts row keeps only a compact "撮影画像を確認"
+        # control + short status text, and the actual (large) fixed-image
+        # group only appears in a dialog when that button is clicked. The
+        # same widget instance is reparented back to a hidden holder (never
+        # destroyed, never re-created) on close, so it keeps receiving
+        # every existing OCR/binding update call exactly as before
+        # regardless of which parent currently displays it -- LIVE reclaims
+        # the space this thumbnail used to occupy inline.
         turn_snapshot_group = getattr(self, "turn_snapshot_group", None)
         if turn_snapshot_group is not None:
             self._detach_from_parent_layout(turn_snapshot_group)
             self._detach_from_parent_layout(self.turn_facts_group)
-            # Initial width; kept in sync with the live window width by
-            # resizeEvent -> _apply_fixed_turn_image_width thereafter.
-            turn_snapshot_group.setFixedWidth(_FIXED_TURN_IMAGE_MAX_WIDTH)
             # The base class's QVBoxLayout still reserves its default
             # inter-item spacing around the now-empty (rows hidden, not
             # removed) metadata/crop/origins sub-layouts above -- zero it
             # out so only real content (status, image, retake button)
-            # contributes height.
+            # contributes height inside the dialog.
             snapshot_layout = turn_snapshot_group.layout()
             if snapshot_layout is not None:
                 snapshot_layout.setSpacing(0)
-            for never_shrink in (turn_snapshot_group, self.turn_facts_group):
-                never_shrink.setSizePolicy(
-                    QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
-                )
-            self.turn_snapshot_image_label.setMaximumWidth(_FIXED_TURN_IMAGE_MAX_WIDTH - 12)
-            self.turn_snapshot_image_label.setMinimumSize(
-                _FIXED_TURN_IMAGE_MIN_WIDTH - 12, 104
+            self.turn_facts_group.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
             )
+            self._evidence_holder = QWidget(self)
+            self._evidence_holder.setVisible(False)
+            evidence_holder_layout = QVBoxLayout(self._evidence_holder)
+            evidence_holder_layout.addWidget(turn_snapshot_group)
+
+            evidence_control = QWidget()
+            evidence_control_layout = QVBoxLayout(evidence_control)
+            evidence_control_layout.setContentsMargins(0, 0, 0, 0)
+            evidence_control_layout.setSpacing(1)
+            self.evidence_open_button = QPushButton("撮影画像を確認")
+            self.evidence_open_button.clicked.connect(self._on_open_evidence_overlay)
+            evidence_control_layout.addWidget(self.evidence_open_button)
+            self.evidence_status_label = QLabel()
+            self.evidence_status_label.setWordWrap(True)
+            self.evidence_status_label.setStyleSheet("font-size: 9px;")
+            evidence_control_layout.addWidget(self.evidence_status_label)
+            evidence_control_layout.addStretch(1)
+            evidence_control.setMaximumWidth(_FIXED_TURN_IMAGE_MIN_WIDTH)
+
             fixed_image_facts_row = QWidget()
             fixed_image_facts_layout = QHBoxLayout(fixed_image_facts_row)
             fixed_image_facts_layout.setContentsMargins(0, 0, 0, 0)
-            fixed_image_facts_layout.addWidget(turn_snapshot_group, 0)
+            fixed_image_facts_layout.addWidget(evidence_control, 0)
             fixed_image_facts_layout.addWidget(self.turn_facts_group, 1)
             self._center_column_layout.insertWidget(1, fixed_image_facts_row)
 
@@ -1147,6 +1290,22 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         elif not editable:
             self.current_state_summary_label.setText("確定済み stateはまだありません。")
 
+        # First-turn ability stages default to 0 without manual input
+        # (5224627634 section G): applies only while genuinely nothing has
+        # been confirmed yet for this identity and there is no open draft to
+        # carry forward from -- and only to fields still at their own
+        # UNKNOWN default, so it never clobbers a value the operator already
+        # touched (including a correction back to "not applicable" via a
+        # UNKNOWN choice).
+        if editable and summary.confirmed_state is None and summary.open_draft is None:
+            self._apply_first_turn_zero_stage_defaults(self.self_state_editor)
+            self._apply_first_turn_zero_stage_defaults(self.opponent_state_editor)
+
+        evidence_status_label = getattr(self, "evidence_status_label", None)
+        turn_snapshot_status_label = getattr(self, "turn_snapshot_status_label", None)
+        if evidence_status_label is not None and turn_snapshot_status_label is not None:
+            evidence_status_label.setText(turn_snapshot_status_label.text())
+
         # Collapse the legal-action prefill rows (moves/switches) once they
         # are no longer editable -- same fixed-height rationale as above.
         turn_facts_form = self.turn_facts_group.layout()
@@ -1218,6 +1377,12 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             ):
                 lockable_widget.setEnabled(False)
 
+    @staticmethod
+    def _apply_first_turn_zero_stage_defaults(editor: _SideStateEditor) -> None:
+        for field in editor.stage_fields.values():
+            if field.unknown_box.isChecked():
+                field.set_known(Known.confirmed(0, provenance_chain=_HUMAN_INPUT))
+
     def _load_draft_into_state_editor(self, summary: TurnStateSummaryView) -> None:
         draft = summary.open_draft
         if draft is None:
@@ -1280,15 +1445,37 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         opponent_type = self.opponent_action_type_box.currentText()
         if opponent_type == "選択してください":
             opponent_type = ""
+        action_type = self.actual_action_type_box.currentText()
+        action_name = self.actual_action_name_box.currentText().strip()
+        opponent_name = self.opponent_action_name_input.text().strip()
+
+        # Ordinary confirmed SWITCH -> automatic state transition
+        # (5224627634 section F): the destination is already the human's
+        # own confirmed actual-action selection above, so this requires no
+        # additional operator input. The state-change editors below never
+        # accept a manual active-identity edit -- see _SideDeltaEditor.
+        if action_type == "SWITCH" and action_name:
+            self_side_delta = self._bundle_c_controller.compute_confirmed_switch_side_delta(
+                side="self", destination_pokemon_name=action_name
+            )
+        else:
+            self_side_delta = self.self_delta_editor.to_side_delta()
+        if opponent_type == "SWITCH" and opponent_name:
+            opponent_side_delta = self._bundle_c_controller.compute_confirmed_switch_side_delta(
+                side="opponent", destination_pokemon_name=opponent_name
+            )
+        else:
+            opponent_side_delta = self.opponent_delta_editor.to_side_delta()
+
         view = self._bundle_c_controller.record_actual_action(
-            action_type=self.actual_action_type_box.currentText(),
+            action_type=action_type,
             action_name=self.actual_action_name_box.currentText(),
             human_confirmed=self.actual_action_confirm_checkbox.isChecked(),
             opponent_action_type=opponent_type,
             opponent_action_name=self.opponent_action_name_input.text(),
             action_order=self.action_order_box.currentText(),
-            self_side_delta=self.self_delta_editor.to_side_delta(),
-            opponent_side_delta=self.opponent_delta_editor.to_side_delta(),
+            self_side_delta=self_side_delta,
+            opponent_side_delta=opponent_side_delta,
             weather_delta=self.weather_delta_field.to_delta(),
             terrain_delta=self.terrain_delta_field.to_delta(),
         )

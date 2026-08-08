@@ -408,9 +408,10 @@ def test_current_state_editor_shows_draft_carry_forward_after_next_turn(
     window.actual_action_type_box.setCurrentText("MOVE")
     window.actual_action_name_box.setCurrentText("Flower Trick")
     window.actual_action_confirm_checkbox.setChecked(True)
-    # Explicit UNCHANGED (not just leaving it at the default UNKNOWN) is
-    # what carries the active Pokemon forward into the draft.
-    window.self_delta_editor.active_field.mode_box.setCurrentText("UNCHANGED")
+    # Event-entry UI v3 (5224627634): _SideDeltaEditor no longer has an
+    # active-identity input at all -- to_side_delta() always reports
+    # active=UNCHANGED, which is exactly what carries the active Pokemon
+    # forward into the draft for this non-SWITCH (MOVE) actual action.
     window._on_record_action()
     window._on_next_turn()
 
@@ -510,7 +511,6 @@ def test_restart_hydration_reloads_the_same_next_turn_state_draft(tmp_path: Path
     window.actual_action_type_box.setCurrentText("MOVE")
     window.actual_action_name_box.setCurrentText("Flower Trick")
     window.actual_action_confirm_checkbox.setChecked(True)
-    window.self_delta_editor.active_field.mode_box.setCurrentText("UNCHANGED")
     window._on_record_action()
     window._on_next_turn()
 

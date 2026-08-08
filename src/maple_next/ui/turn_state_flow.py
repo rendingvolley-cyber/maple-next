@@ -31,11 +31,18 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Protocol, TypeVar
 from uuid import uuid4
 
 from maple_next.application.match_service import MatchApplication
 from maple_next.application.service import BattleApplication, DomainError
+from maple_next.domain.battle_events import (
+    STAGE_EVENT_PRESETS,
+    STAGE_EVENT_PRESETS_BY_KEY,
+    STAGE_FIELD_NAMES,
+    StageEventPreset,
+    apply_stage_event,
+)
 from maple_next.domain.enums import ActionType, ResultDisposition
 from maple_next.domain.turn_state import (
     ActionResultDelta,
@@ -45,6 +52,8 @@ from maple_next.domain.turn_state import (
     FieldDelta,
     Known,
     NextTurnStateDraft,
+    PokemonLocalMemory,
+    ProvenanceStep,
     SideDelta,
     SideState,
     TurnIdentity,
@@ -93,6 +102,29 @@ def _confirmation_meta(provenance: str = "HUMAN_INPUT") -> ConfirmationMeta:
         confirmed_at_utc=_now_iso(),
         provenance=provenance,
     )
+
+
+_HUMAN_INPUT_CHAIN = (ProvenanceStep.HUMAN_INPUT,)
+_CARRY_FORWARD_CHAIN = (ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD,)
+
+
+def _stage_value(known: Known[int]) -> int:
+    """0 for an UNKNOWN stage -- stages are always CONFIRMED once Turn 1
+    initializes them; this default only guards a genuinely missing value."""
+
+    return known.value if known.is_confirmed and known.value is not None else 0
+
+
+_MemoryT = TypeVar("_MemoryT")
+
+
+def _known_to_restoring_field_delta(known: Known[_MemoryT]) -> FieldDelta[_MemoryT]:
+    """A per-Pokemon memory value becomes a CHANGED delta carrying forward
+    provenance, or UNKNOWN when no memory exists yet for that Pokemon."""
+
+    if known.is_confirmed and known.value is not None:
+        return FieldDelta.changed(known.value, provenance_chain=_CARRY_FORWARD_CHAIN)
+    return FieldDelta.unknown()
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,8 +539,109 @@ class TurnStateFlowController(MatchFlowController):
             self._repository.append_confirmed_turn_state(state)
             for selection in selections:
                 self._repository.append_confirmed_legal_action_selection(selection)
+            self._save_pokemon_local_memory(identity, "SELF", self_side)
+            self._save_pokemon_local_memory(identity, "OPPONENT", opponent_side)
         self._error_message = None
         return self.refresh()
+
+    def _save_pokemon_local_memory(
+        self, identity: TurnIdentity, side: str, side_state: SideState
+    ) -> None:
+        """Snapshot this confirmed state's active Pokemon HP/status into
+        match-local memory (event-entry UI v3), so a later ordinary switch
+        back to this same Pokemon can restore it. A no-op when the active
+        Pokemon's name is not itself confirmed -- memory is always keyed by
+        an explicit Pokemon name, never guessed."""
+
+        active = side_state.active
+        if not active.is_confirmed or active.value is None:
+            return
+        self._repository.upsert_pokemon_local_state(
+            session_id=identity.session_id,
+            match_id=identity.match_id,
+            generation=identity.generation,
+            side=side,
+            memory=PokemonLocalMemory(
+                pokemon_name=active.value,
+                hp_bucket=side_state.hp_bucket,
+                status=side_state.status,
+            ),
+        )
+
+    # -- event-entry UI v3: ability-stage events + confirmed-switch transition -
+
+    @staticmethod
+    def stage_event_presets() -> tuple[StageEventPreset, ...]:
+        return STAGE_EVENT_PRESETS
+
+    def preview_stage_event(
+        self, *, side: str, preset_key: str
+    ) -> dict[str, tuple[int, int]]:
+        """Read-only: {stage_field_name: (current, candidate)} for every
+        field the preset touches. Never mutates anything -- selecting a
+        preset alone must not change canonical state."""
+
+        preset = STAGE_EVENT_PRESETS_BY_KEY.get(preset_key)
+        if preset is None:
+            return {}
+        summary = self.turn_state_summary()
+        if summary.confirmed_state is None:
+            return {}
+        side_state = (
+            summary.confirmed_state.self_side
+            if side == "self"
+            else summary.confirmed_state.opponent_side
+        )
+        current_stages = {
+            name: _stage_value(getattr(side_state, name)) for name in STAGE_FIELD_NAMES
+        }
+        candidate = apply_stage_event(current_stages, preset)
+        return {name: (current_stages[name], candidate[name]) for name in candidate}
+
+    def compute_confirmed_switch_side_delta(
+        self, *, side: str, destination_pokemon_name: str
+    ) -> SideDelta:
+        """The SideDelta an ordinary confirmed switch produces for one side.
+
+        Active identity changes to the destination, every ability stage
+        resets to 0 (active-slot-only, never carried across a switch),
+        active-only side effects clear, and HP/major-status are restored
+        from this match's per-Pokemon memory for the destination Pokemon --
+        UNKNOWN (never a guessed default) when it has not appeared before
+        this match. Read-only against persistence; writes nothing.
+        """
+
+        identity = self._safe_current_identity()
+        if identity is None:
+            raise TurnStateError("NO_ACTIVE_TURN_IDENTITY")
+        name = destination_pokemon_name.strip()
+        if not name:
+            raise ValueError("destination_pokemon_name must be explicit")
+        db_side = "SELF" if side == "self" else "OPPONENT"
+        memory = self._repository.get_pokemon_local_state(
+            session_id=identity.session_id,
+            match_id=identity.match_id,
+            generation=identity.generation,
+            side=db_side,
+            pokemon_name=name,
+        )
+        if memory is not None:
+            hp_delta = _known_to_restoring_field_delta(memory.hp_bucket)
+            status_delta = _known_to_restoring_field_delta(memory.status)
+        else:
+            hp_delta = FieldDelta.unknown()
+            status_delta = FieldDelta.unknown()
+        stage_deltas = {
+            field_name: FieldDelta.changed(0, provenance_chain=_HUMAN_INPUT_CHAIN)
+            for field_name in STAGE_FIELD_NAMES
+        }
+        return SideDelta(
+            active=FieldDelta.changed(name, provenance_chain=_HUMAN_INPUT_CHAIN),
+            hp_bucket=hp_delta,
+            status=status_delta,
+            side_effects=FieldDelta.changed((), provenance_chain=_HUMAN_INPUT_CHAIN),
+            **stage_deltas,
+        )
 
     # -- confirm action-result delta -------------------------------------------
 

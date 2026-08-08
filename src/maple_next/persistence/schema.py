@@ -410,6 +410,21 @@ def migrate(connection: sqlite3.Connection) -> None:
         );
 
         UPDATE schema_meta SET schema_version = 15 WHERE singleton_id = 1;
+
+        -- Battle Record v5: human-confirmed opponent ability memory. UNKNOWN
+        -- is represented by absence, never by a false confirmed value.
+        CREATE TABLE IF NOT EXISTS opponent_ability_memory (
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            opponent_entity_id TEXT NOT NULL,
+            species TEXT NOT NULL,
+            ability TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, match_id, generation, opponent_entity_id)
+        );
+
+        UPDATE schema_meta SET schema_version = 16 WHERE singleton_id = 1;
         """
     )
     _ensure_column(

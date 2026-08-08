@@ -838,3 +838,70 @@ class TurnStateStoreMixin(StoreBase):
             hp_bucket=known_from_json(hp_bucket_payload, decode_value=HpBucket),
             status=known_from_json(json.loads(str(row["status_json"]))),
         )
+
+    # --- Opponent ability memory (Battle Record v5) -------------------------
+
+    def set_opponent_ability_memory(
+        self,
+        *,
+        session_id: str,
+        match_id: str,
+        generation: int,
+        opponent_entity_id: str,
+        species: str,
+        ability: str | None,
+    ) -> None:
+        """Persist one human-confirmed ability; ``None`` keeps it unresolved."""
+
+        entity = opponent_entity_id.strip()
+        if not entity or not species.strip():
+            raise ValueError("opponent entity and species must be explicit")
+        if ability is None or not ability.strip() or ability.strip() == "不明":
+            self.connection.execute(
+                """
+                DELETE FROM opponent_ability_memory
+                WHERE session_id = ? AND match_id = ? AND generation = ?
+                  AND opponent_entity_id = ?
+                """,
+                (session_id, match_id, generation, entity),
+            )
+            return
+        self.connection.execute(
+            """
+            INSERT INTO opponent_ability_memory (
+                session_id, match_id, generation, opponent_entity_id,
+                species, ability, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, match_id, generation, opponent_entity_id) DO UPDATE SET
+                species = excluded.species,
+                ability = excluded.ability,
+                updated_at = excluded.updated_at
+            """,
+            (
+                session_id,
+                match_id,
+                generation,
+                entity,
+                species.strip(),
+                ability.strip(),
+                self._now(),
+            ),
+        )
+
+    def get_opponent_ability_memory(
+        self,
+        *,
+        session_id: str,
+        match_id: str,
+        generation: int,
+        opponent_entity_id: str,
+    ) -> str | None:
+        row = self.connection.execute(
+            """
+            SELECT ability FROM opponent_ability_memory
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+              AND opponent_entity_id = ?
+            """,
+            (session_id, match_id, generation, opponent_entity_id.strip()),
+        ).fetchone()
+        return None if row is None else str(row["ability"])

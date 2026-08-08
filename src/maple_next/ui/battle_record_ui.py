@@ -26,7 +26,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QResizeEvent
+from PySide6.QtGui import QFont, QFontDatabase, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -50,7 +51,21 @@ from maple_next.domain.battle_events import (
     MAJOR_STATUS_PRESETS,
     STAGE_EVENT_PRESETS,
 )
+from maple_next.domain.effect_catalog import (
+    EFFECT_CATALOG,
+    EffectCatalogEntry,
+    EffectTarget,
+    EffectTiming,
+    find_effect,
+)
 from maple_next.domain.enums import HpBucket
+from maple_next.domain.opponent_intel import (
+    LocalJsonOpponentMetaProvider,
+    MatchOpponentFacts,
+    OpponentIntelView,
+    OpponentMetaProvider,
+    build_opponent_intel,
+)
 from maple_next.domain.turn_state import (
     FieldDelta,
     Known,
@@ -235,16 +250,21 @@ class _DeltaIntField(QWidget):
         layout.setSpacing(1)
         self.mode_box = QComboBox()
         self.mode_box.addItems(["UNKNOWN", "UNCHANGED", "CHANGED"])
-        self.mode_box.setMaximumWidth(64)
+        self.mode_box.setCurrentText("UNCHANGED")
+        self.mode_box.setVisible(False)  # compatibility state, not an operator control
         self.spin = QSpinBox()
         self.spin.setRange(-6, 6)
-        self.spin.setEnabled(False)
+        self.spin.setEnabled(True)
         self.spin.setMaximumWidth(40)
-        self.mode_box.currentTextChanged.connect(
-            lambda text: self.spin.setEnabled(text == "CHANGED")
-        )
-        layout.addWidget(self.mode_box)
+        self.spin.valueChanged.connect(lambda _value: self.mode_box.setCurrentText("CHANGED"))
         layout.addWidget(self.spin)
+        self.unknown_box = QCheckBox("観測不能")
+        self.unknown_box.toggled.connect(self._set_unknown)
+        layout.addWidget(self.unknown_box)
+
+    def _set_unknown(self, checked: bool) -> None:
+        self.mode_box.setCurrentText("UNKNOWN" if checked else "UNCHANGED")
+        self.spin.setEnabled(not checked)
 
     def to_delta(self) -> FieldDelta[int]:
         mode = self.mode_box.currentText()
@@ -262,14 +282,21 @@ class _DeltaTextField(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.mode_box = QComboBox()
         self.mode_box.addItems(["UNKNOWN", "UNCHANGED", "CHANGED"])
+        self.mode_box.setCurrentText("UNCHANGED")
+        self.mode_box.setVisible(False)  # compatibility state, not an operator control
         self.line = QLineEdit()
         self.line.setPlaceholderText(placeholder)
-        self.line.setEnabled(False)
-        self.mode_box.currentTextChanged.connect(
-            lambda text: self.line.setEnabled(text == "CHANGED")
+        self.line.textEdited.connect(
+            lambda text: self.mode_box.setCurrentText("CHANGED" if text.strip() else "UNCHANGED")
         )
-        layout.addWidget(self.mode_box)
         layout.addWidget(self.line, 1)
+        self.unknown_box = QCheckBox("観測不能")
+        self.unknown_box.toggled.connect(self._set_unknown)
+        layout.addWidget(self.unknown_box)
+
+    def _set_unknown(self, checked: bool) -> None:
+        self.mode_box.setCurrentText("UNKNOWN" if checked else "UNCHANGED")
+        self.line.setEnabled(not checked)
 
     def to_delta(self) -> FieldDelta[str]:
         mode = self.mode_box.currentText()
@@ -290,15 +317,23 @@ class _DeltaHpField(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.mode_box = QComboBox()
         self.mode_box.addItems(["UNKNOWN", "UNCHANGED", "CHANGED"])
+        self.mode_box.setCurrentText("UNCHANGED")
+        self.mode_box.setVisible(False)  # compatibility state, not an operator control
         self.value_box = QComboBox()
+        self.value_box.addItem("—")
         for bucket in HpBucket:
             self.value_box.addItem(bucket.value)
-        self.value_box.setEnabled(False)
-        self.mode_box.currentTextChanged.connect(
-            lambda text: self.value_box.setEnabled(text == "CHANGED")
+        self.value_box.currentIndexChanged.connect(
+            lambda index: self.mode_box.setCurrentText("CHANGED" if index > 0 else "UNCHANGED")
         )
-        layout.addWidget(self.mode_box)
         layout.addWidget(self.value_box)
+        self.unknown_box = QCheckBox("観測不能")
+        self.unknown_box.toggled.connect(self._set_unknown)
+        layout.addWidget(self.unknown_box)
+
+    def _set_unknown(self, checked: bool) -> None:
+        self.mode_box.setCurrentText("UNKNOWN" if checked else "UNCHANGED")
+        self.value_box.setEnabled(not checked)
 
     def to_delta(self) -> FieldDelta[HpBucket]:
         mode = self.mode_box.currentText()
@@ -318,14 +353,21 @@ class _DeltaSideEffectsField(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.mode_box = QComboBox()
         self.mode_box.addItems(["UNKNOWN", "UNCHANGED", "CHANGED"])
+        self.mode_box.setCurrentText("UNCHANGED")
+        self.mode_box.setVisible(False)  # compatibility state, not an operator control
         self.line = QLineEdit()
         self.line.setPlaceholderText("やけど,こんらん")
-        self.line.setEnabled(False)
-        self.mode_box.currentTextChanged.connect(
-            lambda text: self.line.setEnabled(text == "CHANGED")
+        self.line.textEdited.connect(
+            lambda text: self.mode_box.setCurrentText("CHANGED" if text.strip() else "UNCHANGED")
         )
-        layout.addWidget(self.mode_box)
         layout.addWidget(self.line, 1)
+        self.unknown_box = QCheckBox("観測不能")
+        self.unknown_box.toggled.connect(self._set_unknown)
+        layout.addWidget(self.unknown_box)
+
+    def _set_unknown(self, checked: bool) -> None:
+        self.mode_box.setCurrentText("UNKNOWN" if checked else "UNCHANGED")
+        self.line.setEnabled(not checked)
 
     def to_delta(self) -> FieldDelta[tuple[str, ...]]:
         mode = self.mode_box.currentText()
@@ -600,17 +642,244 @@ class _CollapsibleSection(QWidget):
         self.content_layout.addWidget(widget)
 
 
+class _EffectCandidateCard(QGroupBox):
+    """Human Apply/Reject boundary; displaying a hit never mutates state."""
+
+    def __init__(self, apply_callback: Callable[[EffectCatalogEntry], None]) -> None:
+        super().__init__("Mapleの状態変化候補")
+        self._entry: EffectCatalogEntry | None = None
+        self._apply_callback = apply_callback
+        layout = QHBoxLayout(self)
+        self.summary_label = QLabel()
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label, 1)
+        self.apply_button = QPushButton("適用")
+        self.reject_button = QPushButton("違う")
+        self.apply_button.clicked.connect(self._apply)
+        self.reject_button.clicked.connect(self.clear)
+        layout.addWidget(self.apply_button)
+        layout.addWidget(self.reject_button)
+        self.setVisible(False)
+
+    @property
+    def pending_entry(self) -> EffectCatalogEntry | None:
+        return self._entry
+
+    def propose(self, entry: EffectCatalogEntry, *, prefix: str = "") -> None:
+        self._entry = entry
+        lead = f"{prefix} → " if prefix else ""
+        self.summary_label.setText(f"{lead}{entry.summary}")
+        self.setVisible(True)
+
+    def clear(self, _checked: bool = False) -> None:
+        self._entry = None
+        self.summary_label.clear()
+        self.setVisible(False)
+
+    def _apply(self, _checked: bool = False) -> None:
+        if self._entry is None:
+            return
+        entry = self._entry
+        self._apply_callback(entry)
+        self.clear()
+
+
+class _StateEventDialog(QDialog):
+    """Timing-grouped fallback. Preset click previews; Apply is separate."""
+
+    def __init__(
+        self,
+        parent: QWidget,
+        *,
+        context: str,
+        apply_callback: Callable[[EffectCatalogEntry], None],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("状態変化を記録")
+        self.setModal(False)
+        self._pending: EffectCatalogEntry | None = None
+        self._apply_callback = apply_callback
+        layout = QVBoxLayout(self)
+        self.context_label = QLabel(
+            "Turn確認: 登場・ターン開始を優先"
+            if context == "review"
+            else "行動・結果: 行動後を優先"
+        )
+        layout.addWidget(self.context_label)
+
+        ordered_timings: tuple[tuple[EffectTiming, str], ...] = (
+            (EffectTiming.SWITCH_IN, "登場・ターン開始でよく起きること"),
+            (EffectTiming.AFTER_ACTION, "行動後によく起きること"),
+        )
+        if context == "result":
+            ordered_timings = tuple(reversed(ordered_timings))
+        for timing, title in ordered_timings:
+            group = QGroupBox(title)
+            row = QHBoxLayout(group)
+            shown = 0
+            for entry in EFFECT_CATALOG:
+                if entry.timing is not timing or shown >= 10:
+                    continue
+                button = QPushButton(entry.display_name_ja)
+                button.clicked.connect(
+                    lambda _checked=False, candidate=entry: self._preview(candidate)
+                )
+                row.addWidget(button)
+                shown += 1
+            layout.addWidget(group)
+
+        details = _CollapsibleSection("その他・詳細修正")
+        details.add_widget(QLabel("catalogにない例外は、各入力欄へ人間が直接記録してください。"))
+        layout.addWidget(details)
+        self.preview_label = QLabel("候補を選ぶと、ここにpreviewします。")
+        self.preview_label.setWordWrap(True)
+        layout.addWidget(self.preview_label)
+        actions = QHBoxLayout()
+        self.apply_button = QPushButton("適用")
+        self.apply_button.setEnabled(False)
+        self.apply_button.clicked.connect(self._apply)
+        close_button = QPushButton("閉じる")
+        close_button.clicked.connect(self.close)
+        actions.addWidget(self.apply_button)
+        actions.addWidget(close_button)
+        layout.addLayout(actions)
+        self.resize(1050, 430)
+
+    def _preview(self, entry: EffectCatalogEntry) -> None:
+        self._pending = entry
+        self.preview_label.setText(f"preview: {entry.display_name_ja} → {entry.summary}")
+        self.apply_button.setEnabled(True)
+
+    def _apply(self, _checked: bool = False) -> None:
+        if self._pending is None:
+            return
+        self._apply_callback(self._pending)
+        self.accept()
+
+
+class _OpponentIntelWidget(QGroupBox):
+    def __init__(self) -> None:
+        super().__init__("Opponent INTEL")
+        layout = QVBoxLayout(self)
+        self.species_label = QLabel("相手 active: 不明")
+        self.facts_label = QLabel("この試合: 特性 不明 / 道具 不明 / 技 不明")
+        self.facts_label.setWordWrap(True)
+        self.summary_label = QLabel("move / ability / item: データなし")
+        self.summary_label.setWordWrap(True)
+        self.detail_button = QPushButton("INTEL詳細を表示")
+        layout.addWidget(self.species_label)
+        layout.addWidget(self.facts_label)
+        layout.addWidget(self.summary_label)
+        layout.addWidget(self.detail_button)
+        self._view: OpponentIntelView | None = None
+        self._detail_dialog: QDialog | None = None
+        self.detail_button.clicked.connect(self._open_detail)
+
+    def render_intel(self, view: OpponentIntelView) -> None:
+        self._view = view
+        self.species_label.setText(f"相手 active: {view.species}")
+        moves = ", ".join(view.moves) or "不明"
+        self.facts_label.setText(
+            f"この試合優先: 特性 {view.ability} / 道具 {view.item} / 技 {moves}"
+        )
+        if view.meta is None:
+            self.summary_label.setText("move / ability / item: データなし")
+        else:
+            move_summary = ", ".join(entry.name for entry in view.meta.moves[:3]) or "データなし"
+            ability_summary = (
+                ", ".join(entry.name for entry in view.meta.abilities[:2]) or "データなし"
+            )
+            item_summary = ", ".join(entry.name for entry in view.meta.items[:2]) or "データなし"
+            self.summary_label.setText(
+                f"move: {move_summary}\nability: {ability_summary}\nitem: {item_summary}"
+            )
+
+    def _open_detail(self, _checked: bool = False) -> None:
+        if self._view is None:
+            return
+        view = self._view
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Opponent INTEL 詳細")
+        layout = QVBoxLayout(dialog)
+        tabs = QLabel(f"相手個体: {view.species}")
+        layout.addWidget(tabs)
+        details = QTextEdit()
+        details.setReadOnly(True)
+        if view.meta is None:
+            source_text = "source/regulation/snapshot: データなし"
+            ranking_text = "usage ranking: データなし"
+        else:
+            source_text = (
+                f"source: {view.meta.source}\nregulation: {view.meta.regulation}\n"
+                f"snapshot: {view.meta.snapshot_date}"
+            )
+            ranking_text = (
+                f"moves: {_format_rankings(view.meta.moves)}\n"
+                f"abilities: {_format_rankings(view.meta.abilities)}\n"
+                f"items: {_format_rankings(view.meta.items)}"
+            )
+        possible = ", ".join(view.possible_abilities) or "データなし"
+        details.setPlainText(
+            f"current-match facts\nability: {view.ability}\nitem: {view.item}\n"
+            f"moves: {', '.join(view.moves) or '不明'}\n\npossible abilities: {possible}\n\n"
+            f"{ranking_text}\n\n{source_text}"
+        )
+        layout.addWidget(details)
+        dialog.resize(620, 520)
+        dialog.setModal(False)
+        self._detail_dialog = dialog
+        dialog.show()
+
+
+def _format_rankings(entries: tuple[object, ...]) -> str:
+    formatted: list[str] = []
+    for entry in entries:
+        name = str(getattr(entry, "name", ""))
+        percentage = getattr(entry, "percentage", None)
+        formatted.append(name if percentage is None else f"{name} {percentage:.1f}%")
+    return ", ".join(formatted) or "データなし"
+
+
 class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
     """Fixed header / 18-52-30 body / fixed bottom bar Battle Record UI."""
 
-    def __init__(self, controller: TurnStateFlowController, *, ocr_data_directory: Path) -> None:
+    def __init__(
+        self,
+        controller: TurnStateFlowController,
+        *,
+        ocr_data_directory: Path,
+        opponent_meta_provider: OpponentMetaProvider | None = None,
+    ) -> None:
         super().__init__(controller, ocr_data_directory=ocr_data_directory)
+        self._apply_official_windows_font()
         self._bundle_c_controller: TurnStateFlowController = controller
+        self._opponent_meta_provider = opponent_meta_provider or LocalJsonOpponentMetaProvider(
+            ocr_data_directory / "opponent_meta_cache.json"
+        )
         self._evidence_dialog: QDialog | None = None
+        self._state_event_dialog: QDialog | None = None
         self._build_bundle_c_state_widgets()
         self._restructure_battle_record_layout()
         self._apply_default_launch_geometry()
         self.render_view()
+
+    def _apply_official_windows_font(self) -> None:
+        """Ensure the official Windows runtime can render Japanese labels.
+
+        Some embedded/offscreen Qt runtimes do not enumerate Windows fonts
+        automatically even though Meiryo is installed. Linux and other
+        environments simply retain their normal application font.
+        """
+
+        font_path = Path("C:/Windows/Fonts/meiryo.ttc")
+        if not font_path.is_file():
+            return
+        font_id = QFontDatabase.addApplicationFont(str(font_path))
+        if font_id < 0:
+            return
+        families = QFontDatabase.applicationFontFamilies(font_id)
+        if families:
+            self.setFont(QFont(families[0], 9))
 
     def _apply_default_launch_geometry(self) -> None:
         """Official Battle Record window client size is fixed at 1920x1080
@@ -696,6 +965,21 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         sides_row.addWidget(self.self_state_editor)
         sides_row.addWidget(self.opponent_state_editor)
         editor_layout.addLayout(sides_row)
+        self.ability_resolution_group = QGroupBox("相手の特性候補")
+        ability_layout = QHBoxLayout(self.ability_resolution_group)
+        self.opponent_ability_box = QComboBox()
+        self.confirm_opponent_ability_button = QPushButton("特性を確認")
+        self.confirm_opponent_ability_button.clicked.connect(self._on_confirm_opponent_ability)
+        ability_layout.addWidget(self.opponent_ability_box, 1)
+        ability_layout.addWidget(self.confirm_opponent_ability_button)
+        editor_layout.addWidget(self.ability_resolution_group)
+        self.review_effect_candidate = _EffectCandidateCard(self._apply_review_effect)
+        editor_layout.addWidget(self.review_effect_candidate)
+        self.review_state_event_button = QPushButton("＋ 状態変化を記録")
+        self.review_state_event_button.clicked.connect(
+            lambda: self._open_state_event_dialog("review")
+        )
+        editor_layout.addWidget(self.review_state_event_button)
         state_layout.addWidget(self.current_state_editor_container)
 
         self.action_result_delta_group = QGroupBox(
@@ -726,6 +1010,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         delta_sides_row.addWidget(self.self_delta_editor)
         delta_sides_row.addWidget(self.opponent_delta_editor)
         delta_layout.addLayout(delta_sides_row)
+        self.result_effect_candidate = _EffectCandidateCard(self._apply_result_effect)
+        delta_layout.addWidget(self.result_effect_candidate)
+        self.result_state_event_button = QPushButton("＋ 状態変化を記録")
+        self.result_state_event_button.clicked.connect(
+            lambda: self._open_state_event_dialog("result")
+        )
+        delta_layout.addWidget(self.result_state_event_button)
 
         self.rich_gemini_group = QGroupBox("Gemini Turn Advice — rich state")
         rich_layout = QFormLayout(self.rich_gemini_group)
@@ -734,6 +1025,16 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.rich_gemini_denial_label.setWordWrap(True)
         rich_layout.addRow("送信可否", self.rich_gemini_status_label)
         rich_layout.addRow("理由", self.rich_gemini_denial_label)
+        self.opponent_intel_widget = _OpponentIntelWidget()
+
+        self.actual_action_type_box.currentTextChanged.connect(self._update_v5_action_disclosure)
+        self.opponent_action_type_box.currentTextChanged.connect(self._update_v5_action_disclosure)
+        for opponent_type in ("NO ACTION", "UNKNOWN"):
+            if self.opponent_action_type_box.findText(opponent_type) < 0:
+                self.opponent_action_type_box.addItem(opponent_type)
+        self.actual_action_name_box.currentTextChanged.connect(self._propose_actual_action_effect)
+        self.opponent_action_name_input.textChanged.connect(self._propose_opponent_action_effect)
+        self.opponent_active_input.textChanged.connect(self._on_opponent_species_changed)
 
     # -- layout restructuring ---------------------------------------------------
 
@@ -772,8 +1073,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         center_container = self._center_column_layout.parentWidget()
         right_container = self._right_column_layout.parentWidget()
 
-        # Extract the 5 primary operation buttons from wherever the base
-        # chain built them; the fixed bottom bar owns them from now on.
+        # Extract the four v5 lifecycle buttons. The legacy standalone
+        # Gemini button remains callable internally but is not an operator
+        # phase/button: SEND itself confirms the review and dispatches.
         self._extract_widget(self.ready_group, self.start_turn_button)
         self._extract_widget(self.turn_facts_group, self.confirm_turn_facts_button)
         self._extract_widget(self.actual_action_group, self.record_action_button)
@@ -784,11 +1086,12 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self.turn_gemini_box.setVisible(False)
 
         self.start_turn_button.setText("Turn撮影")
-        self.confirm_turn_facts_button.setText("facts/state確定")
+        self.confirm_turn_facts_button.setText("SEND TURN TO GEMINI")
         self.record_action_button.setText("行動・結果記録")
         self.next_turn_button.setText("NEXT TURN")
         if gemini_send_button is not None:
-            gemini_send_button.setText("Gemini送信")
+            gemini_send_button.setVisible(False)
+            self._bundle_c_gemini_send_button = gemini_send_button
 
         # Compact 2-column reflow: same widgets, same signal wiring, just
         # laid out 2-per-row instead of 1-per-row so the fixed,
@@ -952,9 +1255,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self.diagnostics_drawer.add_widget(roi_widget)
 
         # -- terminal-flow drawer: match end/export/recovery -------------------
-        self.terminal_flow_drawer = _CollapsibleSection(
-            "試合終了・Export・復旧"
-        )
+        self.terminal_flow_drawer = _CollapsibleSection("試合終了・Export・復旧")
         for name in (
             "match_end_group",
             "match_summary_group",
@@ -987,12 +1288,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # these editable facts/state rows never get compressed into an
         # unusable, overlapping size.
         for non_preview_row in (self.current_state_group, self.action_result_delta_group):
-            non_preview_row.setSizePolicy(
-                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
-            )
+            non_preview_row.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         self._center_column_layout.addWidget(self.current_state_group)
         self._center_column_layout.addWidget(self.action_result_delta_group)
         self._right_column_layout.insertWidget(0, self.rich_gemini_group)
+        self._right_column_layout.insertWidget(1, self.opponent_intel_widget)
 
         # UGREEN LIVE is the largest region of the center column (mock
         # 5203292374/5203546707) -- full width, no height cap, a high
@@ -1094,11 +1394,14 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         bottom_bar_layout = QHBoxLayout(bottom_bar)
         bottom_bar_layout.addWidget(self.start_turn_button)
         bottom_bar_layout.addWidget(self.confirm_turn_facts_button)
-        if gemini_send_button is not None:
-            bottom_bar_layout.addWidget(gemini_send_button)
-            self._bundle_c_gemini_send_button = gemini_send_button
         bottom_bar_layout.addWidget(self.record_action_button)
         bottom_bar_layout.addWidget(self.next_turn_button)
+        self.lifecycle_buttons = (
+            self.start_turn_button,
+            self.confirm_turn_facts_button,
+            self.record_action_button,
+            self.next_turn_button,
+        )
 
         page = QWidget()
         page_layout = QVBoxLayout(page)
@@ -1246,7 +1549,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
 
         self.start_turn_button.setText("Turn撮影")
-        self.confirm_turn_facts_button.setText("facts/state確定")
+        self.confirm_turn_facts_button.setText("SEND TURN TO GEMINI")
         self.record_action_button.setText("行動・結果記録")
         self.next_turn_button.setText("NEXT TURN")
 
@@ -1322,8 +1625,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
         if draft_not_yet_promoted:
             self.current_state_draft_label.setText(
-                "未確認 draft からの引き継ぎです。"
-                "人間の確認が必要です。"
+                "未確認 draft からの引き継ぎです。人間の確認が必要です。"
             )
             self.current_state_draft_label.setVisible(True)
             if editable and self._last_rendered_session_state == "TURN_CAPTURE_PENDING":
@@ -1335,11 +1637,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if legacy_gemini_box is not None:
             legacy_gemini_box.setVisible(False)
 
-        self.action_result_delta_group.setVisible(
-            projection.primary_cta == "RECORD_ACTUAL_ACTION"
-        )
+        self.action_result_delta_group.setVisible(projection.primary_cta == "RECORD_ACTUAL_ACTION")
 
-        self.rich_gemini_group.setVisible(projection.primary_cta == "REQUEST_TURN_ADVICE")
+        self.rich_gemini_group.setVisible(turn_state)
         status = self._bundle_c_controller.rich_turn_advice_gemini_status()
         self.rich_gemini_status_label.setText(_RICH_STATUS_LABELS.get(status.status, status.status))
         if summary.provider_ready:
@@ -1359,6 +1659,14 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 and summary.provider_ready
                 and status.status != "PENDING"
             )
+            gemini_button.setVisible(False)
+
+        species = self.opponent_active_input.text().strip()
+        entity_id = self._opponent_entity_id(species)
+        remembered_ability = self._bundle_c_controller.opponent_ability_for_entity(entity_id)
+        self._render_ability_resolution(species, remembered_ability, editable)
+        self._render_opponent_intel(species, remembered_ability)
+        self._update_v5_action_disclosure()
 
         self.next_turn_button.setEnabled(
             self.next_turn_button.isEnabled() and projection.primary_cta == "NEXT_TURN"
@@ -1410,9 +1718,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if not self._mutation_slots_allowed():
             return
         moves = [field.text().strip() for field in self.move_inputs if field.text().strip()]
-        switches = [
-            checkbox.text() for checkbox in self.switch_checkboxes if checkbox.isChecked()
-        ]
+        switches = [checkbox.text() for checkbox in self.switch_checkboxes if checkbox.isChecked()]
         self_active_known = _active_known_from_combo(self.self_active_box)
         opponent_active_known = _active_known_from_line(self.opponent_active_input)
         self_hp_known = _hp_known_from_combo(self.self_hp_box)
@@ -1438,12 +1744,24 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             terrain=self.terrain_field.to_known(),
         )
         self.render_view(view)
+        # v5 has no separate facts/state phase. This trusted click is the
+        # final pre-send confirmation and may dispatch only through the
+        # fake/injected transport authorized for this implementation bundle.
+        if (
+            view.error_message is None
+            and view.projection.session_state == "TURN_REVIEWED"
+            and self._bundle_c_controller.rich_turn_advice_is_injected()
+        ):
+            self._on_trusted_send_turn_to_gemini()
 
     def _on_record_action(self, _checked: bool = False) -> None:
         if not self._mutation_slots_allowed():
             return
         opponent_type = self.opponent_action_type_box.currentText()
         if opponent_type == "選択してください":
+            opponent_type = ""
+        if opponent_type in {"NO ACTION", "UNKNOWN"}:
+            self.opponent_action_name_input.setText(opponent_type)
             opponent_type = ""
         action_type = self.actual_action_type_box.currentText()
         action_name = self.actual_action_name_box.currentText().strip()
@@ -1481,13 +1799,205 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
         self.render_view(view)
 
+    # -- Battle Record v5 interaction helpers --------------------------------
+
+    @staticmethod
+    def _opponent_entity_id(species: str) -> str:
+        return f"opponent-active:{species.strip() or 'unknown'}"
+
+    def _render_ability_resolution(
+        self, species: str, remembered: str | None, editable: bool
+    ) -> None:
+        candidates = self._bundle_c_controller.opponent_ability_candidates(species)
+        should_ask = editable and remembered is None and len(candidates) > 1
+        self.ability_resolution_group.setVisible(should_ask)
+        if not should_ask:
+            return
+        current_items = tuple(
+            self.opponent_ability_box.itemText(index)
+            for index in range(self.opponent_ability_box.count())
+        )
+        if current_items != candidates:
+            self.opponent_ability_box.clear()
+            self.opponent_ability_box.addItems(candidates)
+
+    def _on_opponent_species_changed(self, species: str) -> None:
+        remembered = self._bundle_c_controller.opponent_ability_for_entity(
+            self._opponent_entity_id(species)
+        )
+        summary = self._bundle_c_controller.turn_state_summary()
+        editable = summary.identity is not None and summary.confirmed_state is None
+        self._render_ability_resolution(species, remembered, editable)
+        self._render_opponent_intel(species, remembered)
+
+    def _render_opponent_intel(self, species: str, remembered: str | None) -> None:
+        self.opponent_intel_widget.render_intel(
+            build_opponent_intel(
+                species=species,
+                match_facts=MatchOpponentFacts(ability=remembered),
+                provider=self._opponent_meta_provider,
+            )
+        )
+
+    def _on_confirm_opponent_ability(self, _checked: bool = False) -> None:
+        species = self.opponent_active_input.text().strip()
+        ability = self.opponent_ability_box.currentText()
+        confirmed = self._bundle_c_controller.confirm_opponent_ability(
+            opponent_entity_id=self._opponent_entity_id(species),
+            species=species,
+            ability=ability,
+        )
+        self.ability_resolution_group.setVisible(confirmed is None)
+        if confirmed is not None:
+            entry = find_effect(confirmed)
+            if entry is not None:
+                self.review_effect_candidate.propose(entry, prefix=f"相手の{entry.display_name_ja}")
+        self.render_view()
+
+    def _open_state_event_dialog(self, context: str) -> None:
+        callback = self._apply_review_effect if context == "review" else self._apply_result_effect
+        dialog = _StateEventDialog(self, context=context, apply_callback=callback)
+        self._state_event_dialog = dialog
+        dialog.show()
+
+    def _propose_actual_action_effect(self, name: str) -> None:
+        if self.actual_action_type_box.currentText() != "MOVE":
+            return
+        entry = find_effect(name)
+        if entry is not None:
+            self.result_effect_candidate.propose(entry, prefix=f"自分 {entry.display_name_ja}")
+
+    def _propose_opponent_action_effect(self, name: str) -> None:
+        if self.opponent_action_type_box.currentText() != "MOVE":
+            return
+        entry = find_effect(name)
+        if entry is not None:
+            self.result_effect_candidate.propose(entry, prefix=f"相手 {entry.display_name_ja}")
+
+    def _update_v5_action_disclosure(self, _value: str = "") -> None:
+        own_type = self.actual_action_type_box.currentText()
+        self.actual_action_name_box.setVisible(own_type in {"MOVE", "SWITCH"})
+        opponent_type = self.opponent_action_type_box.currentText()
+        self.opponent_action_name_input.setVisible(opponent_type in {"MOVE", "SWITCH"})
+        if opponent_type in {"NO ACTION", "UNKNOWN"}:
+            self.opponent_action_name_input.setText(opponent_type)
+
+    def _apply_review_effect(self, entry: EffectCatalogEntry) -> None:
+        self._apply_effect(entry, source_side="opponent", result_phase=False)
+
+    def _apply_result_effect(self, entry: EffectCatalogEntry) -> None:
+        source_side = (
+            "opponent"
+            if self.opponent_action_type_box.currentText() == "MOVE"
+            and find_effect(self.opponent_action_name_input.text()) == entry
+            else "self"
+        )
+        self._apply_effect(entry, source_side=source_side, result_phase=True)
+
+    def _apply_effect(
+        self, entry: EffectCatalogEntry, *, source_side: str, result_phase: bool
+    ) -> None:
+        target_side = source_side
+        if entry.target is EffectTarget.OPPONENT:
+            target_side = "self" if source_side == "opponent" else "opponent"
+        if result_phase:
+            side_editor = (
+                self.self_delta_editor if target_side == "self" else self.opponent_delta_editor
+            )
+            self._apply_effects_to_delta(entry, side_editor)
+        else:
+            state_editor = (
+                self.self_state_editor if target_side == "self" else self.opponent_state_editor
+            )
+            self._apply_effects_to_state(entry, state_editor)
+        self._apply_field_effects(entry, result_phase=result_phase)
+
+    @staticmethod
+    def _stage_effect(effect: str) -> tuple[str, int] | None:
+        mapping = {
+            "攻撃": "attack_stage",
+            "防御": "defense_stage",
+            "特攻": "special_attack_stage",
+            "特防": "special_defense_stage",
+            "素早さ": "speed_stage",
+            "命中": "accuracy_stage",
+            "回避": "evasion_stage",
+        }
+        for label, field_name in mapping.items():
+            if effect.startswith(label) and effect[len(label) :] in {
+                "+1",
+                "+2",
+                "+3",
+                "-1",
+                "-2",
+                "-3",
+            }:
+                return field_name, int(effect[len(label) :])
+        return None
+
+    def _apply_effects_to_state(self, entry: EffectCatalogEntry, editor: _SideStateEditor) -> None:
+        if any("能力変化を0" in effect for effect in entry.deterministic_effects):
+            for field in editor.stage_fields.values():
+                field.set_known(Known.confirmed(0, provenance_chain=_HUMAN_INPUT))
+        for effect in entry.deterministic_effects:
+            stage = self._stage_effect(effect)
+            if stage is not None:
+                name, amount = stage
+                field = editor.stage_fields[name]
+                current = field.spin.value() if not field.unknown_box.isChecked() else 0
+                field.set_known(
+                    Known.confirmed(
+                        max(-6, min(6, current + amount)),
+                        provenance_chain=_HUMAN_INPUT,
+                    )
+                )
+            elif effect in {"やけど", "まひ", "もうどく", "ねむり"}:
+                editor.status_field.set_known(
+                    Known.confirmed(effect, provenance_chain=_HUMAN_INPUT)
+                )
+
+    def _apply_effects_to_delta(self, entry: EffectCatalogEntry, editor: _SideDeltaEditor) -> None:
+        if any("能力変化を0" in effect for effect in entry.deterministic_effects):
+            for field in editor.stage_fields.values():
+                field.mode_box.setCurrentText("CHANGED")
+                field.spin.setValue(0)
+        for effect in entry.deterministic_effects:
+            stage = self._stage_effect(effect)
+            if stage is not None:
+                name, amount = stage
+                field = editor.stage_fields[name]
+                field.mode_box.setCurrentText("CHANGED")
+                field.spin.setValue(max(-6, min(6, field.spin.value() + amount)))
+            elif effect in {"やけど", "まひ", "もうどく", "ねむり"}:
+                editor.status_field.mode_box.setCurrentText("CHANGED")
+                editor.status_field.line.setText(effect)
+
+    def _apply_field_effects(self, entry: EffectCatalogEntry, *, result_phase: bool) -> None:
+        for effect in entry.deterministic_effects:
+            if effect.startswith("天候:"):
+                value = effect.removeprefix("天候:")
+                if result_phase:
+                    self.weather_delta_field.mode_box.setCurrentText("CHANGED")
+                    self.weather_delta_field.line.setText(value)
+                else:
+                    self.weather_field.set_known(
+                        Known.confirmed(value, provenance_chain=_HUMAN_INPUT)
+                    )
+            elif effect.startswith("場:"):
+                value = effect.removeprefix("場:")
+                if result_phase:
+                    self.terrain_delta_field.mode_box.setCurrentText("CHANGED")
+                    self.terrain_delta_field.line.setText(value)
+                else:
+                    self.terrain_field.set_known(
+                        Known.confirmed(value, provenance_chain=_HUMAN_INPUT)
+                    )
+
     def _on_trusted_send_turn_to_gemini(self) -> None:
         if not self._persistence_reads_allowed:
             return
         warnings = tuple(
-            part.strip()
-            for part in self.mock_turn_warnings_input.text().split(";")
-            if part.strip()
+            part.strip() for part in self.mock_turn_warnings_input.text().split(";") if part.strip()
         )
         view = self._bundle_c_controller.send_rich_turn_advice_to_gemini(
             action_type=self.mock_turn_action_type_box.currentText(),

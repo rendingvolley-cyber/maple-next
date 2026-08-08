@@ -124,7 +124,7 @@ def test_window_constructs_with_fixed_header_body_and_bottom_bar(tmp_path: Path)
     assert window.header_tabs.count() == 2
     assert window.header_tabs.tabText(1) == "バトルレコード"
     assert window.start_turn_button.text() == "Turn撮影"
-    assert window.confirm_turn_facts_button.text() == "facts/state確定"
+    assert window.confirm_turn_facts_button.text() == "SEND TURN TO GEMINI"
     assert window.record_action_button.text() == "行動・結果記録"
     assert window.next_turn_button.text() == "NEXT TURN"
     assert window.diagnostics_drawer is not None
@@ -159,10 +159,10 @@ def test_known_int_field_confirmed_zero_is_distinct_from_unknown() -> None:
     assert known.value == 0
 
 
-def test_delta_field_defaults_unknown_never_unchanged() -> None:
+def test_delta_field_defaults_to_v5_internal_unchanged() -> None:
     field = _DeltaIntField()
     delta = field.to_delta()
-    assert delta.observation is ChangeObservation.UNKNOWN
+    assert delta.observation is ChangeObservation.UNCHANGED
     assert delta.after_value is None
 
 

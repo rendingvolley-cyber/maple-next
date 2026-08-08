@@ -44,6 +44,7 @@ from maple_next.domain.battle_events import (
     apply_stage_event,
 )
 from maple_next.domain.enums import ActionType, ResultDisposition
+from maple_next.domain.opponent_intel import POSSIBLE_ABILITIES_BY_SPECIES
 from maple_next.domain.turn_state import (
     ActionResultDelta,
     ConfirmationMeta,
@@ -351,6 +352,60 @@ class TurnStateFlowController(MatchFlowController):
             turn_gemini_adapter,
         )
         self._rich_turn_gemini_adapter = rich_turn_gemini_adapter
+
+    # -- Battle Record v5 match-scoped opponent ability memory ---------------
+
+    def opponent_ability_candidates(self, species: str) -> tuple[str, ...]:
+        """Species possibilities plus explicit unresolved choice, offline."""
+
+        possible = POSSIBLE_ABILITIES_BY_SPECIES.get(species.strip(), ())
+        return (*possible, "不明") if possible else ("不明",)
+
+    def opponent_ability_for_entity(self, opponent_entity_id: str) -> str | None:
+        identity = self._safe_current_identity()
+        if identity is None:
+            return None
+        return self._repository.get_opponent_ability_memory(
+            session_id=identity.session_id,
+            match_id=identity.match_id,
+            generation=identity.generation,
+            opponent_entity_id=opponent_entity_id,
+        )
+
+    def rich_turn_advice_is_injected(self) -> bool:
+        """True only for the fake/injected transport authorized in v5."""
+
+        return (
+            self._rich_turn_gemini_adapter is not None
+            and self._rich_turn_gemini_adapter.uses_injected_transport
+        )
+
+    def confirm_opponent_ability(
+        self, *, opponent_entity_id: str, species: str, ability: str
+    ) -> str | None:
+        """Remember a human answer for this match/entity.
+
+        ``不明`` remains unresolved (no persistence row), so it can never be
+        mistaken for a confirmed ability and may be corrected later.
+        """
+
+        identity = self._safe_current_identity()
+        if identity is None:
+            raise TurnStateError("NO_ACTIVE_TURN_IDENTITY")
+        normalized = ability.strip()
+        allowed = self.opponent_ability_candidates(species)
+        if normalized not in allowed:
+            raise ValueError("ability is not a possible human choice for this species")
+        with self._repository.transaction():
+            self._repository.set_opponent_ability_memory(
+                session_id=identity.session_id,
+                match_id=identity.match_id,
+                generation=identity.generation,
+                opponent_entity_id=opponent_entity_id,
+                species=species,
+                ability=None if normalized == "不明" else normalized,
+            )
+        return None if normalized == "不明" else normalized
 
     # -- identity/read helpers ------------------------------------------------
 

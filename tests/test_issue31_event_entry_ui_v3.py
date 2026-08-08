@@ -381,7 +381,9 @@ def test_unapplied_preview_state_is_not_part_of_side_delta(tmp_path: Path) -> No
     assert editor._pending_stage_preview
 
     delta = editor.to_side_delta()
-    assert delta.attack_stage.observation is ChangeObservation.UNKNOWN
+    # v5: untouched domains are internally UNCHANGED; the preview alone
+    # still must not cross the human-Apply boundary into CHANGED.
+    assert delta.attack_stage.observation is ChangeObservation.UNCHANGED
 
 
 # --- item 16: carry-over is not silently treated as an ordinary reset -------

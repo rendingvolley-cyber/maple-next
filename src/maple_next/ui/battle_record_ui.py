@@ -25,6 +25,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -36,6 +37,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -54,7 +56,21 @@ from maple_next.ui.turn_snapshot_official_window import TurnSnapshotMatchFlowWin
 from maple_next.ui.turn_state_flow import TurnStateFlowController, TurnStateSummaryView
 
 _BATTLE_RECORD_TAB_INDEX = 1
-_PREVIEW_MAX_HEIGHT = 64
+# Default official-launch client size (visual-parity remediation,
+# 5223723582): resizable, not fixed -- the human can freely resize the
+# window. 1280x720 remains the supported functional-minimum viewport
+# (mock 5203292374/5203546707) and is exercised by manual resize, not by
+# this constant.
+_DEFAULT_LAUNCH_WIDTH = 1440
+_DEFAULT_LAUNCH_HEIGHT = 900
+_MINIMUM_SUPPORTED_WIDTH = 1280
+_MINIMUM_SUPPORTED_HEIGHT = 720
+# Fixed Turn image thumbnail width band from the accepted mock: ~230px at
+# 1440x900 down to ~185px at 1280x720. A single bounded width (rather than
+# a hardcoded pixel) lets Qt's layout shrink it within that band as the
+# window is resized between the two targets.
+_FIXED_TURN_IMAGE_MAX_WIDTH = 230
+_FIXED_TURN_IMAGE_MIN_WIDTH = 185
 _HUMAN_INPUT = (ProvenanceStep.HUMAN_INPUT,)
 
 _STAGE_FIELDS: tuple[tuple[str, str], ...] = (
@@ -461,7 +477,32 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._bundle_c_controller: TurnStateFlowController = controller
         self._build_bundle_c_state_widgets()
         self._restructure_battle_record_layout()
+        self._apply_default_launch_geometry()
         self.render_view()
+
+    def _apply_default_launch_geometry(self) -> None:
+        """Default official-launch client size is 1440x900 (resizable).
+
+        Not a fixed size -- ``setMinimumSize`` only floors manual resize at
+        the 1280x720 functional-minimum viewport; the human can resize
+        larger or down to that floor freely. When the available screen work
+        area is smaller than 1440x900, degrade to the largest safe size
+        that still keeps at least the 1280x720 floor when the screen can
+        offer it, rather than opening off-screen.
+        """
+
+        self.setMinimumSize(_MINIMUM_SUPPORTED_WIDTH, _MINIMUM_SUPPORTED_HEIGHT)
+        target_width, target_height = _DEFAULT_LAUNCH_WIDTH, _DEFAULT_LAUNCH_HEIGHT
+        screen = self.screen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            target_width = min(target_width, available.width())
+            target_height = min(target_height, available.height())
+            target_width = max(target_width, min(_MINIMUM_SUPPORTED_WIDTH, available.width()))
+            target_height = max(
+                target_height, min(_MINIMUM_SUPPORTED_HEIGHT, available.height())
+            )
+        self.resize(target_width, target_height)
 
     # -- new Bundle A/B widgets ------------------------------------------------
 
@@ -704,33 +745,64 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         header_layout.addLayout(drawer_row)
 
         # -- left / center / right, plus the two new Bundle A/B groups ---------
+        # Preferred/Minimum (never shrink below sizeHint) on every non-live
+        # row -- only the live preview (Expanding, below) is allowed to give
+        # up space first when the fixed-height center column runs tight, so
+        # these editable facts/state rows never get compressed into an
+        # unusable, overlapping size.
+        for non_preview_row in (self.current_state_group, self.action_result_delta_group):
+            non_preview_row.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+            )
         self._center_column_layout.addWidget(self.current_state_group)
         self._center_column_layout.addWidget(self.action_result_delta_group)
         self._right_column_layout.insertWidget(0, self.rich_gemini_group)
 
-        # Live preview and the fixed Turn image are both ~16:9 -- placing
-        # them side by side instead of stacked keeps both always visible
-        # (neither is hidden or shrunk below evidentiary size) while
-        # roughly halving their combined height footprint, which is what
-        # actually makes the fixed-height, non-scrolling center column
-        # viable at 900/720px.
+        # UGREEN LIVE is the largest region of the center column (mock
+        # 5203292374/5203546707) -- full width, no height cap, a high
+        # stretch weight so it claims the majority of available vertical
+        # space at both 1440x900 (~420-450px target) and, after manual
+        # resize, 1280x720 (~280-310px target). ``_AspectRatioPreviewLabel``
+        # already keeps it at a 16:9 heightForWidth.
+        self._detach_from_parent_layout(self.capture_status_group)
+        # The base class leaves capture_preview_label's vertical size policy
+        # at Preferred, which pins a heightForWidth widget to a single
+        # computed height regardless of stretch weight or leftover column
+        # space. Bundle C is the one place that needs it to actually grow
+        # into the "largest region" role from the mock, so promote it to
+        # Expanding here rather than in shared base UI code other windows
+        # also use.
+        self.capture_preview_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.actual_action_group.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
+        self._center_column_layout.insertWidget(0, self.capture_status_group, 20)
+
+        # Fixed Turn image sits beside the current Turn facts, mock-style
+        # (thumbnail column ~185-230px wide, facts filling the remainder),
+        # not stacked with live preview.
         turn_snapshot_group = getattr(self, "turn_snapshot_group", None)
         if turn_snapshot_group is not None:
-            self._detach_from_parent_layout(self.capture_status_group)
             self._detach_from_parent_layout(turn_snapshot_group)
-            # Hard height cap on both evidentiary images -- still always
-            # visible at a legible size, but bounded so the fixed,
-            # non-scrolling center column can actually fit 900/720px.
-            self.capture_preview_label.setMinimumSize(100, 56)
-            self.capture_preview_label.setMaximumHeight(_PREVIEW_MAX_HEIGHT)
-            self.turn_snapshot_image_label.setMinimumSize(100, 56)
-            self.turn_snapshot_image_label.setMaximumHeight(_PREVIEW_MAX_HEIGHT)
-            preview_row = QWidget()
-            preview_row_layout = QHBoxLayout(preview_row)
-            preview_row_layout.setContentsMargins(0, 0, 0, 0)
-            preview_row_layout.addWidget(self.capture_status_group, 1)
-            preview_row_layout.addWidget(turn_snapshot_group, 1)
-            self._center_column_layout.insertWidget(0, preview_row)
+            self._detach_from_parent_layout(self.turn_facts_group)
+            turn_snapshot_group.setMaximumWidth(_FIXED_TURN_IMAGE_MAX_WIDTH)
+            turn_snapshot_group.setMinimumWidth(_FIXED_TURN_IMAGE_MIN_WIDTH)
+            for never_shrink in (turn_snapshot_group, self.turn_facts_group):
+                never_shrink.setSizePolicy(
+                    QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+                )
+            self.turn_snapshot_image_label.setMaximumWidth(_FIXED_TURN_IMAGE_MAX_WIDTH - 12)
+            self.turn_snapshot_image_label.setMinimumSize(
+                _FIXED_TURN_IMAGE_MIN_WIDTH - 12, 104
+            )
+            fixed_image_facts_row = QWidget()
+            fixed_image_facts_layout = QHBoxLayout(fixed_image_facts_row)
+            fixed_image_facts_layout.setContentsMargins(0, 0, 0, 0)
+            fixed_image_facts_layout.addWidget(turn_snapshot_group, 0)
+            fixed_image_facts_layout.addWidget(self.turn_facts_group, 1)
+            self._center_column_layout.insertWidget(1, fixed_image_facts_row)
 
         # Only left (confirmed log) and right (Gemini detail) get their own
         # scroll container -- center is the primary work area and must never
@@ -738,9 +810,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setWidget(left_container)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
         right_scroll.setWidget(right_container)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         body_row = QHBoxLayout()
         body_row.addWidget(left_scroll, 18)

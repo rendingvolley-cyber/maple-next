@@ -58,8 +58,12 @@ from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers import turn_request as legacy_turn_request
 from maple_next.providers.turn_advice_rich_state import (
     RICH_STATE_REQUEST_CONTRACT_VERSION,
+    build_rich_provider_prompt,
+    build_rich_provider_request_body,
     build_rich_state_turn_advice_request,
+    canonical_rich_request_dict,
 )
+from maple_next.providers.turn_response import TurnAdviceSchemaError, turn_advice_body_from_dict
 from maple_next.workers.contracts.models import JobEnvelope, JobType
 from tests.fixtures.turn_advice import build_sample_request
 
@@ -405,6 +409,89 @@ def test_rich_request_prompt_uses_shared_renderer_not_a_copy() -> None:
     source = inspect.getsource(build_rich_provider_prompt)
     assert "_render_provider_prompt_from_canonical_request" in source
     assert shared_renderer.__module__ == "maple_next.providers.turn_request"
+
+
+def test_rich_prompt_requires_japanese_only_for_human_facing_text(
+    rich_fixture: RichSessionFixture,
+) -> None:
+    state = rich_fixture.repository.get_confirmed_turn_state(rich_fixture.confirmed_state_id)
+    actions = rich_fixture.repository.list_confirmed_legal_action_selections_for_identity(
+        rich_fixture.identity()
+    )
+    request = build_rich_state_turn_advice_request(
+        confirmed_state=state,
+        confirmed_legal_actions=actions,
+        current_identity=rich_fixture.identity(),
+        latest_confirmed_state_id=state.confirmed_state_id,
+        latest_open_draft_turn_number=None,
+        latest_open_draft_battle_revision=None,
+        selected_three=("Dondozo", "Gholdengo", "Urshifu"),
+        self_active="Dondozo",
+    )
+    canonical_before = canonical_rich_request_dict(request)
+    request_hash_before = request.request_hash
+
+    prompt = build_rich_provider_prompt(request)
+
+    assert (
+        "Write opponent_prediction.summary, every reasons item, and every warnings item "
+        "in natural Japanese."
+    ) in prompt
+    assert "these human-facing fields must be Japanese" in prompt
+    assert "Do not translate or alter machine/contract values" in prompt
+    assert "action_id" in prompt
+    assert "action_type" in prompt
+    assert "action_name" in prompt
+    assert canonical_rich_request_dict(request) == canonical_before
+    assert request.request_hash == request_hash_before
+
+
+def test_rich_japanese_instruction_preserves_strict_response_schema(
+    rich_fixture: RichSessionFixture,
+) -> None:
+    state = rich_fixture.repository.get_confirmed_turn_state(rich_fixture.confirmed_state_id)
+    actions = rich_fixture.repository.list_confirmed_legal_action_selections_for_identity(
+        rich_fixture.identity()
+    )
+    request = build_rich_state_turn_advice_request(
+        confirmed_state=state,
+        confirmed_legal_actions=actions,
+        current_identity=rich_fixture.identity(),
+        latest_confirmed_state_id=state.confirmed_state_id,
+        latest_open_draft_turn_number=None,
+        latest_open_draft_battle_revision=None,
+        selected_three=("Dondozo", "Gholdengo", "Urshifu"),
+        self_active="Dondozo",
+    )
+
+    body = build_rich_provider_request_body(request)
+    assert body["generationConfig"]["responseMimeType"] == "application/json"
+    assert body["generationConfig"]["responseJsonSchema"] == request.requested_output_schema
+    assert request.requested_output_schema["additionalProperties"] is False
+
+    move = next(action for action in request.legal_actions if action.action_type is ActionType.MOVE)
+    response = {
+        "recommended_action": {
+            "action_id": move.action_id,
+            "action_type": move.action_type.value,
+            "action_name": move.action_name,
+        },
+        "reasons": ["現在の盤面で最も安定した価値があります。"],
+        "warnings": ["相手の持ち物は未確認です。"],
+        "opponent_prediction": {
+            "category": "UNKNOWN",
+            "predicted_action": None,
+            "summary": "情報が不足しているため、相手の行動は断定できません。",
+            "confidence": 0.25,
+        },
+    }
+    parsed = turn_advice_body_from_dict(response)
+    assert parsed.reasons == ("現在の盤面で最も安定した価値があります。",)
+    assert parsed.opponent_prediction.category == "UNKNOWN"
+
+    invalid = {**response, "unexpected": "日本語でも追加fieldは禁止"}
+    with pytest.raises(TurnAdviceSchemaError, match="top_level_unknown_fields"):
+        turn_advice_body_from_dict(invalid)
 
 
 # --- 3. Forge resistance: request_rich_turn_advice ---------------------------

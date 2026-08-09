@@ -37,7 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Final
 
 from maple_next.domain.enums import ActionType
 from maple_next.domain.turn_state import (
@@ -74,6 +74,16 @@ RICH_STATE_REQUEST_CONTRACT_VERSION = "maple-turn-advice.v3"
 #: legacy lane; ``contract_version`` is what distinguishes a rich request's
 #: job envelope from a legacy one.
 RICH_STATE_JOB_TYPE = "TURN_ADVICE"
+
+#: Rich-provider-only presentation constraint. This is deliberately appended
+#: at the canonical rich prompt boundary rather than changing the shared
+#: Initial Prompt, the response schema, or any machine-facing request value.
+_RICH_JAPANESE_HUMAN_TEXT_INSTRUCTION: Final[str] = """Human-facing language requirement:
+Write opponent_prediction.summary, every reasons item, and every warnings item in natural Japanese.
+Even when the canonical request contains English text, these human-facing fields must be Japanese.
+Do not translate or alter machine/contract values, including recommended_action action_id,
+action_type, or action_name; opponent_prediction category, predicted_action, or confidence;
+source/model/binding/legality values; IDs; hashes; or enum-like tokens."""
 
 
 class RichStateRequestError(Exception):
@@ -253,7 +263,10 @@ def build_rich_provider_prompt(request: RichStateTurnAdviceRequest) -> str:
     is never copied or independently reimplemented here.
     """
 
-    return _render_provider_prompt_from_canonical_request(canonical_rich_request_dict(request))
+    prompt = _render_provider_prompt_from_canonical_request(
+        canonical_rich_request_dict(request)
+    )
+    return f"{prompt}\n\n{_RICH_JAPANESE_HUMAN_TEXT_INSTRUCTION}"
 
 
 def build_rich_provider_request_body(request: RichStateTurnAdviceRequest) -> dict[str, Any]:

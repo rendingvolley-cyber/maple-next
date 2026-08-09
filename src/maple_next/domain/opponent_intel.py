@@ -11,6 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from maple_next.domain.effect_catalog import (
+    EFFECT_CATALOG,
+    EffectSourceType,
+    EffectTiming,
+)
+
 UNKNOWN_ABILITY = "不明"
 
 
@@ -35,6 +41,28 @@ POSSIBLE_ABILITIES_BY_SPECIES: dict[str, tuple[str, ...]] = {
     "キュウコン（アローラ）": ("ゆきがくれ", "ゆきふらし"),
     "Ninetales-Alola": ("ゆきがくれ", "ゆきふらし"),
 }
+
+ENTRY_RELEVANT_ABILITY_NAMES = frozenset(
+    entry.display_name_ja
+    for entry in EFFECT_CATALOG
+    if entry.source_type is EffectSourceType.ABILITY
+    and entry.timing is EffectTiming.SWITCH_IN
+)
+
+
+def possible_abilities_for_species(species: str) -> tuple[str, ...]:
+    """Return only canonical legal abilities for one resolved species."""
+
+    return POSSIBLE_ABILITIES_BY_SPECIES.get(species.strip(), ())
+
+
+def species_has_entry_relevant_ability(species: str) -> bool:
+    """Whether a legal ability can visibly mutate supported state on entry."""
+
+    return any(
+        ability in ENTRY_RELEVANT_ABILITY_NAMES
+        for ability in possible_abilities_for_species(species)
+    )
 
 
 @dataclass(frozen=True, slots=True)

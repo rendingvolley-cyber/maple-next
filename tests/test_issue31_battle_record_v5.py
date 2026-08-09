@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
+
+import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -25,6 +27,8 @@ from maple_next.domain.opponent_intel import (
     LocalJsonOpponentMetaProvider,
     MatchOpponentFacts,
     build_opponent_intel,
+    possible_abilities_for_species,
+    species_has_entry_relevant_ability,
 )
 from maple_next.domain.turn_state import ChangeObservation
 from maple_next.providers.turn_advice_rich_state import RichStateTurnAdviceRequest
@@ -232,6 +236,105 @@ def test_match_scoped_ability_memory_reuses_known_and_unknown_remains_unresolved
         is None
     )
     assert controller.opponent_ability_for_entity(entity) is None
+    repository.close()
+
+
+def test_real_projection_match_id_replaces_demo_header(tmp_path: Path) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    assert window.battle_context_label.text() == "Match 未取得   Turn —"
+    view = controller.new_match()
+    window.render_view(view)
+
+    assert view.projection.match_id is not None
+    assert view.projection.match_id in window.battle_context_label.text()
+    assert "#demo" not in window.battle_context_label.text()
+    repository.close()
+
+
+def test_entry_ability_catalog_is_species_bound_and_fail_closed() -> None:
+    assert possible_abilities_for_species("Salamence") == ("いかく", "じしんかじょう")
+    assert possible_abilities_for_species("Pelipper") == (
+        "するどいめ",
+        "あめうけざら",
+        "あめふらし",
+    )
+    assert set(possible_abilities_for_species("Salamence")).isdisjoint(
+        {"するどいめ", "あめうけざら", "あめふらし"}
+    )
+    assert possible_abilities_for_species("unresolved-species") == ()
+    assert species_has_entry_relevant_ability("Salamence") is True
+    assert species_has_entry_relevant_ability("Dragonite") is False
+
+
+def test_entry_prompt_is_event_triggered_species_bound_and_not_generic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+
+    window.opponent_active_input.setText("Salamence")
+    assert not window.parity_ability_card.isHidden()
+    assert tuple(button.text() for button in window.parity_ability_buttons) == (
+        "いかく",
+        "じしんかじょう",
+        "不明",
+    )
+
+    original_summary = controller.turn_state_summary
+    current = original_summary()
+    assert current.identity is not None
+    next_turn_summary = replace(
+        current,
+        identity=replace(current.identity, turn_id="synthetic-next-turn", turn_number=2),
+    )
+    monkeypatch.setattr(controller, "turn_state_summary", lambda: next_turn_summary)
+    window._render_ability_resolution("Salamence", None, True)
+    assert window.parity_ability_card.isHidden()
+
+    monkeypatch.setattr(controller, "turn_state_summary", original_summary)
+    window.opponent_active_input.setText("Pelipper")
+    assert tuple(button.text() for button in window.parity_ability_buttons) == (
+        "するどいめ",
+        "あめうけざら",
+        "あめふらし",
+        "不明",
+    )
+    assert "いかく" not in {button.text() for button in window.parity_ability_buttons}
+
+    window.opponent_active_input.setText("Dragonite")
+    assert window.parity_ability_card.isHidden()
+    window.opponent_active_input.setText("unresolved-species")
+    assert window.parity_ability_card.isHidden()
+    assert controller.opponent_ability_candidates("unresolved-species") == ()
+    repository.close()
+
+
+def test_confirmed_entry_is_not_reprompted_but_unresolved_reentry_is(
+    tmp_path: Path,
+) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+
+    window.opponent_active_input.setText("Salamence")
+    window._confirm_parity_ability("いかく")
+    window.opponent_active_input.setText("Dragonite")
+    window.opponent_active_input.setText("Salamence")
+    assert window.parity_ability_card.isHidden()
+
+    window.opponent_active_input.setText("Pelipper")
+    window._confirm_parity_ability("不明")
+    assert window.parity_ability_card.isHidden()
+    window.opponent_active_input.setText("Dragonite")
+    window.opponent_active_input.setText("Pelipper")
+    assert not window.parity_ability_card.isHidden()
+    assert tuple(button.text() for button in window.parity_ability_buttons) == (
+        "するどいめ",
+        "あめうけざら",
+        "あめふらし",
+        "不明",
+    )
     repository.close()
 
 

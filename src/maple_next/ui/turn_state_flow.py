@@ -44,7 +44,7 @@ from maple_next.domain.battle_events import (
     apply_stage_event,
 )
 from maple_next.domain.enums import ActionType, ResultDisposition
-from maple_next.domain.opponent_intel import POSSIBLE_ABILITIES_BY_SPECIES
+from maple_next.domain.opponent_intel import possible_abilities_for_species
 from maple_next.domain.turn_state import (
     ActionResultDelta,
     ConfirmationMeta,
@@ -358,8 +358,8 @@ class TurnStateFlowController(MatchFlowController):
     def opponent_ability_candidates(self, species: str) -> tuple[str, ...]:
         """Species possibilities plus explicit unresolved choice, offline."""
 
-        possible = POSSIBLE_ABILITIES_BY_SPECIES.get(species.strip(), ())
-        return (*possible, "不明") if possible else ("不明",)
+        possible = possible_abilities_for_species(species)
+        return (*possible, "不明") if possible else ()
 
     def opponent_ability_for_entity(self, opponent_entity_id: str) -> str | None:
         identity = self._safe_current_identity()

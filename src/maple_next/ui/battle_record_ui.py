@@ -66,6 +66,7 @@ from maple_next.domain.opponent_intel import (
     OpponentIntelView,
     OpponentMetaProvider,
     build_opponent_intel,
+    species_has_entry_relevant_ability,
 )
 from maple_next.domain.turn_state import (
     FieldDelta,
@@ -1007,6 +1008,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
         self._evidence_dialog: QDialog | None = None
         self._state_event_dialog: QDialog | None = None
+        self._ability_entry_match_key: tuple[str, str, int] | None = None
+        self._ability_last_species = ""
+        self._ability_prompt_token: tuple[str, str] | None = None
         self._build_bundle_c_state_widgets()
         self._restructure_battle_record_layout()
         self._apply_default_launch_geometry()
@@ -1773,7 +1777,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         utility_layout = QHBoxLayout(utility_corner)
         utility_layout.setContentsMargins(8, 0, 18, 0)
         utility_layout.setSpacing(8)
-        self.battle_context_label.setText("Match #demo   Turn —")
+        self.battle_context_label.setText("Match 未取得   Turn —")
         self.header_phase_badge = QPushButton("撮影待ち")
         self.header_phase_badge.setEnabled(False)
         export_button = QPushButton("試合終了・Export")
@@ -2678,18 +2682,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         layout.addLayout(facts_row)
 
         ability_card, ability_layout = self._parity_card(
-            "相手の特性候補 — 初回確認",
-            subtitle="可能な特性から選択してください。この試合中は回答を保持します。",
+            "相手の特性候補 — 登場時確認",
+            subtitle="登場直後の変化を確認し、可能な特性から選択してください。",
         )
+        self.parity_ability_card = ability_card
         ability_row = QHBoxLayout()
+        self.parity_ability_row = ability_row
         self.parity_ability_buttons: list[QPushButton] = []
-        for ability in ("いかく", "じしんかじょう", "不明"):
-            button = QPushButton(ability)
-            button.clicked.connect(
-                lambda _checked=False, value=ability: self._confirm_parity_ability(value)
-            )
-            ability_row.addWidget(button)
-            self.parity_ability_buttons.append(button)
         ability_row.addStretch(1)
         ability_layout.addLayout(ability_row)
         layout.addWidget(ability_card)
@@ -3006,7 +3005,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             lifecycle_button.style().polish(lifecycle_button)
 
         turn_text = projection.turn_number if projection.turn_number is not None else "—"
-        self.battle_context_label.setText(f"Match #demo   Turn {turn_text}")
+        match_text = f"#{projection.match_id}" if projection.match_id else "未取得"
+        self.battle_context_label.setText(f"Match {match_text}   Turn {turn_text}")
         phase_labels = {
             "START_TURN_CAPTURE": "撮影待ち",
             "CONFIRM_TURN_FACTS": "Turn確認",
@@ -3322,9 +3322,39 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
     def _render_ability_resolution(
         self, species: str, remembered: str | None, editable: bool
     ) -> None:
+        summary = self._bundle_c_controller.turn_state_summary()
+        identity = summary.identity
+        if identity is None:
+            self._ability_entry_match_key = None
+            self._ability_last_species = ""
+            self._ability_prompt_token = None
+        else:
+            match_key = (identity.session_id, identity.match_id, identity.generation)
+            if match_key != self._ability_entry_match_key:
+                self._ability_entry_match_key = match_key
+                self._ability_last_species = ""
+                self._ability_prompt_token = None
+            normalized_species = species.strip()
+            if editable and normalized_species and normalized_species != self._ability_last_species:
+                self._ability_last_species = normalized_species
+                self._ability_prompt_token = (identity.turn_id, normalized_species)
+            elif (
+                self._ability_prompt_token is not None
+                and self._ability_prompt_token[0] != identity.turn_id
+            ):
+                self._ability_prompt_token = None
+
         candidates = self._bundle_c_controller.opponent_ability_candidates(species)
-        should_ask = editable and remembered is None and len(candidates) > 1
+        should_ask = (
+            editable
+            and remembered is None
+            and identity is not None
+            and self._ability_prompt_token == (identity.turn_id, species.strip())
+            and species_has_entry_relevant_ability(species)
+            and len(candidates) > 1
+        )
         self.ability_resolution_group.setVisible(should_ask)
+        self.parity_ability_card.setVisible(should_ask)
         if not should_ask:
             return
         current_items = tuple(
@@ -3334,6 +3364,18 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if current_items != candidates:
             self.opponent_ability_box.clear()
             self.opponent_ability_box.addItems(candidates)
+        if tuple(button.text() for button in self.parity_ability_buttons) != candidates:
+            for button in self.parity_ability_buttons:
+                self.parity_ability_row.removeWidget(button)
+                button.deleteLater()
+            self.parity_ability_buttons = []
+            for index, ability in enumerate(candidates):
+                button = QPushButton(ability)
+                button.clicked.connect(
+                    lambda _checked=False, value=ability: self._confirm_parity_ability(value)
+                )
+                self.parity_ability_row.insertWidget(index, button)
+                self.parity_ability_buttons.append(button)
 
     def _on_opponent_species_changed(self, species: str) -> None:
         remembered = self._bundle_c_controller.opponent_ability_for_entity(
@@ -3361,7 +3403,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             species=species,
             ability=ability,
         )
-        self.ability_resolution_group.setVisible(confirmed is None)
+        self._ability_prompt_token = None
+        self.ability_resolution_group.setVisible(False)
+        self.parity_ability_card.setVisible(False)
         if confirmed is not None:
             entry = find_effect(confirmed)
             if entry is not None:

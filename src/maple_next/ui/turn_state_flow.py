@@ -31,8 +31,10 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import Protocol, TypeVar
 from uuid import NAMESPACE_URL, uuid4, uuid5
+from weakref import ReferenceType, ref
 
 from maple_next.application.match_service import MatchApplication
 from maple_next.application.service import BattleApplication, DomainError
@@ -195,6 +197,7 @@ class GeminiRichTurnAdviceAdapter:
         )
         self._dispatch_factory = dispatch_factory
         self.dispatch_count = 0
+        self._active_dispatch: _DispatchLike | None = None
         self._in_flight = False
         self.last_job_id: str | None = None
         self.last_model: str | None = None
@@ -222,7 +225,7 @@ class GeminiRichTurnAdviceAdapter:
         on_applied: Callable[[ResultDisposition], None],
         on_failed: Callable[[str], None],
     ) -> None:
-        if self._in_flight:
+        if self._in_flight or self._active_dispatch is not None:
             on_failed("GEMINI_TURN_DISPATCH_ALREADY_IN_FLIGHT")
             return
 
@@ -313,7 +316,28 @@ class GeminiRichTurnAdviceAdapter:
             on_succeeded=handle_succeeded,
             on_failed=handle_failed,
         )
+        self._active_dispatch = dispatch
+        add_finished_callback = getattr(dispatch, "add_finished_callback", None)
+        if callable(add_finished_callback):
+            has_finished_callback = True
+            dispatch_ref = ref(dispatch)
+            add_finished_callback(partial(self._release_dispatch, dispatch_ref))
+        else:
+            has_finished_callback = False
         dispatch.start()
+        if not has_finished_callback and not self._in_flight:
+            # Same-thread test doubles complete inside ``start`` and have no
+            # QThread lifecycle.  Their terminal callback has already run.
+            self._active_dispatch = None
+
+    def _release_dispatch(
+        self, dispatch_ref: ReferenceType[_DispatchLike]
+    ) -> None:
+        """Release only the dispatch whose worker thread just terminated."""
+
+        dispatch = dispatch_ref()
+        if dispatch is not None and self._active_dispatch is dispatch:
+            self._active_dispatch = None
 
 
 _RICH_GATE_MESSAGES: dict[str, str] = {

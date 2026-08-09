@@ -210,8 +210,18 @@ def _render_fixture(
     window.setFixedSize(1920, 1080)
     window.header_tabs.setCurrentIndex(1)
     window.show()
-    window.render_view()
+    view = controller.refresh()
+    window.render_view(view)
     app.processEvents()
+    summary = controller.turn_state_summary()
+    canonical_entry_event_identity = window._active_ability_entry_event_id
+    if canonical_entry_event_identity is not None:
+        persisted_event = summary.pending_opponent_entry_event
+        if (
+            persisted_event is None
+            or persisted_event.event_id != canonical_entry_event_identity
+        ):
+            raise RuntimeError("UI prompt event identity is not the persisted pending event")
     candidates = tuple(button.text() for button in window.parity_ability_buttons)
     image_path = output_directory / image_name
     image = window.grab()
@@ -223,6 +233,8 @@ def _render_fixture(
         "species_id": canonical_species_ability_catalog()
         .resolve_species(opponent_species)
         .species_id,
+        "projection_match_id": view.projection.match_id,
+        "canonical_entry_event_identity": canonical_entry_event_identity,
         "prompt_visible": not window.parity_ability_card.isHidden(),
         "candidates": list(candidates),
         "match_header": window.battle_context_label.text(),

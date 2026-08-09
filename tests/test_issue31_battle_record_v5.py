@@ -92,6 +92,46 @@ def test_visual_evidence_harness_has_no_operator_or_capture_calls() -> None:
     assert find_effect("あめふらし").deterministic_effects == ("天候:雨",)
 
 
+def test_visual_evidence_manifest_records_authoritative_projection_and_event(
+    tmp_path: Path,
+) -> None:
+    from scripts.issue31_field_blocker_visual_evidence import MATCH_ID, main
+
+    output_directory = tmp_path / "field-blocker-evidence"
+    assert main(output_directory) == 0
+    manifest = json.loads(
+        (output_directory / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["dragonite"]["projection_match_id"] == MATCH_ID
+    assert manifest["dragonite"]["canonical_entry_event_identity"] is None
+    assert manifest["salamence"]["projection_match_id"] == MATCH_ID
+    assert isinstance(manifest["salamence"]["canonical_entry_event_identity"], str)
+
+    repository = SQLiteRepository(output_directory / "salamence" / "evidence.db")
+    session = repository.load_active_session()
+    assert session is not None
+    persisted_events = repository.list_opponent_entry_events(
+        session_id=session.session_id,
+        match_id=session.match_id,
+        generation=session.generation,
+    )
+    assert manifest["salamence"]["projection_match_id"] == session.match_id
+    assert manifest["salamence"]["canonical_entry_event_identity"] == (
+        persisted_events[0].event_id
+    )
+    repository.close()
+
+    assert manifest["operator_commands"] == {"new_match": 0, "apply": 0, "capture": 0}
+    assert manifest["real_provider_send"] == 0
+    assert manifest["network_send"] == 0
+    assert manifest["game_action"] == 0
+    for state in (manifest["dragonite"], manifest["salamence"]):
+        assert state["selection_provider_calls"] == 0
+        assert state["turn_provider_calls"] == 0
+        assert state["capture_start"] == 0
+
+
 def test_fixed_geometry_exact_four_lifecycle_buttons_and_no_legacy_phase(
     tmp_path: Path,
 ) -> None:

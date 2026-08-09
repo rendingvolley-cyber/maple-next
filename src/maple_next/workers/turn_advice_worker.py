@@ -14,9 +14,9 @@ from collections.abc import Callable
 from PySide6.QtCore import QObject, QThread, Signal
 
 from maple_next.providers.transport import ProviderConfig, SanitizedProviderResult
-from maple_next.providers.turn_request import TurnAdviceRequest
 from maple_next.providers.turn_transport import (
     ProviderTransportError,
+    TurnAdviceTransportRequest,
     TurnProviderTransport,
 )
 
@@ -30,7 +30,7 @@ class TurnAdviceWorker(QObject):
     def __init__(
         self,
         transport: TurnProviderTransport,
-        request: TurnAdviceRequest,
+        request: TurnAdviceTransportRequest,
         config: ProviderConfig,
     ) -> None:
         super().__init__()
@@ -63,7 +63,7 @@ class TurnAdviceDispatch(QObject):
     def __init__(
         self,
         transport: TurnProviderTransport,
-        request: TurnAdviceRequest,
+        request: TurnAdviceTransportRequest,
         config: ProviderConfig,
         *,
         on_succeeded: Callable[[SanitizedProviderResult], None],

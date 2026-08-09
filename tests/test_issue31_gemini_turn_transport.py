@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import pytest
 
-from maple_next.__main__ import build_turn_gemini_adapter
+from maple_next.__main__ import build_rich_turn_gemini_adapter, build_turn_gemini_adapter
 from maple_next.application.service import BattleApplication
 from maple_next.providers.transport import (
     ProviderConfig,
@@ -17,6 +17,7 @@ from maple_next.providers.transport import (
     ProviderTransportError,
     SanitizedProviderResult,
 )
+from maple_next.providers.turn_advice_rich_state import RichStateTurnAdviceRequest
 from maple_next.providers.turn_request import (
     REQUESTED_OUTPUT_SCHEMA,
     build_provider_prompt,
@@ -154,6 +155,87 @@ def test_transport_posts_exactly_once_and_parses_strict_json_object(
     assert result.payload == VALID_PROVIDER_BODY_DICT
     assert result.source_type == GEMINI_TURN_SOURCE_TYPE
     assert result.model == "test-model"
+
+
+def test_production_rich_transport_uses_canonical_rich_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rich request never touches legacy-only request attributes."""
+
+    rich_request = object.__new__(RichStateTurnAdviceRequest)
+    canonical_rich_body = {
+        "contents": [{"parts": [{"text": "canonical-rich-prompt"}]}],
+        "generationConfig": {"responseMimeType": "application/json"},
+    }
+    rich_builder_calls: list[RichStateTurnAdviceRequest] = []
+    sent_bodies: list[dict[str, Any]] = []
+
+    def fake_rich_builder(request: RichStateTurnAdviceRequest) -> dict[str, Any]:
+        rich_builder_calls.append(request)
+        return canonical_rich_body
+
+    def fail_legacy_builder(_request: object) -> dict[str, Any]:
+        pytest.fail("rich production request must not use the legacy builder")
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> _Response:
+        del timeout
+        sent_bodies.append(json.loads(cast(bytes, request.data).decode("utf-8")))
+        return _Response(_gemini_envelope(VALID_PROVIDER_BODY_DICT))
+
+    monkeypatch.setattr(
+        "maple_next.providers.turn_transport.build_rich_provider_request_body",
+        fake_rich_builder,
+    )
+    monkeypatch.setattr(
+        "maple_next.providers.turn_transport.build_provider_request_body",
+        fail_legacy_builder,
+    )
+    monkeypatch.setattr(
+        "maple_next.providers.turn_transport.urllib.request.urlopen", fake_urlopen
+    )
+
+    adapter = build_rich_turn_gemini_adapter()
+    result = adapter._transport.send(  # noqa: SLF001 - production binding regression
+        rich_request,
+        ProviderConfig(api_key="test-only", model="test-model"),
+    )
+
+    assert rich_builder_calls == [rich_request]
+    assert sent_bodies == [canonical_rich_body]
+    assert result.payload == VALID_PROVIDER_BODY_DICT
+
+
+def test_production_legacy_transport_still_uses_legacy_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_request = build_sample_request()
+    legacy_body = build_provider_request_body(legacy_request)
+    sent_bodies: list[dict[str, Any]] = []
+
+    def fail_rich_builder(_request: object) -> dict[str, Any]:
+        pytest.fail("legacy request must not use the rich builder")
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> _Response:
+        del timeout
+        sent_bodies.append(json.loads(cast(bytes, request.data).decode("utf-8")))
+        return _Response(_gemini_envelope(VALID_PROVIDER_BODY_DICT))
+
+    monkeypatch.setattr(
+        "maple_next.providers.turn_transport.build_rich_provider_request_body",
+        fail_rich_builder,
+    )
+    monkeypatch.setattr(
+        "maple_next.providers.turn_transport.urllib.request.urlopen", fake_urlopen
+    )
+
+    adapter = build_turn_gemini_adapter()
+    result = adapter._transport.send(  # noqa: SLF001 - production binding regression
+        legacy_request,
+        ProviderConfig(api_key="test-only", model="test-model"),
+    )
+
+    assert sent_bodies == [legacy_body]
+    assert result.payload == VALID_PROVIDER_BODY_DICT
 
 
 @pytest.mark.parametrize(

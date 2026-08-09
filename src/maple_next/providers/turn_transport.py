@@ -23,10 +23,16 @@ from maple_next.providers.transport import (
 from maple_next.providers.transport import (
     ProviderTransportError as ProviderTransportError,
 )
+from maple_next.providers.turn_advice_rich_state import (
+    RichStateTurnAdviceRequest,
+    build_rich_provider_request_body,
+)
 from maple_next.providers.turn_request import (
     TurnAdviceRequest,
     build_provider_request_body,
 )
+
+TurnAdviceTransportRequest = TurnAdviceRequest | RichStateTurnAdviceRequest
 
 GEMINI_TURN_SOURCE_TYPE = "GEMINI"
 FAKE_TURN_ADVICE_SOURCE_TYPE = GEMINI_TURN_SOURCE_TYPE
@@ -63,7 +69,7 @@ class TurnProviderTransport(Protocol):
     """Injectable transport boundary for production and fake implementations."""
 
     def send(
-        self, request: TurnAdviceRequest, config: ProviderConfig
+        self, request: TurnAdviceTransportRequest, config: ProviderConfig
     ) -> SanitizedProviderResult: ...
 
 
@@ -81,9 +87,12 @@ class GeminiTurnAdviceTransport:
         )
 
     def send(
-        self, request: TurnAdviceRequest, config: ProviderConfig
+        self, request: TurnAdviceTransportRequest, config: ProviderConfig
     ) -> SanitizedProviderResult:
-        body = build_provider_request_body(request)
+        if isinstance(request, RichStateTurnAdviceRequest):
+            body = build_rich_provider_request_body(request)
+        else:
+            body = build_provider_request_body(request)
         endpoint = self._endpoint_template.format(model=config.model)
         http_request = urllib.request.Request(
             endpoint,
@@ -149,10 +158,12 @@ class FakeTurnAdviceTransport:
     """Fake/injected transport. Records calls and never touches the network."""
 
     responses: list[SanitizedProviderResult | Exception] = field(default_factory=list)
-    calls: list[tuple[TurnAdviceRequest, ProviderConfig]] = field(default_factory=list)
+    calls: list[tuple[TurnAdviceTransportRequest, ProviderConfig]] = field(
+        default_factory=list
+    )
 
     def send(
-        self, request: TurnAdviceRequest, config: ProviderConfig
+        self, request: TurnAdviceTransportRequest, config: ProviderConfig
     ) -> SanitizedProviderResult:
         self.calls.append((request, config))
         if not self.responses:

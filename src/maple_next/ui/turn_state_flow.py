@@ -32,7 +32,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol, TypeVar
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from maple_next.application.match_service import MatchApplication
 from maple_next.application.service import BattleApplication, DomainError
@@ -45,6 +45,10 @@ from maple_next.domain.battle_events import (
 )
 from maple_next.domain.enums import ActionType, ResultDisposition
 from maple_next.domain.opponent_intel import possible_abilities_for_species
+from maple_next.domain.species_ability_catalog import (
+    SpeciesCatalogCoverageError,
+    canonical_species_ability_catalog,
+)
 from maple_next.domain.turn_state import (
     ActionResultDelta,
     ConfirmationMeta,
@@ -53,6 +57,7 @@ from maple_next.domain.turn_state import (
     FieldDelta,
     Known,
     NextTurnStateDraft,
+    OpponentEntryEvent,
     PokemonLocalMemory,
     ProvenanceStep,
     SideDelta,
@@ -142,6 +147,7 @@ class TurnStateSummaryView:
     confirmed_legal_actions: tuple[ConfirmedLegalActionSelection, ...]
     latest_delta: ActionResultDelta | None
     open_draft: NextTurnStateDraft | None
+    pending_opponent_entry_event: OpponentEntryEvent | None
     provider_ready: bool
     provider_ready_denial_reasons: tuple[str, ...]
 
@@ -358,8 +364,18 @@ class TurnStateFlowController(MatchFlowController):
     def opponent_ability_candidates(self, species: str) -> tuple[str, ...]:
         """Species possibilities plus explicit unresolved choice, offline."""
 
-        possible = possible_abilities_for_species(species)
+        try:
+            possible = possible_abilities_for_species(species)
+        except SpeciesCatalogCoverageError:
+            return ()
         return (*possible, "不明") if possible else ()
+
+    @staticmethod
+    def opponent_entity_id_for_species(species: str) -> str:
+        """Stable match-local entity key derived from the canonical species ID."""
+
+        record = canonical_species_ability_catalog().resolve_species(species)
+        return f"opponent-species:{record.species_id}"
 
     def opponent_ability_for_entity(self, opponent_entity_id: str) -> str | None:
         identity = self._safe_current_identity()
@@ -381,7 +397,12 @@ class TurnStateFlowController(MatchFlowController):
         )
 
     def confirm_opponent_ability(
-        self, *, opponent_entity_id: str, species: str, ability: str
+        self,
+        *,
+        opponent_entity_id: str,
+        species: str,
+        ability: str,
+        entry_event_id: str | None = None,
     ) -> str | None:
         """Remember a human answer for this match/entity.
 
@@ -397,6 +418,16 @@ class TurnStateFlowController(MatchFlowController):
         if normalized not in allowed:
             raise ValueError("ability is not a possible human choice for this species")
         with self._repository.transaction():
+            if entry_event_id is not None:
+                pending = self._repository.get_pending_opponent_entry_event(
+                    session_id=identity.session_id,
+                    match_id=identity.match_id,
+                    generation=identity.generation,
+                )
+                if pending is None or pending.event_id != entry_event_id:
+                    raise TurnStateError("OPPONENT_ENTRY_EVENT_STALE")
+                if pending.opponent_entity_id != opponent_entity_id:
+                    raise TurnStateError("OPPONENT_ENTRY_ENTITY_MISMATCH")
             self._repository.set_opponent_ability_memory(
                 session_id=identity.session_id,
                 match_id=identity.match_id,
@@ -405,7 +436,31 @@ class TurnStateFlowController(MatchFlowController):
                 species=species,
                 ability=None if normalized == "不明" else normalized,
             )
+            if entry_event_id is not None:
+                self._repository.mark_opponent_entry_event_handled(
+                    event_id=entry_event_id,
+                    handled_at_utc=_now_iso(),
+                )
         return None if normalized == "不明" else normalized
+
+    def handle_opponent_entry_event(self, event_id: str) -> None:
+        """Dismiss a nonqualifying/unresolved genuine event exactly once."""
+
+        identity = self._safe_current_identity()
+        if identity is None:
+            raise TurnStateError("NO_ACTIVE_TURN_IDENTITY")
+        with self._repository.transaction():
+            pending = self._repository.get_pending_opponent_entry_event(
+                session_id=identity.session_id,
+                match_id=identity.match_id,
+                generation=identity.generation,
+            )
+            if pending is None or pending.event_id != event_id:
+                raise TurnStateError("OPPONENT_ENTRY_EVENT_STALE")
+            self._repository.mark_opponent_entry_event_handled(
+                event_id=event_id,
+                handled_at_utc=_now_iso(),
+            )
 
     # -- identity/read helpers ------------------------------------------------
 
@@ -434,6 +489,7 @@ class TurnStateFlowController(MatchFlowController):
                 confirmed_legal_actions=(),
                 latest_delta=None,
                 open_draft=None,
+                pending_opponent_entry_event=None,
                 provider_ready=False,
                 provider_ready_denial_reasons=(),
             )
@@ -452,6 +508,11 @@ class TurnStateFlowController(MatchFlowController):
             )
             latest_delta = deltas[-1] if deltas else None
         open_draft = self._repository.get_latest_next_turn_state_draft_for_identity(
+            session_id=identity.session_id,
+            match_id=identity.match_id,
+            generation=identity.generation,
+        )
+        pending_opponent_entry_event = self._repository.get_pending_opponent_entry_event(
             session_id=identity.session_id,
             match_id=identity.match_id,
             generation=identity.generation,
@@ -479,6 +540,7 @@ class TurnStateFlowController(MatchFlowController):
             confirmed_legal_actions=confirmed_legal_actions,
             latest_delta=latest_delta,
             open_draft=open_draft,
+            pending_opponent_entry_event=pending_opponent_entry_event,
             provider_ready=provider_ready,
             provider_ready_denial_reasons=denial_reasons,
         )
@@ -592,12 +654,87 @@ class TurnStateFlowController(MatchFlowController):
             )
         with self._repository.transaction():
             self._repository.append_confirmed_turn_state(state)
+            entry_event = self._build_opponent_entry_event(state, previous_state)
+            if entry_event is not None:
+                prior_pending = self._repository.get_pending_opponent_entry_event(
+                    session_id=identity.session_id,
+                    match_id=identity.match_id,
+                    generation=identity.generation,
+                )
+                if prior_pending is not None:
+                    self._repository.mark_opponent_entry_event_handled(
+                        event_id=prior_pending.event_id,
+                        handled_at_utc=_now_iso(),
+                    )
+                self._repository.append_opponent_entry_event(entry_event)
             for selection in selections:
                 self._repository.append_confirmed_legal_action_selection(selection)
             self._save_pokemon_local_memory(identity, "SELF", self_side)
             self._save_pokemon_local_memory(identity, "OPPONENT", opponent_side)
         self._error_message = None
         return self.refresh()
+
+    def _build_opponent_entry_event(
+        self,
+        state: ConfirmedTurnState,
+        previous_state: ConfirmedTurnState | None,
+    ) -> OpponentEntryEvent | None:
+        """Create an event only from a genuine human-confirmed state transition."""
+
+        active = state.opponent_side.active
+        if not active.is_confirmed or active.value is None:
+            return None
+        species_name = active.value.strip()
+        if not species_name or species_name == "UNKNOWN":
+            return None
+        if previous_state is not None:
+            previous_active = previous_state.opponent_side.active
+            previous_name = (
+                previous_active.value.strip()
+                if previous_active.is_confirmed and previous_active.value is not None
+                else ""
+            )
+            # Same-Turn re-confirmation is correction, never a field entry.
+            if state.identity.turn_number <= previous_state.identity.turn_number:
+                return None
+            if previous_name == species_name:
+                return None
+
+        catalog = canonical_species_ability_catalog()
+        try:
+            species = catalog.resolve_species(species_name)
+        except SpeciesCatalogCoverageError:
+            species_id = None
+            entity_fragment = "".join(
+                character for character in species_name.lower() if character.isalnum()
+            ) or "unknown"
+            opponent_entity_id = f"opponent-unresolved:{entity_fragment}"
+        else:
+            species_id = species.species_id
+            opponent_entity_id = f"opponent-species:{species.species_id}"
+        identity = state.identity
+        ordinal = self._repository.next_opponent_entry_ordinal(
+            session_id=identity.session_id,
+            match_id=identity.match_id,
+            generation=identity.generation,
+        )
+        event_key = (
+            f"maple-opponent-entry:{identity.session_id}:{identity.match_id}:"
+            f"{identity.generation}:{ordinal}"
+        )
+        return OpponentEntryEvent(
+            event_id=str(uuid5(NAMESPACE_URL, event_key)),
+            session_id=identity.session_id,
+            match_id=identity.match_id,
+            generation=identity.generation,
+            entry_ordinal=ordinal,
+            confirmed_state_id=state.confirmed_state_id,
+            turn_id=identity.turn_id,
+            turn_number=identity.turn_number,
+            species_id=species_id,
+            species_name=species_name,
+            opponent_entity_id=opponent_entity_id,
+        )
 
     def _save_pokemon_local_memory(
         self, identity: TurnIdentity, side: str, side_state: SideState

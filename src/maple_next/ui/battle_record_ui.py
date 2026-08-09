@@ -68,6 +68,7 @@ from maple_next.domain.opponent_intel import (
     build_opponent_intel,
     species_has_entry_relevant_ability,
 )
+from maple_next.domain.species_ability_catalog import SpeciesCatalogCoverageError
 from maple_next.domain.turn_state import (
     FieldDelta,
     Known,
@@ -1008,9 +1009,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
         self._evidence_dialog: QDialog | None = None
         self._state_event_dialog: QDialog | None = None
-        self._ability_entry_match_key: tuple[str, str, int] | None = None
-        self._ability_last_species = ""
-        self._ability_prompt_token: tuple[str, str] | None = None
+        self._active_ability_entry_event_id: str | None = None
         self._build_bundle_c_state_widgets()
         self._restructure_battle_record_layout()
         self._apply_default_launch_geometry()
@@ -3168,9 +3167,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             gemini_button.setVisible(False)
 
         species = self.opponent_active_input.text().strip()
-        entity_id = self._opponent_entity_id(species)
-        remembered_ability = self._bundle_c_controller.opponent_ability_for_entity(entity_id)
-        self._render_ability_resolution(species, remembered_ability, editable)
+        try:
+            entity_id = self._opponent_entity_id(species)
+        except SpeciesCatalogCoverageError:
+            remembered_ability = None
+        else:
+            remembered_ability = self._bundle_c_controller.opponent_ability_for_entity(entity_id)
+        self._render_ability_resolution()
         self._render_opponent_intel(species, remembered_ability)
         self._update_v5_action_disclosure()
         self._sync_parity_action_selection()
@@ -3317,42 +3320,36 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
     @staticmethod
     def _opponent_entity_id(species: str) -> str:
-        return f"opponent-active:{species.strip() or 'unknown'}"
+        return TurnStateFlowController.opponent_entity_id_for_species(species)
 
-    def _render_ability_resolution(
-        self, species: str, remembered: str | None, editable: bool
-    ) -> None:
+    def _render_ability_resolution(self) -> None:
         summary = self._bundle_c_controller.turn_state_summary()
-        identity = summary.identity
-        if identity is None:
-            self._ability_entry_match_key = None
-            self._ability_last_species = ""
-            self._ability_prompt_token = None
-        else:
-            match_key = (identity.session_id, identity.match_id, identity.generation)
-            if match_key != self._ability_entry_match_key:
-                self._ability_entry_match_key = match_key
-                self._ability_last_species = ""
-                self._ability_prompt_token = None
-            normalized_species = species.strip()
-            if editable and normalized_species and normalized_species != self._ability_last_species:
-                self._ability_last_species = normalized_species
-                self._ability_prompt_token = (identity.turn_id, normalized_species)
-            elif (
-                self._ability_prompt_token is not None
-                and self._ability_prompt_token[0] != identity.turn_id
-            ):
-                self._ability_prompt_token = None
-
-        candidates = self._bundle_c_controller.opponent_ability_candidates(species)
-        should_ask = (
-            editable
-            and remembered is None
-            and identity is not None
-            and self._ability_prompt_token == (identity.turn_id, species.strip())
-            and species_has_entry_relevant_ability(species)
-            and len(candidates) > 1
+        event = summary.pending_opponent_entry_event
+        if event is None:
+            self._active_ability_entry_event_id = None
+            self.ability_resolution_group.setVisible(False)
+            self.parity_ability_card.setVisible(False)
+            return
+        if event.species_id is None:
+            self._bundle_c_controller.handle_opponent_entry_event(event.event_id)
+            self._active_ability_entry_event_id = None
+            self.ability_resolution_group.setVisible(False)
+            self.parity_ability_card.setVisible(False)
+            return
+        remembered = self._bundle_c_controller.opponent_ability_for_entity(
+            event.opponent_entity_id
         )
+        candidates = self._bundle_c_controller.opponent_ability_candidates(event.species_name)
+        try:
+            entry_relevant = species_has_entry_relevant_ability(event.species_name)
+        except SpeciesCatalogCoverageError:
+            entry_relevant = False
+        should_ask = remembered is None and entry_relevant and len(candidates) > 1
+        if not should_ask:
+            self._bundle_c_controller.handle_opponent_entry_event(event.event_id)
+            self._active_ability_entry_event_id = None
+        else:
+            self._active_ability_entry_event_id = event.event_id
         self.ability_resolution_group.setVisible(should_ask)
         self.parity_ability_card.setVisible(should_ask)
         if not should_ask:
@@ -3378,12 +3375,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 self.parity_ability_buttons.append(button)
 
     def _on_opponent_species_changed(self, species: str) -> None:
-        remembered = self._bundle_c_controller.opponent_ability_for_entity(
-            self._opponent_entity_id(species)
-        )
-        summary = self._bundle_c_controller.turn_state_summary()
-        editable = summary.identity is not None and summary.confirmed_state is None
-        self._render_ability_resolution(species, remembered, editable)
+        try:
+            entity_id = self._opponent_entity_id(species)
+        except SpeciesCatalogCoverageError:
+            remembered = None
+        else:
+            remembered = self._bundle_c_controller.opponent_ability_for_entity(entity_id)
+        self._render_ability_resolution()
         self._render_opponent_intel(species, remembered)
 
     def _render_opponent_intel(self, species: str, remembered: str | None) -> None:
@@ -3396,14 +3394,19 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
 
     def _on_confirm_opponent_ability(self, _checked: bool = False) -> None:
-        species = self.opponent_active_input.text().strip()
+        summary = self._bundle_c_controller.turn_state_summary()
+        event = summary.pending_opponent_entry_event
+        if event is None or event.event_id != self._active_ability_entry_event_id:
+            return
+        species = event.species_name
         ability = self.opponent_ability_box.currentText()
         confirmed = self._bundle_c_controller.confirm_opponent_ability(
-            opponent_entity_id=self._opponent_entity_id(species),
+            opponent_entity_id=event.opponent_entity_id,
             species=species,
             ability=ability,
+            entry_event_id=event.event_id,
         )
-        self._ability_prompt_token = None
+        self._active_ability_entry_event_id = None
         self.ability_resolution_group.setVisible(False)
         self.parity_ability_card.setVisible(False)
         if confirmed is not None:

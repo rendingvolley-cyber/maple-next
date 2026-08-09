@@ -11,30 +11,36 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-UNKNOWN_ABILITY = "不明"
+from maple_next.domain.species_ability_catalog import (
+    UNKNOWN_ABILITY_LABEL,
+    canonical_species_ability_catalog,
+)
+
+UNKNOWN_ABILITY = UNKNOWN_ABILITY_LABEL
 
 
-# Champions-relevant possible abilities used by the first v5 operator aid.
-# Species data provenance shares the pinned Pokemon Showdown commit recorded
-# by the effect catalog.  Missing species fail soft to no candidates.
-POSSIBLE_ABILITIES_BY_SPECIES: dict[str, tuple[str, ...]] = {
-    "ボーマンダ": ("いかく", "じしんかじょう"),
-    "Salamence": ("いかく", "じしんかじょう"),
-    "ランドロス": ("すなのちから", "ちからずく", "いかく"),
-    "Landorus": ("すなのちから", "ちからずく", "いかく"),
-    "ギャラドス": ("いかく", "じしんかじょう"),
-    "Gyarados": ("いかく", "じしんかじょう"),
-    "カイリュー": ("せいしんりょく", "マルチスケイル"),
-    "Dragonite": ("せいしんりょく", "マルチスケイル"),
-    "ペリッパー": ("するどいめ", "あめうけざら", "あめふらし"),
-    "Pelipper": ("するどいめ", "あめうけざら", "あめふらし"),
-    "コータス": ("しろいけむり", "ひでり", "シェルアーマー"),
-    "Torkoal": ("しろいけむり", "ひでり", "シェルアーマー"),
-    "バンギラス": ("すなおこし", "きんちょうかん"),
-    "Tyranitar": ("すなおこし", "きんちょうかん"),
-    "キュウコン（アローラ）": ("ゆきがくれ", "ゆきふらし"),
-    "Ninetales-Alola": ("ゆきがくれ", "ゆきふらし"),
-}
+def possible_abilities_for_species(species: str) -> tuple[str, ...]:
+    """Return only canonical legal abilities for one resolved species."""
+
+    return tuple(
+        ability.display_name
+        for ability in canonical_species_ability_catalog().legal_abilities(species)
+    )
+
+
+def possible_ability_ids_for_species(species: str) -> tuple[str, ...]:
+    """Canonical legal ability IDs, independent from localized presentation."""
+
+    return tuple(
+        ability.ability_id
+        for ability in canonical_species_ability_catalog().legal_abilities(species)
+    )
+
+
+def species_has_entry_relevant_ability(species: str) -> bool:
+    """Whether a legal ability can visibly mutate supported state on entry."""
+
+    return canonical_species_ability_catalog().species_has_entry_observable_ability(species)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +151,10 @@ def build_opponent_intel(
 
     species_key = species.strip()
     meta = provider.get(species_key)
-    possible = POSSIBLE_ABILITIES_BY_SPECIES.get(species_key, ())
+    try:
+        possible = possible_abilities_for_species(species_key)
+    except LookupError:
+        possible = ()
     ability = match_facts.ability
     if not ability:
         ability = " / ".join(possible) if possible else "不明"

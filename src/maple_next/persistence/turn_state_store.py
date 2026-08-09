@@ -23,6 +23,7 @@ from maple_next.domain.turn_state import (
     Known,
     LegalActionPrefillDraft,
     NextTurnStateDraft,
+    OpponentEntryEvent,
     PokemonLocalMemory,
     SideDelta,
     SideState,
@@ -905,3 +906,111 @@ class TurnStateStoreMixin(StoreBase):
             (session_id, match_id, generation, opponent_entity_id.strip()),
         ).fetchone()
         return None if row is None else str(row["ability"])
+
+    # --- Canonical opponent-entry events ----------------------------------
+
+    def next_opponent_entry_ordinal(
+        self, *, session_id: str, match_id: str, generation: int
+    ) -> int:
+        row = self.connection.execute(
+            """
+            SELECT COALESCE(MAX(entry_ordinal), 0) + 1 AS next_ordinal
+            FROM opponent_entry_events
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+            """,
+            (session_id, match_id, generation),
+        ).fetchone()
+        assert row is not None
+        return int(row["next_ordinal"])
+
+    def append_opponent_entry_event(self, event: OpponentEntryEvent) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO opponent_entry_events (
+                event_id, session_id, match_id, generation, entry_ordinal,
+                confirmed_state_id, turn_id, turn_number, species_id,
+                species_name, opponent_entity_id, handled_at_utc, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.event_id,
+                event.session_id,
+                event.match_id,
+                event.generation,
+                event.entry_ordinal,
+                event.confirmed_state_id,
+                event.turn_id,
+                event.turn_number,
+                event.species_id,
+                event.species_name,
+                event.opponent_entity_id,
+                event.handled_at_utc,
+                self._now(),
+            ),
+        )
+
+    @staticmethod
+    def _opponent_entry_event_from_row(row: sqlite3.Row) -> OpponentEntryEvent:
+        return OpponentEntryEvent(
+            event_id=str(row["event_id"]),
+            session_id=str(row["session_id"]),
+            match_id=str(row["match_id"]),
+            generation=int(row["generation"]),
+            entry_ordinal=int(row["entry_ordinal"]),
+            confirmed_state_id=str(row["confirmed_state_id"]),
+            turn_id=str(row["turn_id"]),
+            turn_number=int(row["turn_number"]),
+            species_id=(str(row["species_id"]) if row["species_id"] is not None else None),
+            species_name=str(row["species_name"]),
+            opponent_entity_id=str(row["opponent_entity_id"]),
+            handled_at_utc=(
+                str(row["handled_at_utc"]) if row["handled_at_utc"] is not None else None
+            ),
+        )
+
+    def get_pending_opponent_entry_event(
+        self, *, session_id: str, match_id: str, generation: int
+    ) -> OpponentEntryEvent | None:
+        row = self.connection.execute(
+            """
+            SELECT * FROM opponent_entry_events
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+              AND handled_at_utc IS NULL
+            ORDER BY entry_ordinal DESC
+            LIMIT 1
+            """,
+            (session_id, match_id, generation),
+        ).fetchone()
+        return None if row is None else self._opponent_entry_event_from_row(row)
+
+    def list_opponent_entry_events(
+        self, *, session_id: str, match_id: str, generation: int
+    ) -> tuple[OpponentEntryEvent, ...]:
+        rows = self.connection.execute(
+            """
+            SELECT * FROM opponent_entry_events
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+            ORDER BY entry_ordinal ASC
+            """,
+            (session_id, match_id, generation),
+        ).fetchall()
+        return tuple(self._opponent_entry_event_from_row(row) for row in rows)
+
+    def mark_opponent_entry_event_handled(
+        self, *, event_id: str, handled_at_utc: str
+    ) -> None:
+        cursor = self.connection.execute(
+            """
+            UPDATE opponent_entry_events
+            SET handled_at_utc = ?
+            WHERE event_id = ? AND handled_at_utc IS NULL
+            """,
+            (handled_at_utc, event_id),
+        )
+        if cursor.rowcount != 1:
+            row = self.connection.execute(
+                "SELECT handled_at_utc FROM opponent_entry_events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(event_id)

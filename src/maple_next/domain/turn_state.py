@@ -587,6 +587,39 @@ class PokemonLocalMemory:
 
 
 @dataclass(frozen=True, slots=True)
+class OpponentEntryEvent:
+    """Durable identity for one human-confirmed opponent field entry."""
+
+    event_id: str
+    session_id: str
+    match_id: str
+    generation: int
+    entry_ordinal: int
+    confirmed_state_id: str
+    turn_id: str
+    turn_number: int
+    species_id: str | None
+    species_name: str
+    opponent_entity_id: str
+    handled_at_utc: str | None = None
+
+    def __post_init__(self) -> None:
+        for value, field_name in (
+            (self.event_id, "event_id"),
+            (self.session_id, "session_id"),
+            (self.match_id, "match_id"),
+            (self.confirmed_state_id, "confirmed_state_id"),
+            (self.turn_id, "turn_id"),
+            (self.species_name, "species_name"),
+            (self.opponent_entity_id, "opponent_entity_id"),
+        ):
+            if not value.strip():
+                raise ValueError(f"{field_name} must be explicit")
+        if self.generation < 1 or self.entry_ordinal < 1 or self.turn_number < 1:
+            raise ValueError("entry event ordinals and identities must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class LegalActionPrefillDraft:
     """A prefilled move/switch suggestion. Draft-only, never a legal action.
 

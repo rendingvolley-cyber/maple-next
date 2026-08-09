@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 17
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -425,6 +425,30 @@ def migrate(connection: sqlite3.Connection) -> None:
         );
 
         UPDATE schema_meta SET schema_version = 16 WHERE singleton_id = 1;
+
+        -- Canonical opponent-entry events. Rows are created only while a
+        -- human-confirmed turn state is appended. UI rendering/text changes
+        -- can read or handle an event but can never manufacture one.
+        CREATE TABLE IF NOT EXISTS opponent_entry_events (
+            event_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            entry_ordinal INTEGER NOT NULL CHECK (entry_ordinal >= 1),
+            confirmed_state_id TEXT NOT NULL UNIQUE,
+            turn_id TEXT NOT NULL,
+            turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            species_id TEXT NULL,
+            species_name TEXT NOT NULL,
+            opponent_entity_id TEXT NOT NULL,
+            handled_at_utc TEXT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(session_id, match_id, generation, entry_ordinal),
+            FOREIGN KEY(confirmed_state_id)
+                REFERENCES confirmed_turn_states(confirmed_state_id)
+        );
+
+        UPDATE schema_meta SET schema_version = 17 WHERE singleton_id = 1;
         """
     )
     _ensure_column(

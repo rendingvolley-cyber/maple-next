@@ -66,7 +66,9 @@ from maple_next.domain.opponent_intel import (
     OpponentIntelView,
     OpponentMetaProvider,
     build_opponent_intel,
+    species_has_entry_relevant_ability,
 )
+from maple_next.domain.species_ability_catalog import SpeciesCatalogCoverageError
 from maple_next.domain.turn_state import (
     FieldDelta,
     Known,
@@ -1007,6 +1009,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
         self._evidence_dialog: QDialog | None = None
         self._state_event_dialog: QDialog | None = None
+        self._active_ability_entry_event_id: str | None = None
         self._build_bundle_c_state_widgets()
         self._restructure_battle_record_layout()
         self._apply_default_launch_geometry()
@@ -1773,7 +1776,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         utility_layout = QHBoxLayout(utility_corner)
         utility_layout.setContentsMargins(8, 0, 18, 0)
         utility_layout.setSpacing(8)
-        self.battle_context_label.setText("Match #demo   Turn —")
+        self.battle_context_label.setText("Match 未取得   Turn —")
         self.header_phase_badge = QPushButton("撮影待ち")
         self.header_phase_badge.setEnabled(False)
         export_button = QPushButton("試合終了・Export")
@@ -2678,18 +2681,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         layout.addLayout(facts_row)
 
         ability_card, ability_layout = self._parity_card(
-            "相手の特性候補 — 初回確認",
-            subtitle="可能な特性から選択してください。この試合中は回答を保持します。",
+            "相手の特性候補 — 登場時確認",
+            subtitle="登場直後の変化を確認し、可能な特性から選択してください。",
         )
+        self.parity_ability_card = ability_card
         ability_row = QHBoxLayout()
+        self.parity_ability_row = ability_row
         self.parity_ability_buttons: list[QPushButton] = []
-        for ability in ("いかく", "じしんかじょう", "不明"):
-            button = QPushButton(ability)
-            button.clicked.connect(
-                lambda _checked=False, value=ability: self._confirm_parity_ability(value)
-            )
-            ability_row.addWidget(button)
-            self.parity_ability_buttons.append(button)
         ability_row.addStretch(1)
         ability_layout.addLayout(ability_row)
         layout.addWidget(ability_card)
@@ -3006,7 +3004,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             lifecycle_button.style().polish(lifecycle_button)
 
         turn_text = projection.turn_number if projection.turn_number is not None else "—"
-        self.battle_context_label.setText(f"Match #demo   Turn {turn_text}")
+        match_text = f"#{projection.match_id}" if projection.match_id else "未取得"
+        self.battle_context_label.setText(f"Match {match_text}   Turn {turn_text}")
         phase_labels = {
             "START_TURN_CAPTURE": "撮影待ち",
             "CONFIRM_TURN_FACTS": "Turn確認",
@@ -3168,9 +3167,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             gemini_button.setVisible(False)
 
         species = self.opponent_active_input.text().strip()
-        entity_id = self._opponent_entity_id(species)
-        remembered_ability = self._bundle_c_controller.opponent_ability_for_entity(entity_id)
-        self._render_ability_resolution(species, remembered_ability, editable)
+        try:
+            entity_id = self._opponent_entity_id(species)
+        except SpeciesCatalogCoverageError:
+            remembered_ability = None
+        else:
+            remembered_ability = self._bundle_c_controller.opponent_ability_for_entity(entity_id)
+        self._render_ability_resolution()
         self._render_opponent_intel(species, remembered_ability)
         self._update_v5_action_disclosure()
         self._sync_parity_action_selection()
@@ -3317,14 +3320,38 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
     @staticmethod
     def _opponent_entity_id(species: str) -> str:
-        return f"opponent-active:{species.strip() or 'unknown'}"
+        return TurnStateFlowController.opponent_entity_id_for_species(species)
 
-    def _render_ability_resolution(
-        self, species: str, remembered: str | None, editable: bool
-    ) -> None:
-        candidates = self._bundle_c_controller.opponent_ability_candidates(species)
-        should_ask = editable and remembered is None and len(candidates) > 1
+    def _render_ability_resolution(self) -> None:
+        summary = self._bundle_c_controller.turn_state_summary()
+        event = summary.pending_opponent_entry_event
+        if event is None:
+            self._active_ability_entry_event_id = None
+            self.ability_resolution_group.setVisible(False)
+            self.parity_ability_card.setVisible(False)
+            return
+        if event.species_id is None:
+            self._bundle_c_controller.handle_opponent_entry_event(event.event_id)
+            self._active_ability_entry_event_id = None
+            self.ability_resolution_group.setVisible(False)
+            self.parity_ability_card.setVisible(False)
+            return
+        remembered = self._bundle_c_controller.opponent_ability_for_entity(
+            event.opponent_entity_id
+        )
+        candidates = self._bundle_c_controller.opponent_ability_candidates(event.species_name)
+        try:
+            entry_relevant = species_has_entry_relevant_ability(event.species_name)
+        except SpeciesCatalogCoverageError:
+            entry_relevant = False
+        should_ask = remembered is None and entry_relevant and len(candidates) > 1
+        if not should_ask:
+            self._bundle_c_controller.handle_opponent_entry_event(event.event_id)
+            self._active_ability_entry_event_id = None
+        else:
+            self._active_ability_entry_event_id = event.event_id
         self.ability_resolution_group.setVisible(should_ask)
+        self.parity_ability_card.setVisible(should_ask)
         if not should_ask:
             return
         current_items = tuple(
@@ -3334,14 +3361,27 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if current_items != candidates:
             self.opponent_ability_box.clear()
             self.opponent_ability_box.addItems(candidates)
+        if tuple(button.text() for button in self.parity_ability_buttons) != candidates:
+            for button in self.parity_ability_buttons:
+                self.parity_ability_row.removeWidget(button)
+                button.deleteLater()
+            self.parity_ability_buttons = []
+            for index, ability in enumerate(candidates):
+                button = QPushButton(ability)
+                button.clicked.connect(
+                    lambda _checked=False, value=ability: self._confirm_parity_ability(value)
+                )
+                self.parity_ability_row.insertWidget(index, button)
+                self.parity_ability_buttons.append(button)
 
     def _on_opponent_species_changed(self, species: str) -> None:
-        remembered = self._bundle_c_controller.opponent_ability_for_entity(
-            self._opponent_entity_id(species)
-        )
-        summary = self._bundle_c_controller.turn_state_summary()
-        editable = summary.identity is not None and summary.confirmed_state is None
-        self._render_ability_resolution(species, remembered, editable)
+        try:
+            entity_id = self._opponent_entity_id(species)
+        except SpeciesCatalogCoverageError:
+            remembered = None
+        else:
+            remembered = self._bundle_c_controller.opponent_ability_for_entity(entity_id)
+        self._render_ability_resolution()
         self._render_opponent_intel(species, remembered)
 
     def _render_opponent_intel(self, species: str, remembered: str | None) -> None:
@@ -3354,14 +3394,21 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
 
     def _on_confirm_opponent_ability(self, _checked: bool = False) -> None:
-        species = self.opponent_active_input.text().strip()
+        summary = self._bundle_c_controller.turn_state_summary()
+        event = summary.pending_opponent_entry_event
+        if event is None or event.event_id != self._active_ability_entry_event_id:
+            return
+        species = event.species_name
         ability = self.opponent_ability_box.currentText()
         confirmed = self._bundle_c_controller.confirm_opponent_ability(
-            opponent_entity_id=self._opponent_entity_id(species),
+            opponent_entity_id=event.opponent_entity_id,
             species=species,
             ability=ability,
+            entry_event_id=event.event_id,
         )
-        self.ability_resolution_group.setVisible(confirmed is None)
+        self._active_ability_entry_event_id = None
+        self.ability_resolution_group.setVisible(False)
+        self.parity_ability_card.setVisible(False)
         if confirmed is not None:
             entry = find_effect(confirmed)
             if entry is not None:

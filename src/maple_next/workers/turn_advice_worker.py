@@ -82,6 +82,17 @@ class TurnAdviceDispatch(QObject):
     def start(self) -> None:
         self._worker_thread.start()
 
+    def add_finished_callback(self, callback: Callable[[], None]) -> None:
+        """Run ``callback`` only after the owned worker thread has stopped.
+
+        UI adapters use this terminal lifecycle hook to retain the dispatch
+        strongly for the complete lifetime of its ``QThread``.  Releasing an
+        in-flight dispatch earlier can destroy a running Qt thread and abort
+        the whole process before Python can report a traceback.
+        """
+
+        self._worker_thread.finished.connect(callback)
+
     def wait_until_finished(self, timeout_ms: int = 5000) -> bool:
         """Test-only helper: block until the worker thread has stopped."""
 

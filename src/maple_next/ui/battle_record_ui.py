@@ -2775,6 +2775,17 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             move_grid.addWidget(button, index // 4, index % 4)
             self.self_action_move_buttons.append(button)
         self_layout.addLayout(move_grid)
+        switch_target_row = QHBoxLayout()
+        self.self_switch_target_label = QLabel("交代先")
+        self.self_switch_target_box = QComboBox()
+        self.self_switch_target_box.setPlaceholderText("交代先を選択")
+        self.self_switch_target_box.currentTextChanged.connect(self._choose_self_switch)
+        self.self_switch_unavailable_label = QLabel("交代できる候補がありません")
+        self.self_switch_unavailable_label.setProperty("muted", True)
+        switch_target_row.addWidget(self.self_switch_target_label)
+        switch_target_row.addWidget(self.self_switch_target_box, 1)
+        switch_target_row.addWidget(self.self_switch_unavailable_label)
+        self_layout.addLayout(switch_target_row)
         actions_row.addWidget(self_card, 1)
 
         opponent_card, opponent_layout = self._parity_card("相手の実際の行動")
@@ -2794,12 +2805,22 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             opponent_tabs.addWidget(button)
             self.opponent_action_tabs[action_type] = button
         opponent_layout.addLayout(opponent_tabs)
-        self.parity_opponent_move_box = QComboBox()
-        self.parity_opponent_move_box.addItems(("りゅうのまい", "じしん", "まもる", "不明"))
-        self.parity_opponent_move_box.currentTextChanged.connect(
+        opponent_action_row = QHBoxLayout()
+        self.parity_opponent_action_input = QLineEdit()
+        self.parity_opponent_action_input.setPlaceholderText("相手の実際の技・交代先を入力")
+        self.parity_opponent_action_input.textChanged.connect(
             self.opponent_action_name_input.setText
         )
-        opponent_layout.addWidget(self.parity_opponent_move_box)
+        self.opponent_action_name_input.textChanged.connect(
+            self.parity_opponent_action_input.setText
+        )
+        self.parity_opponent_unknown_button = QPushButton("不明")
+        self.parity_opponent_unknown_button.clicked.connect(
+            lambda: self.parity_opponent_action_input.setText("不明")
+        )
+        opponent_action_row.addWidget(self.parity_opponent_action_input, 1)
+        opponent_action_row.addWidget(self.parity_opponent_unknown_button)
+        opponent_layout.addLayout(opponent_action_row)
         actions_row.addWidget(opponent_card, 1)
         layout.addLayout(actions_row)
 
@@ -2871,6 +2892,12 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._set_self_action_type("MOVE")
         self.actual_action_name_box.setCurrentText(move)
 
+    def _choose_self_switch(self, target: str) -> None:
+        if not target:
+            return
+        self._set_self_action_type("SWITCH")
+        self.actual_action_name_box.setCurrentText(target)
+
     def _set_opponent_action_type(self, action_type: str) -> None:
         self.opponent_action_type_box.setCurrentText(action_type)
         self._sync_parity_action_selection()
@@ -2885,6 +2912,54 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         order = self.action_order_box.currentText()
         for value, button in self.parity_order_buttons.items():
             button.setChecked(value == order)
+        switch_target = self.actual_action_name_box.currentText() if own == "SWITCH" else ""
+        self.self_switch_target_box.blockSignals(True)
+        try:
+            self.self_switch_target_box.setCurrentText(switch_target)
+        finally:
+            self.self_switch_target_box.blockSignals(False)
+
+    def _refresh_self_switch_targets(self, current: OperatorView) -> None:
+        legal_switches = current.turn_facts.legal_switches if current.turn_facts is not None else ()
+        selected = (
+            self.actual_action_name_box.currentText()
+            if self.actual_action_type_box.currentText() == "SWITCH"
+            else ""
+        )
+        self.self_switch_target_box.blockSignals(True)
+        try:
+            self.self_switch_target_box.clear()
+            self.self_switch_target_box.addItems(list(legal_switches))
+            if selected in legal_switches:
+                self.self_switch_target_box.setCurrentText(selected)
+            else:
+                self.self_switch_target_box.setCurrentIndex(-1)
+        finally:
+            self.self_switch_target_box.blockSignals(False)
+        has_legal_switch = bool(legal_switches)
+        self.self_switch_target_box.setEnabled(has_legal_switch)
+        self.self_switch_unavailable_label.setVisible(not has_legal_switch)
+
+    def _capture_action_result_draft(self) -> tuple[str, str, bool, str, str, str]:
+        return (
+            self.actual_action_type_box.currentText(),
+            self.actual_action_name_box.currentText(),
+            self.actual_action_confirm_checkbox.isChecked(),
+            self.opponent_action_type_box.currentText(),
+            self.opponent_action_name_input.text(),
+            self.action_order_box.currentText(),
+        )
+
+    def _restore_action_result_draft(
+        self, draft: tuple[str, str, bool, str, str, str]
+    ) -> None:
+        own_type, own_name, confirmed, opponent_type, opponent_name, order = draft
+        self.actual_action_type_box.setCurrentText(own_type)
+        self.actual_action_name_box.setCurrentText(own_name)
+        self.opponent_action_type_box.setCurrentText(opponent_type)
+        self.opponent_action_name_input.setText(opponent_name)
+        self.action_order_box.setCurrentText(order)
+        self.actual_action_confirm_checkbox.setChecked(confirmed)
 
     @staticmethod
     def _reflow_form_into_grid(
@@ -2934,7 +3009,36 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
     # -- render ------------------------------------------------------------------
 
     def render_view(self, view: OperatorView | None = None) -> None:
-        super().render_view(view)
+        # MapleMainWindow renders once from its constructor, before this
+        # subclass has installed its Battle Record controller/widgets.
+        if not hasattr(self, "_bundle_c_controller"):
+            super().render_view(view)
+            return
+        current = view if view is not None else self._bundle_c_controller.refresh()
+        projection = current.projection
+        action_result_identity = (
+            projection.session_id,
+            projection.match_id,
+            projection.generation,
+            projection.current_turn_id,
+            projection.current_reviewed_board_id,
+        )
+        action_result_phase = projection.primary_cta == "RECORD_ACTUAL_ACTION"
+        preserve_action_result_draft = (
+            action_result_phase
+            and getattr(self, "_action_result_phase_active", False)
+            and getattr(self, "_action_result_draft_identity", None)
+            == action_result_identity
+        )
+        action_result_draft = (
+            self._capture_action_result_draft() if preserve_action_result_draft else None
+        )
+
+        super().render_view(current)
+        if action_result_draft is not None:
+            self._restore_action_result_draft(action_result_draft)
+        self._action_result_phase_active = action_result_phase
+        self._action_result_draft_identity = action_result_identity
         # The base render_view calls setVisible(...) tied to primary_cta on
         # these three buttons because, in the original (pre-Bundle-C)
         # layout, hiding the button was how their whole one-button group
@@ -2952,8 +3056,6 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             always_visible_operation.setVisible(True)
         if not hasattr(self, "current_state_group"):
             return
-        current = view if view is not None else self._bundle_c_controller.refresh()
-        projection = current.projection
         summary = self._bundle_c_controller.turn_state_summary()
         self._render_selection_v3(current)
 
@@ -3175,6 +3277,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             remembered_ability = self._bundle_c_controller.opponent_ability_for_entity(entity_id)
         self._render_ability_resolution()
         self._render_opponent_intel(species, remembered_ability)
+        self._refresh_self_switch_targets(current)
         self._update_v5_action_disclosure()
         self._sync_parity_action_selection()
         self.live_current_state_label.setText(
@@ -3277,8 +3380,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         opponent_type = self.opponent_action_type_box.currentText()
         if opponent_type == "選択してください":
             opponent_type = ""
-        if opponent_type in {"NO ACTION", "UNKNOWN"}:
+        if opponent_type == "NO ACTION":
             self.opponent_action_name_input.setText(opponent_type)
+            opponent_type = ""
+        elif opponent_type == "UNKNOWN":
+            self.opponent_action_name_input.setText("不明")
             opponent_type = ""
         action_type = self.actual_action_type_box.currentText()
         action_name = self.actual_action_name_box.currentText().strip()
@@ -3443,10 +3549,24 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
     def _update_v5_action_disclosure(self, _value: str = "") -> None:
         own_type = self.actual_action_type_box.currentText()
         self.actual_action_name_box.setVisible(own_type in {"MOVE", "SWITCH"})
+        switch_selected = own_type == "SWITCH"
+        self.self_switch_target_label.setVisible(switch_selected)
+        self.self_switch_target_box.setVisible(switch_selected)
+        self.self_switch_unavailable_label.setVisible(
+            switch_selected and self.self_switch_target_box.count() == 0
+        )
         opponent_type = self.opponent_action_type_box.currentText()
         self.opponent_action_name_input.setVisible(opponent_type in {"MOVE", "SWITCH"})
-        if opponent_type in {"NO ACTION", "UNKNOWN"}:
-            self.opponent_action_name_input.setText(opponent_type)
+        opponent_editable = opponent_type != "NO ACTION"
+        self.parity_opponent_action_input.setEnabled(opponent_editable)
+        self.parity_opponent_unknown_button.setEnabled(opponent_editable)
+        if opponent_type == "NO ACTION":
+            self.opponent_action_name_input.setText("NO ACTION")
+        elif opponent_type == "UNKNOWN" and self.opponent_action_name_input.text() in {
+            "",
+            "UNKNOWN",
+        }:
+            self.opponent_action_name_input.setText("不明")
 
     def _apply_review_effect(self, entry: EffectCatalogEntry) -> None:
         self._apply_effect(entry, source_side="opponent", result_phase=False)

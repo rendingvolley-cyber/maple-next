@@ -579,6 +579,113 @@ def test_action_result_progressive_disclosure_and_catalog_apply(tmp_path: Path) 
     repository.close()
 
 
+def _advance_to_action_result(window: BattleRecordUiWindow) -> None:
+    _fill_minimal_current_state(window)
+    window._on_confirm_turn_facts()
+    window.mock_turn_action_type_box.setCurrentText("MOVE")
+    window.mock_turn_action_name_box.setCurrentText("Flower Trick")
+    window.mock_turn_prediction_input.setText("manual test prediction")
+    window.mock_turn_rationale_input.setText("fake transport only")
+    window._on_trusted_send_turn_to_gemini()
+    assert window._bundle_c_controller.refresh().projection.primary_cta == (
+        "RECORD_ACTUAL_ACTION"
+    )
+
+
+def test_action_result_draft_survives_same_identity_render(tmp_path: Path) -> None:
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _advance_to_action_result(window)
+
+    window.self_action_move_buttons[0].click()
+    window.opponent_action_type_box.setCurrentText("MOVE")
+    window.parity_opponent_action_input.setText("manual opponent move")
+    window.action_order_box.setCurrentText("OPPONENT_FIRST")
+    assert window.actual_action_confirm_checkbox.isChecked()
+    assert window.record_action_button.isEnabled()
+
+    window.render_view()
+
+    assert window.actual_action_type_box.currentText() == "MOVE"
+    assert window.actual_action_name_box.currentText() == "Flower Trick"
+    assert window.actual_action_confirm_checkbox.isChecked()
+    assert window.record_action_button.isEnabled()
+    assert window.opponent_action_type_box.currentText() == "MOVE"
+    assert window.parity_opponent_action_input.text() == "manual opponent move"
+    assert window.action_order_box.currentText() == "OPPONENT_FIRST"
+    assert transport.call_count == 1
+    repository.close()
+
+
+def test_opponent_action_is_manual_without_invented_move_candidates(tmp_path: Path) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _advance_to_action_result(window)
+
+    assert not hasattr(window, "parity_opponent_move_box")
+    window.opponent_action_type_box.setCurrentText("MOVE")
+    window.parity_opponent_action_input.setText("人間が確認した技")
+    window.render_view()
+    assert window.opponent_action_name_input.text() == "人間が確認した技"
+    assert window.parity_opponent_action_input.text() == "人間が確認した技"
+
+    window.parity_opponent_unknown_button.click()
+    window.render_view()
+    assert window.opponent_action_name_input.text() == "不明"
+    assert window.parity_opponent_action_input.text() == "不明"
+    repository.close()
+
+
+def test_self_switch_selector_is_limited_to_reviewed_legal_targets(
+    tmp_path: Path,
+) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _advance_to_action_result(window)
+
+    legal_switches = window._bundle_c_controller.refresh().turn_facts
+    assert legal_switches is not None
+    expected = legal_switches.legal_switches
+    actual = tuple(
+        window.self_switch_target_box.itemText(index)
+        for index in range(window.self_switch_target_box.count())
+    )
+    assert actual == expected
+    window.self_action_tabs["SWITCH"].click()
+    window.self_switch_target_box.setCurrentText(expected[0])
+    window.render_view()
+    assert window.actual_action_type_box.currentText() == "SWITCH"
+    assert window.actual_action_name_box.currentText() == expected[0]
+    assert window.self_switch_target_box.currentText() == expected[0]
+    repository.close()
+
+
+def test_self_switch_selector_explicitly_reports_empty_legal_targets(
+    tmp_path: Path,
+) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+    for checkbox in window.switch_checkboxes:
+        checkbox.setChecked(False)
+    window._on_confirm_turn_facts()
+    window.mock_turn_action_type_box.setCurrentText("MOVE")
+    window.mock_turn_action_name_box.setCurrentText("Flower Trick")
+    window.mock_turn_prediction_input.setText("manual test prediction")
+    window.mock_turn_rationale_input.setText("fake transport only")
+    window._on_trusted_send_turn_to_gemini()
+
+    window.self_action_tabs["SWITCH"].click()
+    assert window.self_switch_target_box.count() == 0
+    assert not window.self_switch_target_box.isEnabled()
+    assert not window.self_switch_unavailable_label.isHidden()
+    repository.close()
+
+
 def test_no_explicit_unchanged_changed_controls_are_exposed(tmp_path: Path) -> None:
     repository, _controller, window, _transport = build_window(tmp_path)
     for editor in (window.self_delta_editor, window.opponent_delta_editor):

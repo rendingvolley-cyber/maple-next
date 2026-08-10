@@ -618,6 +618,70 @@ def test_action_result_draft_survives_same_identity_render(tmp_path: Path) -> No
     repository.close()
 
 
+def test_self_move_chip_selection_tracks_authoritative_draft_and_persists(
+    tmp_path: Path,
+) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+    legal_moves = ("トリックフラワー", "はたきおとす")
+    for field, move in zip(window.move_inputs, legal_moves, strict=False):
+        field.setText(move)
+    window._on_confirm_turn_facts()
+    window.mock_turn_action_type_box.setCurrentText("MOVE")
+    window.mock_turn_action_name_box.setCurrentText(legal_moves[0])
+    window.mock_turn_prediction_input.setText("offline prediction")
+    window.mock_turn_rationale_input.setText("offline regression")
+    window._on_trusted_send_turn_to_gemini()
+    assert controller.refresh().projection.primary_cta == "RECORD_ACTUAL_ACTION"
+
+    move_buttons = {
+        field.text(): button
+        for field, button in zip(
+            window.move_inputs, window.self_action_move_buttons, strict=True
+        )
+        if field.text()
+    }
+    knock_off_button = move_buttons["はたきおとす"]
+    other_move_button = move_buttons["トリックフラワー"]
+    assert all(button.isCheckable() for button in window.self_action_move_buttons)
+
+    knock_off_button.click()
+    assert window.actual_action_type_box.currentText() == "MOVE"
+    assert window.actual_action_name_box.currentText() == "はたきおとす"
+    assert knock_off_button.isChecked()
+    assert sum(button.isChecked() for button in window.self_action_move_buttons) == 1
+
+    other_move_button.click()
+    assert window.actual_action_name_box.currentText() == "トリックフラワー"
+    assert other_move_button.isChecked()
+    assert not knock_off_button.isChecked()
+    assert sum(button.isChecked() for button in window.self_action_move_buttons) == 1
+
+    window.render_view()
+    assert other_move_button.isChecked()
+    assert sum(button.isChecked() for button in window.self_action_move_buttons) == 1
+
+    window.self_action_tabs["SWITCH"].click()
+    assert window.actual_action_type_box.currentText() == "SWITCH"
+    assert not any(button.isChecked() for button in window.self_action_move_buttons)
+
+    knock_off_button.click()
+    assert window.actual_action_type_box.currentText() == "MOVE"
+    assert window.actual_action_name_box.currentText() == "はたきおとす"
+    assert knock_off_button.isChecked()
+    window._on_record_action()
+
+    session = repository.load_active_session()
+    assert session is not None
+    persisted = repository.get_recorded_action_for_turn(session.current_turn_id)
+    assert persisted is not None
+    assert persisted.action_type.value == "MOVE"
+    assert persisted.action_name == "はたきおとす"
+    repository.close()
+
+
 def test_opponent_action_is_manual_without_invented_move_candidates(tmp_path: Path) -> None:
     repository, controller, window, _transport = build_window(tmp_path)
     _advance_to_turn_capture_pending(controller)

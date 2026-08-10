@@ -3320,16 +3320,44 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.opponent_state_editor.load_side_state(draft.opponent_side)
         self_active = draft.self_side.active
         if self_active.is_confirmed and self_active.value is not None:
-            self.self_active_box.setCurrentText(self_active.value)
+            self._bind_turn_snapshot_draft_field(
+                "self_active",
+                self_active.value,
+                ocr_replaceable=(
+                    ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD
+                    in self_active.provenance_chain
+                ),
+            )
         opponent_active = draft.opponent_side.active
         if opponent_active.is_confirmed and opponent_active.value is not None:
-            self.opponent_active_input.setText(opponent_active.value)
+            self._bind_turn_snapshot_draft_field(
+                "opponent_active",
+                opponent_active.value,
+                ocr_replaceable=(
+                    ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD
+                    in opponent_active.provenance_chain
+                ),
+            )
         self_hp = draft.self_side.hp_bucket
         if self_hp.is_confirmed and self_hp.value is not None:
-            self.self_hp_box.setCurrentText(self_hp.value.value)
+            self._bind_turn_snapshot_draft_field(
+                "self_hp",
+                self_hp.value.value,
+                ocr_replaceable=(
+                    ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD
+                    in self_hp.provenance_chain
+                ),
+            )
         opponent_hp = draft.opponent_side.hp_bucket
         if opponent_hp.is_confirmed and opponent_hp.value is not None:
-            self.opponent_hp_box.setCurrentText(opponent_hp.value.value)
+            self._bind_turn_snapshot_draft_field(
+                "opponent_hp",
+                opponent_hp.value.value,
+                ocr_replaceable=(
+                    ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD
+                    in opponent_hp.provenance_chain
+                ),
+            )
 
     # -- overridden handlers: gather the new widgets, then delegate ------------
 

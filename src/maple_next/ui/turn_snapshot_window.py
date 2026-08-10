@@ -44,6 +44,10 @@ from maple_next.ui.selection_snapshot_window import SelectionSnapshotMatchFlowWi
 _BATTLE_RECORD_TAB_INDEX = 1
 _PLACEHOLDER = "選択してください"
 _TURN_PENDING_STATE = "TURN_CAPTURE_PENDING"
+_TURN_SNAPSHOT_ORIGIN_EMPTY = "未入力"
+_TURN_SNAPSHOT_ORIGIN_CARRY_FORWARD = "前Turn確定値の引き継ぎ・未確認"
+_TURN_SNAPSHOT_ORIGIN_CONFIRMED_DRAFT = "確定済み値の引き継ぎ・OCR上書き不可"
+_TURN_SNAPSHOT_ORIGIN_OCR = "OCR候補・未確認"
 
 
 class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
@@ -73,7 +77,8 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
             )
         }
         self._turn_snapshot_origins = {
-            field_key: "未入力" for field_key in self._turn_snapshot_field_locks
+            field_key: _TURN_SNAPSHOT_ORIGIN_EMPTY
+            for field_key in self._turn_snapshot_field_locks
         }
         super().__init__(
             controller,
@@ -270,7 +275,11 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
         if not hasattr(self, "_turn_snapshot_origin_labels"):
             return
         for field_key, label in self._turn_snapshot_origin_labels.items():
-            label.setText(self._turn_snapshot_origins.get(field_key, "未入力"))
+            label.setText(
+                self._turn_snapshot_origins.get(
+                    field_key, _TURN_SNAPSHOT_ORIGIN_EMPTY
+                )
+            )
 
     @staticmethod
     def _set_image_label(label: QLabel, image: QImage, *, width: int, height: int) -> None:
@@ -434,7 +443,7 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
             button.setEnabled(False)
         for field_key in self._turn_snapshot_field_locks:
             self._turn_snapshot_field_locks[field_key] = False
-            self._turn_snapshot_origins[field_key] = "未入力"
+            self._turn_snapshot_origins[field_key] = _TURN_SNAPSHOT_ORIGIN_EMPTY
         for label in self._turn_snapshot_crop_labels.values():
             label.clear()
             label.setText("—")
@@ -598,12 +607,53 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
                     continue
                 if self._turn_snapshot_field_locks.get(field_key, False):
                     continue
-                if not self._turn_field_is_empty(field_key):
+                origin = self._turn_snapshot_origins.get(
+                    field_key, _TURN_SNAPSHOT_ORIGIN_EMPTY
+                )
+                if (
+                    not self._turn_field_is_empty(field_key)
+                    and origin != _TURN_SNAPSHOT_ORIGIN_CARRY_FORWARD
+                ):
                     continue
                 self._set_turn_field(field_key, candidate.suggested_value)
-                self._turn_snapshot_origins[field_key] = "OCR候補・未確認"
+                self._turn_snapshot_origins[field_key] = _TURN_SNAPSHOT_ORIGIN_OCR
         finally:
             self._turn_snapshot_setting_fields = False
+
+    def _bind_turn_snapshot_draft_field(
+        self,
+        field_key: str,
+        value: str,
+        *,
+        ocr_replaceable: bool,
+    ) -> None:
+        """Bind a draft value without clobbering newer current-Turn input.
+
+        An unchanged value carried from the previous confirmed state still
+        awaits observation for this Turn, so a fresh identity-matched OCR
+        candidate may replace it. A value explicitly established by the
+        previous action result remains protected. Once OCR or the operator
+        changes a field in this Turn, later renders must not restore the
+        durable draft over that newer in-process value.
+        """
+
+        if self._turn_snapshot_field_locks.get(field_key, False):
+            return
+        origin = self._turn_snapshot_origins.get(
+            field_key, _TURN_SNAPSHOT_ORIGIN_EMPTY
+        )
+        if origin not in {
+            _TURN_SNAPSHOT_ORIGIN_EMPTY,
+            _TURN_SNAPSHOT_ORIGIN_CARRY_FORWARD,
+            _TURN_SNAPSHOT_ORIGIN_CONFIRMED_DRAFT,
+        }:
+            return
+        self._set_turn_field(field_key, value)
+        self._turn_snapshot_origins[field_key] = (
+            _TURN_SNAPSHOT_ORIGIN_CARRY_FORWARD
+            if ocr_replaceable
+            else _TURN_SNAPSHOT_ORIGIN_CONFIRMED_DRAFT
+        )
 
     def _turn_field_is_empty(self, field_key: str) -> bool:
         if field_key == OcrFieldKey.SELF_ACTIVE.value:

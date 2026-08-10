@@ -1012,6 +1012,12 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._active_ability_entry_event_id: str | None = None
         self._build_bundle_c_state_widgets()
         self._restructure_battle_record_layout()
+        self.actual_action_type_box.currentTextChanged.connect(
+            lambda _text: self._sync_parity_action_selection()
+        )
+        self.actual_action_name_box.currentTextChanged.connect(
+            lambda _text: self._sync_parity_action_selection()
+        )
         self._apply_default_launch_geometry()
         self.render_view()
 
@@ -2763,6 +2769,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.self_action_move_buttons = []
         for index, field in enumerate(self.move_inputs):
             button = QPushButton(field.text() or f"技{index + 1}")
+            button.setCheckable(True)
             button.setEnabled(bool(field.text()))
             field.textChanged.connect(
                 lambda text, chip=button: self._sync_action_chip(chip, text)
@@ -2891,6 +2898,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             return
         self._set_self_action_type("MOVE")
         self.actual_action_name_box.setCurrentText(move)
+        self._sync_parity_action_selection()
 
     def _choose_self_switch(self, target: str) -> None:
         if not target:
@@ -2907,6 +2915,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         opponent = self.opponent_action_type_box.currentText()
         for value, button in self.self_action_tabs.items():
             button.setChecked(value == own)
+        selected_move = self.actual_action_name_box.currentText() if own == "MOVE" else ""
+        for button, field in zip(
+            self.self_action_move_buttons, self.move_inputs, strict=True
+        ):
+            button.setChecked(bool(selected_move) and field.text() == selected_move)
         for value, button in self.opponent_action_tabs.items():
             button.setChecked(value == opponent)
         order = self.action_order_box.currentText()

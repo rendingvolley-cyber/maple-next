@@ -101,6 +101,37 @@ class SnapshotDocument:
         )
 
 
+def build_snapshot_document(
+    records: list[SpeciesStatsRecord],
+    *,
+    source: str,
+    season: str,
+    format: str,
+    fetched_at: str,
+) -> SnapshotDocument:
+    return SnapshotDocument(
+        schema_version=SNAPSHOT_SCHEMA_VERSION,
+        source=source,
+        season=season,
+        format=format,
+        fetched_at=fetched_at,
+        species={record.species_id: record for record in records},
+    )
+
+
+def encode_snapshot_document(document: SnapshotDocument) -> bytes:
+    """The exact canonical bytes a snapshot document serializes to.
+
+    Shared by :func:`write_snapshot_atomic` and the atomic multi-file
+    generation commit in ``generation_store.py`` so the bytes staged in a
+    generation directory and the bytes written to the flat compatibility
+    file are always byte-identical -- never re-derived twice.
+    """
+
+    text = json.dumps(document.to_json_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    return text.encode("utf-8")
+
+
 def write_snapshot_atomic(
     path: Path,
     records: list[SpeciesStatsRecord],
@@ -116,16 +147,10 @@ def write_snapshot_atomic(
     untouched -- encoding happens fully in memory before the atomic replace.
     """
 
-    document = SnapshotDocument(
-        schema_version=SNAPSHOT_SCHEMA_VERSION,
-        source=source,
-        season=season,
-        format=format,
-        fetched_at=fetched_at,
-        species={record.species_id: record for record in records},
+    document = build_snapshot_document(
+        records, source=source, season=season, format=format, fetched_at=fetched_at
     )
-    text = json.dumps(document.to_json_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-    encoded = text.encode("utf-8")
+    encoded = encode_snapshot_document(document)
     _atomic_write(path, encoded)
 
 

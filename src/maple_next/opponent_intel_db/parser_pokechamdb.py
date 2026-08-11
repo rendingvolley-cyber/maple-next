@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import urljoin
 
 SOURCE_NAME = "pokechamdb"
 
@@ -130,15 +131,43 @@ class SpeciesListEntry:
     species_id: str
     display_name: str
     detail_path: str
+    #: This module's own enumeration order within one page (1-based). This
+    #: is *not* discovery-completeness evidence on its own -- a truncated
+    #: subset of entries still enumerates as a contiguous 1..N sequence.
+    #: See ``site_rank`` for the source's own displayed rank number instead.
     rank: int
+    #: The rank number the source page itself displays next to this entry
+    #: (e.g. the "118" in pokechamdb's ranked list), when one could be
+    #: extracted. ``None`` when the page has no such per-entry rank marker.
+    site_rank: int | None = None
+
+
+def _site_rank_from_anchor_html(inner_html: str) -> int | None:
+    """The first purely-numeric text node inside a species anchor, if any.
+
+    This is the inverse of :func:`_display_name_from_anchor_html`: that
+    function skips the leading numeric rank span to find the name; this one
+    extracts that same rank span as the source's own declared rank number,
+    used later as discovery-completeness evidence (rank sequence
+    consistency) rather than being discarded.
+    """
+
+    for raw_text in _TEXT_NODE_RE.findall(f">{inner_html}<"):
+        text = str(raw_text).strip()
+        if text.isdigit():
+            return int(text)
+    return None
 
 
 def parse_species_list(html: str) -> list[SpeciesListEntry]:
-    """Parse the ranking/list page into an ordered list of species stubs.
+    """Parse one ranking/list page into an ordered list of species stubs.
 
     Raises :class:`ParseError` only if literally zero species links can be
     found -- that indicates the page structure changed too much to trust any
-    data from it, as opposed to one bad row.
+    data from it, as opposed to one bad row. This parses exactly one page's
+    worth of anchors; it makes no claim about whether that page is the only
+    page or the last page of a paginated listing -- see ``discovery.py`` for
+    the completeness proof that answers that question.
     """
 
     entries: list[SpeciesListEntry] = []
@@ -155,12 +184,77 @@ def parse_species_list(html: str) -> list[SpeciesListEntry]:
                 display_name=display_name,
                 detail_path=detail_path,
                 rank=len(entries) + 1,
+                site_rank=_site_rank_from_anchor_html(anchor_inner_html),
             )
         )
 
     if not entries:
         raise ParseError("NO_SPECIES_LINKS_FOUND_ON_LIST_PAGE")
     return entries
+
+
+#: A response body is well-formed only if it ends with a proper closing
+#: ``</html>`` tag -- a response truncated mid-transfer (network/proxy
+#: cutoff) would not, and must not be silently treated as "the complete
+#: page".
+_WELL_FORMED_TERMINATION_RE = re.compile(r"</html\s*>\s*\Z", re.IGNORECASE)
+
+#: A "next page" link: either an explicit ``rel="next"`` anchor (attribute
+#: order-independent) or an anchor whose visible text is a recognizable
+#: "next page" label. Deliberately conservative/heuristic, matching this
+#: module's existing structural-parsing philosophy -- a source that doesn't
+#: paginate (pokechamdb.com today) simply never matches this, in which case
+#: ``extract_next_page_url`` returns ``None``.
+_NEXT_LINK_REL_RE = re.compile(
+    r'<a\b(?=[^>]*\brel=["\']next["\'])(?=[^>]*\bhref=["\']([^"\']+)["\'])[^>]*>',
+    re.IGNORECASE,
+)
+_NEXT_LINK_TEXT_RE = re.compile(
+    r'<a\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*>\s*(?:次へ|次のページ|Next|»)\s*</a>',
+    re.IGNORECASE,
+)
+
+#: An explicit source-advertised total species count, if the page carries
+#: one (pokechamdb.com today does not -- verified live -- but the check
+#: stays generic/forward-compatible per the "use source-native evidence
+#: where available" requirement).
+_ADVERTISED_TOTAL_RE = re.compile(
+    r'data-total-count=["\'](\d+)["\']|全\s*(\d+)\s*(?:匹|件)|total[^0-9]{0,10}(\d+)\s*species',
+    re.IGNORECASE,
+)
+
+
+def page_is_well_formed(html: str) -> bool:
+    """Whether the response body ends with a proper closing ``</html>`` tag.
+
+    A response cut off mid-transfer would not have this -- this is the
+    signal used to reject a silently truncated fetch rather than treating a
+    partial document as if it were the whole page.
+    """
+
+    return bool(_WELL_FORMED_TERMINATION_RE.search(html))
+
+
+def extract_next_page_url(html: str, *, base_url: str) -> str | None:
+    """The absolute URL of an explicit "next page" link, if the page has one."""
+
+    match = _NEXT_LINK_REL_RE.search(html) or _NEXT_LINK_TEXT_RE.search(html)
+    if match is None:
+        return None
+    href: str = match.group(1)
+    return urljoin(base_url, href)
+
+
+def extract_advertised_total(html: str) -> int | None:
+    """An explicit source-advertised total species count, if the page has one."""
+
+    match = _ADVERTISED_TOTAL_RE.search(html)
+    if match is None:
+        return None
+    for group in match.groups():
+        if group is not None:
+            return int(group)
+    return None  # pragma: no cover - regex always has exactly one live group
 
 
 def _section_text(full_text: str, header_positions: list[tuple[int, str]], group_name: str) -> str:

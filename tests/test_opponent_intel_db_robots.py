@@ -77,6 +77,49 @@ def test_robots_empty_body_with_successful_fetch_is_permissive() -> None:
     assert gate.is_allowed(URL) is True
 
 
+def test_robots_html_200_body_blocks_the_url() -> None:
+    # An HTML error/interstitial page served with HTTP 200 must not be
+    # treated as an empty, permissive robots.txt.
+    html_body = (
+        "<!DOCTYPE html><html><head><title>Error</title></head>"
+        "<body>Not Found</body></html>"
+    )
+    gate = RobotsGate(lambda url: html_body)
+    assert gate.is_allowed(URL) is False
+
+
+def test_robots_html_disguised_as_text_plain_blocks_the_url() -> None:
+    # Same HTML body -- this module never trusts a declared Content-Type
+    # (which our fetch abstraction doesn't even carry), only the body
+    # itself, so a text/plain-labeled HTML page is caught identically.
+    html_body = "<html><body>please sign in</body></html>"
+    gate = RobotsGate(lambda url: html_body)
+    assert gate.is_allowed(URL) is False
+
+
+def test_robots_arbitrary_hello_world_text_blocks_the_url() -> None:
+    # Non-empty, non-HTML, non-binary -- but contains zero recognizable
+    # robots directives, so it must not be treated as an empty/permissive
+    # policy just because it "looks like plain text".
+    gate = RobotsGate(lambda url: "hello world\nthis is not a robots policy at all\n")
+    assert gate.is_allowed(URL) is False
+
+
+def test_robots_malformed_directive_body_blocks_the_url() -> None:
+    # Colon-separated lines that resemble directives but use no recognized
+    # directive name.
+    gate = RobotsGate(lambda url: "foo: bar\nbaz: qux\nlorem: ipsum\n")
+    assert gate.is_allowed(URL) is False
+
+
+def test_robots_comment_only_body_is_treated_as_empty_permissive() -> None:
+    # A comment-only body is unambiguously robots.txt-shaped (just carries
+    # no directives) -- treated the same as genuinely empty, not rejected
+    # as "arbitrary text".
+    gate = RobotsGate(lambda url: "# nothing to see here\n# just comments\n")
+    assert gate.is_allowed(URL) is True
+
+
 def test_robots_failure_is_cached_and_never_refetched() -> None:
     calls: list[str] = []
 

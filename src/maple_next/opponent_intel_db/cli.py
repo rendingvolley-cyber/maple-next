@@ -18,9 +18,12 @@ from typing import Any
 from urllib.parse import urljoin
 
 from maple_next.opponent_intel_db import parser_champs_pokedb, parser_pokechamdb
+from maple_next.opponent_intel_db.discovery import DiscoveryStatus, discover_all_species
 from maple_next.opponent_intel_db.downloader import DownloadError, SnapshotDownloader
+from maple_next.opponent_intel_db.generation_store import commit_generation
 from maple_next.opponent_intel_db.move_catalog_builder import (
     build_move_catalog,
+    encode_move_catalog,
     write_move_catalog_atomic,
 )
 from maple_next.opponent_intel_db.normalize import (
@@ -34,7 +37,9 @@ from maple_next.opponent_intel_db.runtime_paths import (
     resolve_intel_runtime_root,
 )
 from maple_next.opponent_intel_db.snapshot_store import (
-    read_snapshot,
+    SNAPSHOT_SCHEMA_VERSION,
+    SnapshotDocument,
+    encode_snapshot_document,
     write_snapshot_atomic,
 )
 
@@ -55,15 +60,20 @@ class CliError(Exception):
 class ImportStatus(Enum):
     """Outcome of one primary-source import attempt.
 
-    Only :attr:`COMPLETE` may ever be promoted into the atomic snapshot on
-    disk -- every other status leaves the previous valid snapshot (if any)
-    completely untouched.
+    Only :attr:`COMPLETE` may ever be promoted -- every other status leaves
+    the previously active generation (if any) completely untouched.
+    ``succeeded == attempted`` alone only proves internal consistency of
+    whatever subset of species was discovered; it does NOT prove discovery
+    itself was exhaustive, so completeness is split into two independently
+    provable phases: discovery (:mod:`discovery`, ``DISCOVERY_INCOMPLETE`` /
+    ``DISCOVERY_UNPROVABLE``) and per-species fetch (``FETCH_PARTIAL``).
     """
 
-    COMPLETE = "COMPLETE"
-    PARTIAL = "PARTIAL"
-    SOURCE_FAILURE = "SOURCE_FAILURE"
+    DISCOVERY_INCOMPLETE = "DISCOVERY_INCOMPLETE"
+    DISCOVERY_UNPROVABLE = "DISCOVERY_UNPROVABLE"
+    FETCH_PARTIAL = "FETCH_PARTIAL"
     VALIDATION_FAILURE = "VALIDATION_FAILURE"
+    COMPLETE = "COMPLETE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,26 +121,35 @@ def fetch_primary_species(
 ) -> PrimaryImportResult:
     """Fetch + parse the primary (pokechamdb) source into a staged result.
 
-    Raises :class:`CliError` only when the import cannot be attempted at all
-    (list page unreachable/unparsable, or an explicit ``--species`` filter
-    matches nothing). Otherwise returns a :class:`PrimaryImportResult`
-    describing exactly how many of the species discovered on the list page
-    were actually imported -- the caller decides whether that is complete
-    enough to promote; this function never silently treats a partial result
-    as good and never hardcodes an expected species count.
+    Discovery completeness is proven first (:func:`discover_all_species`) --
+    a result is only ever eligible for promotion once discovery itself is
+    proven exhaustive, *and* every discovered species detail page was
+    successfully fetched and parsed, *and* the staged records pass a final
+    validation pass. Raises :class:`CliError` only when an explicit
+    ``--species`` filter matches nothing in the (already discovery-complete)
+    list -- every other failure mode is reported as a
+    :class:`PrimaryImportResult` status instead of an exception, so the
+    caller can apply one uniform promotion gate.
     """
 
     list_url = _list_page_url(season, format_)
-    try:
-        list_html = downloader.get(list_url)
-    except DownloadError as exc:
-        raise CliError(f"PRIMARY_SOURCE_LIST_PAGE_UNREACHABLE:{exc}") from exc
+    discovery = discover_all_species(downloader, list_url)
+    if discovery.status is not DiscoveryStatus.COMPLETE:
+        status = (
+            ImportStatus.DISCOVERY_INCOMPLETE
+            if discovery.status is DiscoveryStatus.INCOMPLETE
+            else ImportStatus.DISCOVERY_UNPROVABLE
+        )
+        return PrimaryImportResult(
+            status=status,
+            records=(),
+            attempted_species=len(discovery.entries),
+            succeeded_species=0,
+            failed_species=(),
+            reason=f"{discovery.reason} (pages_visited={discovery.pages_visited})",
+        )
 
-    try:
-        stubs = parser_pokechamdb.parse_species_list(list_html)
-    except parser_pokechamdb.ParseError as exc:
-        raise CliError(f"PRIMARY_SOURCE_LIST_PAGE_UNPARSABLE:{exc}") from exc
-
+    stubs = list(discovery.entries)
     if species_filter is not None:
         stubs = [stub for stub in stubs if stub.species_id == species_filter]
         if not stubs:
@@ -174,19 +193,9 @@ def fetch_primary_species(
     attempted = len(stubs)
     succeeded = len(records)
 
-    if succeeded == 0:
-        return PrimaryImportResult(
-            status=ImportStatus.SOURCE_FAILURE,
-            records=(),
-            attempted_species=attempted,
-            succeeded_species=0,
-            failed_species=tuple(failed_species),
-            reason="PRIMARY_SOURCE_YIELDED_ZERO_SPECIES",
-        )
-
     if failed_species:
         return PrimaryImportResult(
-            status=ImportStatus.PARTIAL,
+            status=ImportStatus.FETCH_PARTIAL,
             records=tuple(records),
             attempted_species=attempted,
             succeeded_species=succeeded,
@@ -354,7 +363,46 @@ def run_update_opponent_intel(args: argparse.Namespace) -> int:
         records = merge_secondary_supplement(downloader, records, species_filter=args.species)
 
     fetched_at = datetime.now(UTC).isoformat()
+
+    # Build both the snapshot document and its move catalog completely in
+    # memory first -- neither is written anywhere until both are ready, so
+    # the coherent-generation commit below always has a matched pair.
+    document: SnapshotDocument = SnapshotDocument(
+        schema_version=SNAPSHOT_SCHEMA_VERSION,
+        source=parser_pokechamdb.SOURCE_NAME,
+        season=args.season,
+        format=args.format_,
+        fetched_at=fetched_at,
+        species={record.species_id: record for record in records},
+    )
+    snapshot_bytes = encode_snapshot_document(document)
+    catalog: dict[str, Any] = build_move_catalog(document)
+    catalog_bytes = encode_move_catalog(catalog)
+
+    # Single indivisible commit: both files land in one staging generation
+    # directory and become visible together via one atomic pointer replace.
+    # A reader resolving through the pointer can never observe a mismatched
+    # snapshot/catalog pairing.
+    commit_generation(
+        intel_directory,
+        snapshot_bytes=snapshot_bytes,
+        catalog_bytes=catalog_bytes,
+        snapshot_schema_version=document.schema_version,
+        catalog_schema_version=str(catalog["schema_version"]),
+        source=parser_pokechamdb.SOURCE_NAME,
+        created_at=fetched_at,
+        snapshot_filename=SNAPSHOT_FILENAME,
+        catalog_filename=MOVE_CATALOG_FILENAME,
+    )
+
+    # Flat-file compatibility mirror for existing readers (e.g. the battle
+    # UI's SnapshotOpponentMetaProvider), written from the exact same
+    # already-committed bytes. This mirror step is NOT the source of the
+    # atomicity guarantee -- the generation pointer above already is -- it
+    # is a best-effort convenience copy for callers that don't yet resolve
+    # through the generation pointer.
     snapshot_path = intel_directory / SNAPSHOT_FILENAME
+    catalog_path = intel_directory / MOVE_CATALOG_FILENAME
     write_snapshot_atomic(
         snapshot_path,
         records,
@@ -363,11 +411,6 @@ def run_update_opponent_intel(args: argparse.Namespace) -> int:
         format=args.format_,
         fetched_at=fetched_at,
     )
-
-    document = read_snapshot(snapshot_path)
-    assert document is not None  # we just wrote it
-    catalog: dict[str, Any] = build_move_catalog(document)
-    catalog_path = intel_directory / MOVE_CATALOG_FILENAME
     write_move_catalog_atomic(catalog_path, catalog)
 
     print(

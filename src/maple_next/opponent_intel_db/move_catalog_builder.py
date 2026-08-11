@@ -59,7 +59,19 @@ def _atomic_write(path: Path, content: bytes) -> None:
             temporary.unlink()
 
 
-def write_move_catalog_atomic(path: Path, catalog: dict[str, Any]) -> None:
+def encode_move_catalog(catalog: dict[str, Any]) -> bytes:
+    """The exact canonical bytes a move catalog dict serializes to.
+
+    Shared by :func:`write_move_catalog_atomic` and the atomic multi-file
+    generation commit in ``generation_store.py`` for the same
+    byte-identical-in-both-places reason as ``snapshot_store.
+    encode_snapshot_document``.
+    """
+
     text = json.dumps(catalog, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-    encoded = text.encode("utf-8")
+    return text.encode("utf-8")
+
+
+def write_move_catalog_atomic(path: Path, catalog: dict[str, Any]) -> None:
+    encoded = encode_move_catalog(catalog)
     _atomic_write(path, encoded)

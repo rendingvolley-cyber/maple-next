@@ -46,7 +46,7 @@ from maple_next.domain.battle_events import (
     apply_stage_event,
 )
 from maple_next.domain.enums import ActionType, ResultDisposition
-from maple_next.domain.opponent_intel import possible_abilities_for_species
+from maple_next.domain.opponent_intel import MatchOpponentFacts, possible_abilities_for_species
 from maple_next.domain.species_ability_catalog import (
     SpeciesCatalogCoverageError,
     canonical_species_ability_catalog,
@@ -411,6 +411,82 @@ class TurnStateFlowController(MatchFlowController):
             generation=identity.generation,
             opponent_entity_id=opponent_entity_id,
         )
+
+    @staticmethod
+    def _same_opponent_species(left: str, right: str) -> bool:
+        """Compare confirmed species by canonical entity, with exact fallback.
+
+        The fallback supports explicitly recorded species outside the local
+        catalog without ever merging two different spellings or inventing an
+        identity for them.
+        """
+
+        left_name = left.strip()
+        right_name = right.strip()
+        if not left_name or not right_name:
+            return False
+        catalog = canonical_species_ability_catalog()
+        try:
+            left_id = catalog.resolve_species(left_name).species_id
+            right_id = catalog.resolve_species(right_name).species_id
+        except SpeciesCatalogCoverageError:
+            return left_name == right_name
+        return left_id == right_id
+
+    def opponent_match_facts(
+        self, species: str, *, remembered_ability: str | None = None
+    ) -> MatchOpponentFacts:
+        """Confirmed facts for one current opponent entity in this exact match.
+
+        Human-recorded opponent MOVE names are joined to the confirmed state
+        for the same ``turn_id``. Exact session/match/generation filtering and
+        species/entity comparison prevent observations leaking across an
+        opponent, match, session, or generation. There is deliberately no
+        inference from advice, notes, deltas, OCR, or population metadata.
+        """
+
+        identity = self._safe_current_identity()
+        species_name = species.strip()
+        if identity is None or not species_name:
+            return MatchOpponentFacts(ability=remembered_ability)
+        states = self._repository.list_confirmed_turn_states_for_match(
+            session_id=identity.session_id,
+            match_id=identity.match_id,
+            generation=identity.generation,
+        )
+        if not states:
+            return MatchOpponentFacts(ability=remembered_ability)
+        latest_active = states[-1].opponent_side.active
+        if (
+            not latest_active.is_confirmed
+            or latest_active.value is None
+            or not self._same_opponent_species(latest_active.value, species_name)
+        ):
+            return MatchOpponentFacts(ability=remembered_ability)
+
+        state_by_turn_id: dict[str, ConfirmedTurnState] = {}
+        for state in states:
+            # Ordered oldest -> newest, so a same-Turn human correction wins.
+            state_by_turn_id[state.identity.turn_id] = state
+
+        moves: list[str] = []
+        for action in self._repository.list_recorded_actions(identity.session_id):
+            if action.opponent_action_type is not ActionType.MOVE:
+                continue
+            action_state = state_by_turn_id.get(action.turn_id)
+            if action_state is None:
+                continue
+            active = action_state.opponent_side.active
+            if (
+                not active.is_confirmed
+                or active.value is None
+                or not self._same_opponent_species(active.value, species_name)
+            ):
+                continue
+            move = action.opponent_action_name.strip()
+            if move and move not in moves:
+                moves.append(move)
+        return MatchOpponentFacts(ability=remembered_ability, moves=tuple(moves))
 
     def rich_turn_advice_is_injected(self) -> bool:
         """True only for the fake/injected transport authorized in v5."""

@@ -24,12 +24,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any, cast
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QStringListModel, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QCompleter,
     QDialog,
     QFormLayout,
     QGridLayout,
@@ -1451,7 +1453,19 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             non_preview_row.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
 
         self._detach_from_parent_layout(self.turn_advice_group)
+        self._compose_turn_advice_hierarchy()
         self._rich_gemini_layout.addRow(self.turn_advice_group)
+        self.rich_gemini_status_audit = QWidget()
+        self.rich_gemini_status_audit.setProperty("audit", True)
+        status_audit_layout = QVBoxLayout(self.rich_gemini_status_audit)
+        status_audit_layout.setContentsMargins(0, 2, 0, 0)
+        status_audit_layout.setSpacing(1)
+        for field in (self.rich_gemini_status_label, self.rich_gemini_denial_label):
+            old_label = self._rich_gemini_layout.labelForField(field)
+            if old_label is not None:
+                old_label.setVisible(False)
+            status_audit_layout.addWidget(field)
+        self._rich_gemini_layout.addRow(self.rich_gemini_status_audit)
         self._detach_from_parent_layout(self.rich_gemini_group)
         self._detach_from_parent_layout(self.opponent_intel_widget)
         self._right_column_layout.insertWidget(0, self.rich_gemini_group)
@@ -1947,6 +1961,17 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             "QLabel#intelFacts { background: #0e2032; border: 1px solid #314b64; "
             "border-radius: 3px; padding: 8px; font-weight: 700; }"
             "QLabel#geminiEmpty { border: 1px dashed #314b64; color: #91a8bb; }"
+            "QWidget#advicePrimaryCard { background: #123456; border: 2px solid #6ea8d8; "
+            "border-radius: 5px; }"
+            "QLabel#advicePrimaryAction { font-size: 24px; font-weight: 900; color: #ffffff; }"
+            "QWidget#advicePredictionCard { background: #0e2032; border-left: 3px solid #6a89a5; }"
+            "QLabel#advicePrediction { font-size: 13px; font-weight: 700; }"
+            "QLabel#adviceReasons { font-size: 12px; line-height: 1.25; }"
+            "QWidget#adviceWarningCard { background: #361b1f; border: 1px solid #d66a72; "
+            "border-radius: 4px; }"
+            "QLabel#adviceWarnings { color: #ffd7da; font-size: 12px; font-weight: 800; }"
+            "QWidget[audit=\"true\"], QGroupBox[audit=\"true\"] { color: #91a8bb; "
+            "font-size: 9px; }"
             "QWidget[parityCard=\"true\"], QWidget[miniCard=\"true\"] { background: #0b1724; "
             "border: 1px solid #20384e; border-radius: 4px; }"
             "QWidget[candidateArea=\"true\"] { background: #0d2235; border: 1px solid #4a6984; "
@@ -1973,6 +1998,104 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
 
         self._apply_selection_v3_composition()
+
+    def _compose_turn_advice_hierarchy(self) -> None:
+        """Reparent existing bound labels into an operator-first hierarchy."""
+
+        form = self.turn_advice_group.layout()
+        assert isinstance(form, QFormLayout)
+        bound_labels = (
+            self.turn_advice_action_label,
+            self.turn_advice_prediction_label,
+            self.turn_advice_rationale_label,
+            self.turn_advice_warnings_label,
+            self.turn_advice_source_label,
+            self.turn_advice_model_label,
+            self.turn_advice_binding_label,
+            self.turn_advice_legality_label,
+        )
+        for field in bound_labels:
+            row_label = form.labelForField(field)
+            if row_label is not None:
+                row_label.setVisible(False)
+
+        primary_card = QWidget()
+        primary_card.setObjectName("advicePrimaryCard")
+        primary_layout = QVBoxLayout(primary_card)
+        primary_layout.setContentsMargins(14, 12, 14, 12)
+        primary_layout.setSpacing(4)
+        primary_heading = QLabel("推奨行動")
+        primary_heading.setProperty("muted", True)
+        self.turn_advice_action_label.setObjectName("advicePrimaryAction")
+        self.turn_advice_action_label.setWordWrap(True)
+        self.turn_advice_action_label.setMinimumHeight(64)
+        primary_layout.addWidget(primary_heading)
+        primary_layout.addWidget(self.turn_advice_action_label, 1)
+
+        prediction_card = QWidget()
+        prediction_card.setObjectName("advicePredictionCard")
+        prediction_layout = QVBoxLayout(prediction_card)
+        prediction_layout.setContentsMargins(10, 7, 10, 7)
+        prediction_layout.setSpacing(2)
+        prediction_heading = QLabel("相手予測")
+        prediction_heading.setProperty("muted", True)
+        self.turn_advice_prediction_label.setObjectName("advicePrediction")
+        prediction_layout.addWidget(prediction_heading)
+        prediction_layout.addWidget(self.turn_advice_prediction_label)
+
+        reasons_card = QWidget()
+        reasons_layout = QVBoxLayout(reasons_card)
+        reasons_layout.setContentsMargins(4, 6, 4, 4)
+        reasons_layout.setSpacing(3)
+        reasons_heading = QLabel("判断理由")
+        reasons_heading.setProperty("cardTitle", True)
+        self.turn_advice_rationale_label.setObjectName("adviceReasons")
+        reasons_layout.addWidget(reasons_heading)
+        reasons_layout.addWidget(self.turn_advice_rationale_label)
+
+        self.turn_advice_warning_card = QWidget()
+        self.turn_advice_warning_card.setObjectName("adviceWarningCard")
+        warning_layout = QVBoxLayout(self.turn_advice_warning_card)
+        warning_layout.setContentsMargins(10, 8, 10, 8)
+        warning_layout.setSpacing(3)
+        warning_heading = QLabel("警告")
+        warning_heading.setProperty("cardTitle", True)
+        self.turn_advice_warnings_label.setObjectName("adviceWarnings")
+        warning_layout.addWidget(warning_heading)
+        warning_layout.addWidget(self.turn_advice_warnings_label)
+
+        self.turn_advice_audit_group = QGroupBox("詳細 / AUDIT")
+        self.turn_advice_audit_group.setProperty("audit", True)
+        self.turn_advice_audit_group.setCheckable(True)
+        self.turn_advice_audit_group.setChecked(False)
+        audit_contents = QWidget()
+        audit_layout = QGridLayout(audit_contents)
+        audit_layout.setContentsMargins(2, 2, 2, 2)
+        audit_layout.setSpacing(3)
+        for index, (title, value) in enumerate(
+            (
+                ("Source", self.turn_advice_source_label),
+                ("Model", self.turn_advice_model_label),
+                ("Binding", self.turn_advice_binding_label),
+                ("Legality", self.turn_advice_legality_label),
+            )
+        ):
+            title_label = QLabel(title)
+            title_label.setProperty("muted", True)
+            value.setProperty("muted", True)
+            audit_layout.addWidget(title_label, index // 2, (index % 2) * 2)
+            audit_layout.addWidget(value, index // 2, (index % 2) * 2 + 1)
+        group_layout = QVBoxLayout(self.turn_advice_audit_group)
+        group_layout.setContentsMargins(7, 7, 7, 7)
+        group_layout.addWidget(audit_contents)
+        audit_contents.setVisible(False)
+        self.turn_advice_audit_group.toggled.connect(audit_contents.setVisible)
+
+        form.addRow(primary_card)
+        form.addRow(prediction_card)
+        form.addRow(reasons_card)
+        form.addRow(self.turn_advice_warning_card)
+        form.addRow(self.turn_advice_audit_group)
 
     def _apply_selection_v3_composition(self) -> None:
         """Build the accepted Selection UX from the existing bound controls."""
@@ -2815,18 +2938,30 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         opponent_action_row = QHBoxLayout()
         self.parity_opponent_action_input = QLineEdit()
         self.parity_opponent_action_input.setPlaceholderText("相手の実際の技・交代先を入力")
+        self._opponent_action_suggestion_model = QStringListModel(self)
+        self.opponent_action_completer = QCompleter(
+            self._opponent_action_suggestion_model, self.parity_opponent_action_input
+        )
+        self.opponent_action_completer.setCaseSensitivity(
+            Qt.CaseSensitivity.CaseInsensitive
+        )
+        self.opponent_action_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.opponent_action_completer.setCompletionMode(
+            QCompleter.CompletionMode.PopupCompletion
+        )
+        self.parity_opponent_action_input.setCompleter(self.opponent_action_completer)
+        cast(Any, self.opponent_action_completer.activated)[str].connect(
+            self._select_opponent_action_suggestion
+        )
+        self.opponent_move_suggestions: tuple[str, ...] = ()
+        self.opponent_switch_suggestions: tuple[str, ...] = ()
         self.parity_opponent_action_input.textChanged.connect(
             self.opponent_action_name_input.setText
         )
         self.opponent_action_name_input.textChanged.connect(
             self.parity_opponent_action_input.setText
         )
-        self.parity_opponent_unknown_button = QPushButton("不明")
-        self.parity_opponent_unknown_button.clicked.connect(
-            lambda: self.parity_opponent_action_input.setText("不明")
-        )
         opponent_action_row.addWidget(self.parity_opponent_action_input, 1)
-        opponent_action_row.addWidget(self.parity_opponent_unknown_button)
         opponent_layout.addLayout(opponent_action_row)
         actions_row.addWidget(opponent_card, 1)
         layout.addLayout(actions_row)
@@ -2908,7 +3043,75 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
     def _set_opponent_action_type(self, action_type: str) -> None:
         self.opponent_action_type_box.setCurrentText(action_type)
+        if action_type not in {"MOVE", "SWITCH"}:
+            self.opponent_action_name_input.clear()
+        self._show_opponent_action_suggestions(action_type)
         self._sync_parity_action_selection()
+
+    def _select_opponent_action_suggestion(self, value: str) -> None:
+        """Apply a candidate only after the human activates it."""
+
+        if self.opponent_action_type_box.currentText() not in {"MOVE", "SWITCH"}:
+            return
+        self.parity_opponent_action_input.setText(value)
+
+    @staticmethod
+    def _ordered_unique(values: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+    def _show_opponent_action_suggestions(self, action_type: str) -> None:
+        suggestions = (
+            self.opponent_move_suggestions
+            if action_type == "MOVE"
+            else self.opponent_switch_suggestions
+            if action_type == "SWITCH"
+            else ()
+        )
+        # Updating the completion model is presentation-only. In particular,
+        # setStringList never writes the authoritative free-text draft.
+        self._opponent_action_suggestion_model.setStringList(list(suggestions))
+
+    def _refresh_opponent_action_assist(
+        self,
+        current: OperatorView,
+        *,
+        species: str,
+        match_facts: MatchOpponentFacts,
+    ) -> None:
+        confirmed_state = self._bundle_c_controller.turn_state_summary().confirmed_state
+        confirmed_active = (
+            confirmed_state.opponent_side.active if confirmed_state is not None else None
+        )
+        current_is_confirmed = bool(
+            confirmed_active is not None
+            and confirmed_active.is_confirmed
+            and confirmed_active.value is not None
+            and self._bundle_c_controller._same_opponent_species(
+                confirmed_active.value, species
+            )
+        )
+        if not current_is_confirmed:
+            self.opponent_move_suggestions = ()
+            self.opponent_switch_suggestions = ()
+            self._show_opponent_action_suggestions(
+                self.opponent_action_type_box.currentText()
+            )
+            return
+        meta = self._opponent_meta_provider.get(species.strip())
+        meta_moves = tuple(entry.name for entry in meta.moves) if meta is not None else ()
+        self.opponent_move_suggestions = self._ordered_unique(
+            (*match_facts.moves, *meta_moves)
+        )
+        self.opponent_switch_suggestions = self._ordered_unique(
+            tuple(
+                member
+                for member in current.opponent_team
+                if not self._bundle_c_controller._same_opponent_species(member, species)
+            )
+        )
+        self._show_opponent_action_suggestions(
+            self.opponent_action_type_box.currentText()
+        )
 
     def _sync_parity_action_selection(self) -> None:
         own = self.actual_action_type_box.currentText()
@@ -3255,21 +3458,26 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         advice_visible = projection.primary_cta in {"RECORD_ACTUAL_ACTION", "NEXT_TURN"}
         self.gemini_empty_label.setVisible(not advice_visible)
         self.turn_advice_group.setVisible(advice_visible)
+        self.turn_advice_warning_card.setVisible(
+            current.turn_advice is not None and bool(current.turn_advice.warnings)
+        )
         self.gemini_empty_label.setText(
             "Turn撮影後に確認へ"
             if projection.primary_cta == "START_TURN_CAPTURE"
             else "SEND TURN TO GEMINI 待ち"
         )
         status = self._bundle_c_controller.rich_turn_advice_gemini_status()
-        self.rich_gemini_status_label.setText(_RICH_STATUS_LABELS.get(status.status, status.status))
+        self.rich_gemini_status_label.setText(
+            f"送信状態: {_RICH_STATUS_LABELS.get(status.status, status.status)}"
+        )
         if summary.provider_ready:
-            self.rich_gemini_denial_label.setText("provider-ready")
+            self.rich_gemini_denial_label.setText("Gate: provider-ready")
         else:
             reasons = ", ".join(
                 self._bundle_c_controller.denial_reason_message(code)
                 for code in summary.provider_ready_denial_reasons
             )
-            self.rich_gemini_denial_label.setText(reasons or "確認中")
+            self.rich_gemini_denial_label.setText(f"Gate: {reasons or '確認中'}")
 
         gemini_button = getattr(self, "_bundle_c_gemini_send_button", None)
         if gemini_button is not None:
@@ -3289,7 +3497,10 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         else:
             remembered_ability = self._bundle_c_controller.opponent_ability_for_entity(entity_id)
         self._render_ability_resolution()
-        self._render_opponent_intel(species, remembered_ability)
+        match_facts = self._render_opponent_intel(species, remembered_ability)
+        self._refresh_opponent_action_assist(
+            current, species=species, match_facts=match_facts
+        )
         self._refresh_self_switch_targets(current)
         self._update_v5_action_disclosure()
         self._sync_parity_action_selection()
@@ -3421,11 +3632,10 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         opponent_type = self.opponent_action_type_box.currentText()
         if opponent_type == "選択してください":
             opponent_type = ""
-        if opponent_type == "NO ACTION":
-            self.opponent_action_name_input.setText(opponent_type)
-            opponent_type = ""
-        elif opponent_type == "UNKNOWN":
-            self.opponent_action_name_input.setText("不明")
+        if opponent_type in {"NO ACTION", "UNKNOWN"}:
+            # Preserve the established persisted unknown/no-action semantic
+            # (no typed opponent action) without carrying a stale prior name.
+            self.opponent_action_name_input.clear()
             opponent_type = ""
         action_type = self.actual_action_type_box.currentText()
         action_name = self.actual_action_name_box.currentText().strip()
@@ -3529,16 +3739,28 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         else:
             remembered = self._bundle_c_controller.opponent_ability_for_entity(entity_id)
         self._render_ability_resolution()
-        self._render_opponent_intel(species, remembered)
+        match_facts = self._render_opponent_intel(species, remembered)
+        if hasattr(self, "_opponent_action_suggestion_model"):
+            self._refresh_opponent_action_assist(
+                self._bundle_c_controller.refresh(),
+                species=species,
+                match_facts=match_facts,
+            )
 
-    def _render_opponent_intel(self, species: str, remembered: str | None) -> None:
+    def _render_opponent_intel(
+        self, species: str, remembered: str | None
+    ) -> MatchOpponentFacts:
+        match_facts = self._bundle_c_controller.opponent_match_facts(
+            species, remembered_ability=remembered
+        )
         self.opponent_intel_widget.render_intel(
             build_opponent_intel(
                 species=species,
-                match_facts=MatchOpponentFacts(ability=remembered),
+                match_facts=match_facts,
                 provider=self._opponent_meta_provider,
             )
         )
+        return match_facts
 
     def _on_confirm_opponent_ability(self, _checked: bool = False) -> None:
         summary = self._bundle_c_controller.turn_state_summary()
@@ -3598,16 +3820,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
         opponent_type = self.opponent_action_type_box.currentText()
         self.opponent_action_name_input.setVisible(opponent_type in {"MOVE", "SWITCH"})
-        opponent_editable = opponent_type != "NO ACTION"
+        opponent_editable = opponent_type in {"MOVE", "SWITCH"}
         self.parity_opponent_action_input.setEnabled(opponent_editable)
-        self.parity_opponent_unknown_button.setEnabled(opponent_editable)
-        if opponent_type == "NO ACTION":
-            self.opponent_action_name_input.setText("NO ACTION")
-        elif opponent_type == "UNKNOWN" and self.opponent_action_name_input.text() in {
-            "",
-            "UNKNOWN",
-        }:
-            self.opponent_action_name_input.setText("不明")
+        if not opponent_editable and self.opponent_action_name_input.text():
+            self.opponent_action_name_input.clear()
+        self._show_opponent_action_suggestions(opponent_type)
 
     def _apply_review_effect(self, entry: EffectCatalogEntry) -> None:
         self._apply_effect(entry, source_side="opponent", result_phase=False)

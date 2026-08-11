@@ -682,7 +682,9 @@ def test_self_move_chip_selection_tracks_authoritative_draft_and_persists(
     repository.close()
 
 
-def test_opponent_action_is_manual_without_invented_move_candidates(tmp_path: Path) -> None:
+def test_opponent_action_remains_manual_and_unknown_is_single_type_control(
+    tmp_path: Path,
+) -> None:
     repository, controller, window, _transport = build_window(tmp_path)
     _advance_to_turn_capture_pending(controller)
     window.render_view()
@@ -695,10 +697,12 @@ def test_opponent_action_is_manual_without_invented_move_candidates(tmp_path: Pa
     assert window.opponent_action_name_input.text() == "人間が確認した技"
     assert window.parity_opponent_action_input.text() == "人間が確認した技"
 
-    window.parity_opponent_unknown_button.click()
+    assert not hasattr(window, "parity_opponent_unknown_button")
+    window.opponent_action_tabs["UNKNOWN"].click()
     window.render_view()
-    assert window.opponent_action_name_input.text() == "不明"
-    assert window.parity_opponent_action_input.text() == "不明"
+    assert window.opponent_action_name_input.text() == ""
+    assert window.parity_opponent_action_input.text() == ""
+    assert window.opponent_action_tabs["UNKNOWN"].text() == "不明"
     repository.close()
 
 

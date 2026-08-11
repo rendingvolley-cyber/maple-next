@@ -796,7 +796,9 @@ class SelectionFlowController:
             typed_opponent_type: ActionType | None = None
             if normalized_opponent_type:
                 typed_opponent_type = validate_action_type(normalized_opponent_type)
-            normalized_opponent_name = opponent_action_name.strip()
+            normalized_opponent_name = (
+                opponent_action_name.strip() if typed_opponent_type is not None else ""
+            )
             if typed_opponent_type is not None and not normalized_opponent_name:
                 raise OperatorInputError("相手の実際の行動名を入力してください。")
             try:

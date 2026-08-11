@@ -22,12 +22,15 @@ OCR polling, match export, or the turn-snapshot fixed-image flow. It only:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase, QResizeEvent
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -59,12 +62,15 @@ from maple_next.domain.effect_catalog import (
     EffectTiming,
     find_effect,
 )
-from maple_next.domain.enums import HpBucket
+from maple_next.domain.enums import HpBucket, MatchOutcome
+from maple_next.domain.move_catalog import MoveMatcher, normalize_move_query
 from maple_next.domain.opponent_intel import (
+    ChainedOpponentMetaProvider,
     LocalJsonOpponentMetaProvider,
     MatchOpponentFacts,
     OpponentIntelView,
     OpponentMetaProvider,
+    SnapshotOpponentMetaProvider,
     build_opponent_intel,
     species_has_entry_relevant_ability,
 )
@@ -76,11 +82,39 @@ from maple_next.domain.turn_state import (
     SideDelta,
     SideState,
 )
+from maple_next.opponent_intel_db.runtime_paths import (
+    intel_db_directory,
+    resolve_intel_runtime_root,
+)
 from maple_next.selection_roi.contracts import SelectionSlotMatch
 from maple_next.selection_roi.input_policy import SelectionInputOrigin
 from maple_next.ui.controller import OperatorView
+from maple_next.ui.move_autocomplete import MoveAutocompletePopup
+from maple_next.ui.opponent_intel_charts import (
+    BarChartWidget,
+    DonutChartWidget,
+    render_entries_as_text,
+)
 from maple_next.ui.turn_snapshot_official_window import TurnSnapshotMatchFlowWindow
 from maple_next.ui.turn_state_flow import TurnStateFlowController, TurnStateSummaryView
+
+_MOVE_CATALOG_FILENAME = "move_catalog.json"
+
+
+def _normalize_move_name(name: str) -> str:
+    return normalize_move_query(name)
+
+
+def _looks_stale(date_text: str | None) -> bool:
+    if not date_text:
+        return False
+    try:
+        parsed = datetime.fromisoformat(date_text.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - parsed) > timedelta(days=_STALE_SNAPSHOT_AGE_DAYS)
 
 _BATTLE_RECORD_TAB_INDEX = 1
 # Official Battle Record window client size, fixed (5224282289 withdraws
@@ -786,6 +820,9 @@ class _StateEventDialog(QDialog):
         self.accept()
 
 
+_STALE_SNAPSHOT_AGE_DAYS = 14  # freshness warning threshold; never blocks any Turn control.
+
+
 class _OpponentIntelWidget(QGroupBox):
     def __init__(self) -> None:
         super().__init__("Opponent INTEL")
@@ -795,6 +832,10 @@ class _OpponentIntelWidget(QGroupBox):
         head = QHBoxLayout()
         self.species_label = QLabel("不明")
         self.species_label.setObjectName("intelSpecies")
+        species_font = self.species_label.font()
+        species_font.setBold(True)
+        species_font.setPointSize(species_font.pointSize() + 3)
+        self.species_label.setFont(species_font)
         self.simple_badge = QLabel("簡易")
         self.simple_badge.setProperty("badge", True)
         head.addWidget(self.species_label, 1)
@@ -803,28 +844,42 @@ class _OpponentIntelWidget(QGroupBox):
         self.context_label = QLabel("active opponent / 対戦情報優先")
         self.context_label.setProperty("muted", True)
         layout.addWidget(self.context_label)
+
+        # Confirmed-this-match fact chips: always visually above/more
+        # prominent than the population-statistics charts below.
+        self.fact_chip_row = QHBoxLayout()
+        self.fact_chip_row.setSpacing(6)
+        self.fact_chips: dict[str, QLabel] = {}
+        for key in ("ability", "item", "moves"):
+            chip = QLabel()
+            chip.setProperty("factChip", True)
+            chip_font = chip.font()
+            chip_font.setBold(True)
+            chip.setFont(chip_font)
+            chip.setWordWrap(True)
+            self.fact_chips[key] = chip
+            self.fact_chip_row.addWidget(chip)
+        self.fact_chip_row.addStretch(1)
+        layout.addLayout(self.fact_chip_row)
+
         self.facts_label = QLabel("この対戦で判明：特性 不明 / 持ち物 不明 / 観測技 不明")
         self.facts_label.setWordWrap(True)
         self.facts_label.setObjectName("intelFacts")
         layout.addWidget(self.facts_label)
-        mini_row = QHBoxLayout()
-        mini_row.setSpacing(6)
-        self.mini_values: dict[str, QLabel] = {}
-        for key, title in (("moves", "採用技"), ("abilities", "特性"), ("items", "持ち物")):
-            mini = QWidget()
-            mini.setProperty("miniCard", True)
-            mini_layout = QVBoxLayout(mini)
-            mini_layout.setContentsMargins(8, 8, 8, 8)
-            title_label = QLabel(title)
-            title_label.setProperty("cardTitle", True)
-            value_label = QLabel("データなし")
-            value_label.setWordWrap(True)
-            value_label.setProperty("muted", True)
-            mini_layout.addWidget(title_label)
-            mini_layout.addWidget(value_label, 1)
-            self.mini_values[key] = value_label
-            mini_row.addWidget(mini, 1)
-        layout.addLayout(mini_row, 1)
+
+        # Population-statistics charts: secondary to the fact chips above.
+        self.chart_section = QWidget()
+        self.chart_layout = QHBoxLayout(self.chart_section)
+        self.chart_layout.setSpacing(8)
+        self.chart_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.chart_section, 1)
+
+        self.footer_label = QLabel("")
+        self.footer_label.setWordWrap(True)
+        self.footer_label.setProperty("muted", True)
+        self.footer_label.setObjectName("intelFooter")
+        layout.addWidget(self.footer_label)
+
         self.detail_button = QPushButton("INTEL詳細を表示")
         layout.addWidget(self.detail_button)
         self._view: OpponentIntelView | None = None
@@ -839,20 +894,121 @@ class _OpponentIntelWidget(QGroupBox):
         self.facts_label.setText(
             f"この対戦で判明：特性 {view.ability} / 持ち物 {view.item} / 観測技 {moves}"
         )
-        if view.meta is None:
-            self.mini_values["moves"].setText("TOP候補：データなし")
-            possible = " / ".join(view.possible_abilities) or "データなし"
-            self.mini_values["abilities"].setText(possible)
-            self.mini_values["items"].setText("TOP候補：データなし")
-        else:
-            move_summary = ", ".join(entry.name for entry in view.meta.moves[:3]) or "データなし"
-            ability_summary = (
-                ", ".join(entry.name for entry in view.meta.abilities[:2]) or "データなし"
+        ability_confirmed = view.ability != "不明" and " / " not in view.ability
+        item_confirmed = view.item != "不明"
+        moves_confirmed = bool(view.observed_moves)
+        self.fact_chips["ability"].setText(
+            f"特性: {view.ability} {'✓' if ability_confirmed else '(未確認)'}"
+        )
+        self.fact_chips["item"].setText(
+            f"持ち物: {view.item} {'✓' if item_confirmed else '(未確認)'}"
+        )
+        self.fact_chips["moves"].setText(
+            f"観測技: {moves} {'✓' if moves_confirmed else '(未確認)'}"
+        )
+        self._render_charts(view)
+        self._render_footer(view)
+
+    def _clear_chart_layout(self) -> None:
+        while self.chart_layout.count():
+            item = self.chart_layout.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _render_charts(self, view: OpponentIntelView) -> None:
+        """Fail-soft: any chart-construction exception falls back to plain text."""
+
+        self._clear_chart_layout()
+        try:
+            self._build_charts(view)
+        except Exception:
+            self._clear_chart_layout()
+            fallback = QLabel(self._fallback_chart_text(view))
+            fallback.setWordWrap(True)
+            self.chart_layout.addWidget(fallback)
+
+    @staticmethod
+    def _fallback_chart_text(view: OpponentIntelView) -> str:
+        meta = view.meta
+        if meta is None:
+            return "データなし"
+        observed = {_normalize_move_name(name) for name in view.observed_moves}
+        move_entries = [
+            (entry.name, entry.percentage, _normalize_move_name(entry.name) in observed)
+            for entry in meta.moves[:8]
+        ]
+        ability_entries = [(entry.name, entry.percentage) for entry in meta.abilities]
+        item_entries = [(entry.name, entry.percentage) for entry in meta.items]
+        return "\n\n".join(
+            (
+                "採用技:\n" + render_entries_as_text(move_entries),
+                "特性:\n" + render_entries_as_text(ability_entries),
+                "持ち物:\n" + render_entries_as_text(item_entries),
             )
-            item_summary = ", ".join(entry.name for entry in view.meta.items[:2]) or "データなし"
-            self.mini_values["moves"].setText(move_summary)
-            self.mini_values["abilities"].setText(ability_summary)
-            self.mini_values["items"].setText(item_summary)
+        )
+
+    def _build_charts(self, view: OpponentIntelView) -> None:
+        meta = view.meta
+        observed = {_normalize_move_name(name) for name in view.observed_moves}
+
+        moves_group = QGroupBox("採用技")
+        moves_layout = QVBoxLayout(moves_group)
+        moves_chart = BarChartWidget()
+        if meta is not None:
+            entries = [
+                (entry.name, entry.percentage, _normalize_move_name(entry.name) in observed)
+                for entry in meta.moves[:8]
+            ]
+        else:
+            entries = []
+        moves_chart.set_entries(entries)
+        moves_layout.addWidget(moves_chart)
+        self.chart_layout.addWidget(moves_group, 1)
+
+        abilities_group = QGroupBox("特性")
+        abilities_layout = QVBoxLayout(abilities_group)
+        abilities_chart = DonutChartWidget()
+        abilities_chart.set_center_text(
+            f"確認済み: {view.ability}" if view.ability != "不明" else "候補"
+        )
+        abilities_chart.set_entries(
+            [(entry.name, entry.percentage) for entry in meta.abilities] if meta else []
+        )
+        abilities_layout.addWidget(abilities_chart)
+        self.chart_layout.addWidget(abilities_group, 1)
+
+        items_group = QGroupBox("持ち物")
+        items_layout = QVBoxLayout(items_group)
+        item_entries = list(meta.items) if meta else []
+        items_chart: DonutChartWidget | BarChartWidget
+        if len(item_entries) <= 5:
+            items_chart = DonutChartWidget()
+            items_chart.set_entries([(entry.name, entry.percentage) for entry in item_entries])
+        else:
+            items_chart = BarChartWidget()
+            items_chart.set_entries(
+                [(entry.name, entry.percentage, False) for entry in item_entries[:8]]
+            )
+        items_layout.addWidget(items_chart)
+        self.chart_layout.addWidget(items_group, 1)
+
+    def _render_footer(self, view: OpponentIntelView) -> None:
+        meta = view.meta
+        if meta is None:
+            self.footer_label.setText("データソース: データなし")
+            return
+        parts = [meta.regulation or "データなし", meta.source or "データなし"]
+        if meta.source_updated_at:
+            parts.append(f"source updated: {meta.source_updated_at}")
+        if meta.fetched_at:
+            parts.append(f"local snapshot fetched: {meta.fetched_at}")
+        text = " / ".join(part for part in parts if part)
+        if _looks_stale(meta.fetched_at) or _looks_stale(meta.source_updated_at):
+            text += "  ⚠ データが古い可能性があります"
+        self.footer_label.setText(text)
 
     def _open_detail(self, _checked: bool = False) -> None:
         if self._view is None:
@@ -996,6 +1152,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         capture_backend: VideoCaptureBackend | None = None,
         auto_start_capture: bool = True,
     ) -> None:
+        # State refreshes must not override a tab the operator deliberately
+        # selected on this explicit two-tab operator surface.
+        self._preserve_operator_tab_selection = True
         super().__init__(
             controller,
             ocr_data_directory=ocr_data_directory,
@@ -1004,16 +1163,29 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
         self._apply_official_windows_font()
         self._bundle_c_controller: TurnStateFlowController = controller
-        self._opponent_meta_provider = opponent_meta_provider or LocalJsonOpponentMetaProvider(
-            ocr_data_directory / "opponent_meta_cache.json"
+        self._opponent_meta_provider = opponent_meta_provider or ChainedOpponentMetaProvider(
+            (
+                SnapshotOpponentMetaProvider(
+                    intel_db_directory(resolve_intel_runtime_root())
+                    / "species_stats_snapshot.json"
+                ),
+                LocalJsonOpponentMetaProvider(ocr_data_directory / "opponent_meta_cache.json"),
+            )
         )
         self._evidence_dialog: QDialog | None = None
         self._state_event_dialog: QDialog | None = None
         self._active_ability_entry_event_id: str | None = None
         self._provisional_ability_species: str | None = None
         self._pending_ocr_ability_confirmation: tuple[str, str] | None = None
+        self._move_matcher_cache: MoveMatcher | None = None
+        self.opponent_move_autocomplete = MoveAutocompletePopup(
+            self.opponent_action_name_input, self._load_move_matcher
+        )
         self._build_bundle_c_state_widgets()
         self._restructure_battle_record_layout()
+        # Normal operator landing starts in Battle Record. Explicit NEW MATCH
+        # navigation still selects Selection in SelectionSnapshotWindow.
+        self.header_tabs.setCurrentIndex(_BATTLE_RECORD_TAB_INDEX)
         self.actual_action_type_box.currentTextChanged.connect(
             lambda _text: self._sync_parity_action_selection()
         )
@@ -1423,10 +1595,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 roi_layout.addLayout(new_origins_form)
             self.diagnostics_drawer.add_widget(roi_widget)
 
-        # -- terminal-flow drawer: match end/export/recovery -------------------
-        self.terminal_flow_drawer = _CollapsibleSection("試合終了・Export・復旧")
+        # -- terminal-flow drawer: export/recovery -----------------------------
+        # MATCH END is composed beside the lifecycle bar below instead of
+        # being hidden behind this remote drawer.
+        self._detach_from_parent_layout(self.match_end_group)
+        self.match_end_group.setVisible(False)
+        self.terminal_flow_drawer = _CollapsibleSection("Export・復旧")
         for name in (
-            "match_end_group",
             "match_summary_group",
             "match_export_group",
             "match_recovery_group",
@@ -1661,6 +1836,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         page_layout.setSpacing(3)
         page_layout.addWidget(header_widget)
         page_layout.addLayout(body_row, 1)
+        self._build_local_match_end_area(page_layout)
         page_layout.addWidget(bottom_bar)
         body_row.setSpacing(4)
         bottom_bar_layout.setContentsMargins(0, 0, 0, 0)
@@ -1684,6 +1860,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             "min-height: 30px; }"
             "QPushButton[lifecycle=\"true\"][active=\"true\"] { background: #22c55e; "
             "color: #03140a; border-color: #4ade80; }"
+            "QGroupBox#matchEndLocalGroup { border-color: #9a6334; background: #17130f; }"
+            "QPushButton[matchOutcome=\"true\"]:checked { background: #2563eb; color: white; "
+            "border-color: #60a5fa; font-weight: 800; }"
+            "QPushButton[destructive=\"true\"] { background: #7f1d1d; color: #fee2e2; "
+            "border-color: #b45353; font-weight: 800; }"
+            "QPushButton[destructive=\"true\"]:disabled { background: #241719; "
+            "color: #765b60; border-color: #493238; }"
             "QWidget#liveToolsBar { background: #111827; border: 1px solid #334155; "
             "border-radius: 6px; }"
             "QLabel#liveToolStatus { color: #94a3b8; }"
@@ -1731,6 +1914,51 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
         self.header_tabs.removeTab(_BATTLE_RECORD_TAB_INDEX)
         self.header_tabs.insertTab(_BATTLE_RECORD_TAB_INDEX, page, "バトルレコード")
+
+    def _build_local_match_end_area(self, page_layout: QVBoxLayout) -> None:
+        """Compose one local, controller-bound outcome -> MATCH END surface."""
+
+        self.match_end_local_group = QGroupBox("MATCH END")
+        self.match_end_local_group.setObjectName("matchEndLocalGroup")
+        local_layout = QHBoxLayout(self.match_end_local_group)
+        local_layout.setContentsMargins(10, 5, 10, 5)
+        local_layout.setSpacing(8)
+
+        self.match_outcome_button_group = QButtonGroup(self.match_end_local_group)
+        self.match_outcome_button_group.setExclusive(True)
+        self.match_win_button = QPushButton("WIN")
+        self.match_loss_button = QPushButton("LOSS")
+        for button, outcome in (
+            (self.match_win_button, MatchOutcome.WIN.value),
+            (self.match_loss_button, MatchOutcome.LOSE.value),
+        ):
+            button.setCheckable(True)
+            button.setProperty("matchOutcome", True)
+            self.match_outcome_button_group.addButton(button)
+            button.clicked.connect(
+                lambda _checked=False, value=outcome: self.outcome_box.setCurrentText(value)
+            )
+            local_layout.addWidget(button)
+
+        # outcome_box remains the established result state. The visible
+        # buttons are projections of, and write directly to, that value.
+        self.outcome_box.setVisible(False)
+        self.outcome_box.currentTextChanged.connect(self._sync_match_outcome_buttons)
+        self._detach_from_parent_layout(self.outcome_confirm_checkbox)
+        self.outcome_confirm_checkbox.setText("選択した結果で試合を終了することを確認")
+        local_layout.addWidget(self.outcome_confirm_checkbox, 1)
+        self._detach_from_parent_layout(self.end_match_button)
+        self.end_match_button.setText("試合終了")
+        self.end_match_button.setProperty("destructive", True)
+        local_layout.addWidget(self.end_match_button)
+        page_layout.addWidget(self.match_end_local_group)
+        self._sync_match_outcome_buttons(self.outcome_box.currentText())
+
+    def _sync_match_outcome_buttons(self, outcome: str) -> None:
+        if not hasattr(self, "match_win_button"):
+            return
+        self.match_win_button.setChecked(outcome == MatchOutcome.WIN.value)
+        self.match_loss_button.setChecked(outcome == MatchOutcome.LOSE.value)
 
     def _apply_html_parity_composition(
         self,
@@ -1799,7 +2027,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.battle_context_label.setText("Match 未取得   Turn —")
         self.header_phase_badge = QPushButton("撮影待ち")
         self.header_phase_badge.setEnabled(False)
-        export_button = QPushButton("試合終了・Export")
+        export_button = QPushButton("Export・復旧")
         more_button = QPushButton("…")
 
         def open_terminal_flow() -> None:
@@ -2687,6 +2915,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             human_confirmed=True,
         )
         self.render_view(view)
+        if view.projection.session_state == "BATTLE_READY":
+            self.header_tabs.setCurrentIndex(_BATTLE_RECORD_TAB_INDEX)
 
     @staticmethod
     def _selection_v3_style() -> str:
@@ -3282,6 +3512,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
 
         super().render_view(current)
+        if hasattr(self, "match_end_local_group"):
+            endable = projection.session_state in {"BATTLE_READY", "TURN_RECORDED"}
+            self.match_end_group.setVisible(False)
+            self.match_end_local_group.setVisible(endable)
+            for outcome_button in (self.match_win_button, self.match_loss_button):
+                outcome_button.setEnabled(endable and current.persistence_reads_allowed)
+            self._sync_match_outcome_buttons(self.outcome_box.currentText())
         if action_result_draft is not None:
             self._restore_action_result_draft(action_result_draft)
         self._action_result_phase_active = action_result_phase
@@ -3823,14 +4060,63 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         match_facts = self._bundle_c_controller.opponent_match_facts(
             species, remembered_ability=remembered
         )
-        self.opponent_intel_widget.render_intel(
-            build_opponent_intel(
-                species=species,
-                match_facts=match_facts,
-                provider=self._opponent_meta_provider,
-            )
+        view = build_opponent_intel(
+            species=species,
+            match_facts=match_facts,
+            provider=self._opponent_meta_provider,
         )
+        self.opponent_intel_widget.render_intel(view)
+        self._refresh_move_autocomplete_boosts(match_facts, view)
         return match_facts
+
+    # -- move autocomplete (Bundle D/E) ---------------------------------------
+
+    def _load_move_matcher(self) -> MoveMatcher:
+        """Lazily build and cache the offline move matcher.
+
+        Missing/corrupt ``move_catalog.json`` fails soft to an empty
+        matcher -- autocomplete simply never shows candidates rather than
+        raising or taking down the input field.
+        """
+
+        if self._move_matcher_cache is not None:
+            return self._move_matcher_cache
+        names: list[str] = []
+        try:
+            root = resolve_intel_runtime_root()
+            catalog_path = intel_db_directory(root) / _MOVE_CATALOG_FILENAME
+            if catalog_path.is_file():
+                raw = json.loads(catalog_path.read_text(encoding="utf-8"))
+                moves = raw.get("moves") if isinstance(raw, dict) else None
+                if isinstance(moves, list):
+                    names = [
+                        str(entry["canonical_name"])
+                        for entry in moves
+                        if isinstance(entry, dict) and entry.get("canonical_name")
+                    ]
+        except Exception:
+            names = []
+        self._move_matcher_cache = MoveMatcher(names)
+        return self._move_matcher_cache
+
+    def _refresh_move_autocomplete_boosts(
+        self, match_facts: MatchOpponentFacts, view: OpponentIntelView
+    ) -> None:
+        popup = getattr(self, "opponent_move_autocomplete", None)
+        if popup is None:
+            return
+        boosts: dict[str, float] = {}
+        # Highest boost: moves this exact match/species has already observed.
+        for move in match_facts.moves:
+            boosts[move] = 100.0
+        # Medium boost: current species' population usage, scaled down.
+        if view.meta is not None:
+            for entry in view.meta.moves:
+                if entry.percentage is None:
+                    continue
+                candidate_boost = float(entry.percentage) / 10.0
+                boosts[entry.name] = max(boosts.get(entry.name, 0.0), candidate_boost)
+        popup.set_boosts(boosts)
 
     def _on_confirm_opponent_ability(self, _checked: bool = False) -> None:
         summary = self._bundle_c_controller.turn_state_summary()

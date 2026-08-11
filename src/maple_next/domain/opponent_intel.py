@@ -7,6 +7,7 @@ HTTP client and cannot fetch population data during a turn.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -64,12 +65,39 @@ class OpponentMetaSnapshot:
     moves: tuple[RankedUsage, ...] = ()
     abilities: tuple[RankedUsage, ...] = ()
     items: tuple[RankedUsage, ...] = ()
+    natures: tuple[RankedUsage, ...] = ()
+    partners: tuple[RankedUsage, ...] = ()
+    source_url: str = ""
+    source_updated_at: str | None = None
+    fetched_at: str = ""
+    ranking: float | None = None
 
 
 class OpponentMetaProvider(Protocol):
     """Read-only local boundary. Implementations must not use the network."""
 
     def get(self, species: str) -> OpponentMetaSnapshot | None: ...
+
+
+class ChainedOpponentMetaProvider:
+    """Tries each provider in order, returning the first non-``None`` result.
+
+    Used to prefer the pokechamdb-backed :class:`SnapshotOpponentMetaProvider`
+    while falling back to a legacy :class:`LocalJsonOpponentMetaProvider`
+    cache when no snapshot has been downloaded yet -- never raises on its
+    own, since every ``OpponentMetaProvider.get`` implementation already
+    fails soft to ``None``.
+    """
+
+    def __init__(self, providers: Sequence[OpponentMetaProvider]) -> None:
+        self._providers = tuple(providers)
+
+    def get(self, species: str) -> OpponentMetaSnapshot | None:
+        for provider in self._providers:
+            result = provider.get(species)
+            if result is not None:
+                return result
+        return None
 
 
 class LocalJsonOpponentMetaProvider:
@@ -118,6 +146,84 @@ class LocalJsonOpponentMetaProvider:
 
     def get(self, species: str) -> OpponentMetaSnapshot | None:
         return self._entries.get(species.strip())
+
+
+class SnapshotOpponentMetaProvider:
+    """Reads population statistics from the opponent-intel-db snapshot file.
+
+    Fails soft: any missing file, unreadable/malformed document, or unknown
+    species id simply yields ``None`` (INTEL shows no population stats),
+    never an exception. This mirrors the read-only, no-network contract of
+    :class:`OpponentMetaProvider`.
+    """
+
+    def __init__(self, snapshot_path: Path) -> None:
+        self._snapshot_path = snapshot_path
+
+    @staticmethod
+    def _ranked(entries: Sequence[object] | None) -> tuple[RankedUsage, ...]:
+        if entries is None:
+            return ()
+        result: list[RankedUsage] = []
+        for entry in entries:
+            name = str(getattr(entry, "name", "")).strip()
+            if not name:
+                continue
+            percentage = getattr(entry, "percentage", None)
+            result.append(
+                RankedUsage(name, float(percentage) if percentage is not None else None)
+            )
+        return tuple(result)
+
+    def get(self, species: str) -> OpponentMetaSnapshot | None:
+        # Import kept local to this method (rather than module top-level) so
+        # nothing here forces a hard dependency for callers that never use
+        # this provider -- consistent with the read-only, no-network-client
+        # helpers this module is documented to allow importing from UI code.
+        from maple_next.opponent_intel_db.snapshot_store import (
+            SnapshotStoreError,
+            read_snapshot,
+        )
+
+        species_key = species.strip()
+        if not species_key:
+            return None
+        try:
+            document = read_snapshot(self._snapshot_path)
+        except (SnapshotStoreError, OSError, ValueError):
+            return None
+        if document is None:
+            return None
+
+        normalized_key = species_key.lower().replace(" ", "-")
+        record = document.species.get(species_key) or document.species.get(normalized_key)
+        if record is None:
+            for candidate_id, candidate_record in document.species.items():
+                if candidate_id.lower() == normalized_key:
+                    record = candidate_record
+                    break
+                if candidate_record.display_name.strip().lower() == species_key.lower():
+                    record = candidate_record
+                    break
+        if record is None:
+            return None
+
+        regulation = f"{record.season}/{record.format}".strip("/") or record.season
+        return OpponentMetaSnapshot(
+            species=record.display_name or record.species_id,
+            regulation=regulation,
+            snapshot_date=record.fetched_at,
+            source=record.source,
+            moves=self._ranked(record.moves),
+            abilities=self._ranked(record.abilities),
+            items=self._ranked(record.items),
+            natures=self._ranked(record.natures),
+            partners=self._ranked(record.partners),
+            source_url=record.source_url,
+            source_updated_at=record.source_updated_at,
+            fetched_at=record.fetched_at,
+            ranking=record.ranking,
+        )
 
 
 @dataclass(frozen=True, slots=True)

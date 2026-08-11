@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
   "PySide6>=6.7,<7",
+  "requests>=2.31,<3",
 ]
 
 [project.optional-dependencies]

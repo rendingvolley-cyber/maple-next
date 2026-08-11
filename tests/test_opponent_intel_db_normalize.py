@@ -84,3 +84,44 @@ def test_caller_can_skip_malformed_species_and_continue() -> None:
 def test_ranked_entry_json_round_trip() -> None:
     entry = RankedEntry("Earthquake", 99.5)
     assert RankedEntry.from_json_dict(entry.to_json_dict()) == entry
+
+
+@pytest.mark.parametrize("percentage", [0, 0.1, 99.9, 100])
+def test_valid_percentage_boundaries_are_accepted(percentage: float) -> None:
+    entry = RankedEntry.from_json_dict({"name": "Earthquake", "percentage": percentage})
+    assert entry.percentage == float(percentage)
+
+
+@pytest.mark.parametrize(
+    "percentage",
+    [-1, 101, float("nan"), float("inf"), float("-inf")],
+    ids=["negative", "over-100", "nan", "positive-infinity", "negative-infinity"],
+)
+def test_invalid_percentage_is_rejected_not_clamped(percentage: float) -> None:
+    with pytest.raises(NormalizationError):
+        RankedEntry.from_json_dict({"name": "Earthquake", "percentage": percentage})
+
+
+def test_missing_percentage_stays_none_not_invented() -> None:
+    entry = RankedEntry.from_json_dict({"name": "Earthquake", "percentage": None})
+    assert entry.percentage is None
+
+
+def test_json_nan_and_infinity_literals_are_rejected_end_to_end() -> None:
+    """``json.loads`` accepts NaN/Infinity/-Infinity by default -- this must
+    not let them slip past normalization just because they round-tripped
+    through JSON without a decode error."""
+
+    import json
+
+    raw = '{"name": "Earthquake", "percentage": NaN}'
+    decoded = json.loads(raw)
+    with pytest.raises(NormalizationError):
+        RankedEntry.from_json_dict(decoded)
+
+
+def test_invalid_percentage_in_species_record_rejects_whole_species() -> None:
+    bad = dict(VALID_PARSED)
+    bad["moves"] = [{"name": "Earthquake", "percentage": 101.0}]
+    with pytest.raises(NormalizationError):
+        species_record_from_parsed(bad)

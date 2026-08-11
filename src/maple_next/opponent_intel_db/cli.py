@@ -11,8 +11,9 @@ import argparse
 import logging
 import sys
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from enum import Enum
 from typing import Any
 from urllib.parse import urljoin
 
@@ -51,8 +52,54 @@ class CliError(Exception):
     """Fail-closed error for the CLI's primary-source path."""
 
 
+class ImportStatus(Enum):
+    """Outcome of one primary-source import attempt.
+
+    Only :attr:`COMPLETE` may ever be promoted into the atomic snapshot on
+    disk -- every other status leaves the previous valid snapshot (if any)
+    completely untouched.
+    """
+
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+    SOURCE_FAILURE = "SOURCE_FAILURE"
+    VALIDATION_FAILURE = "VALIDATION_FAILURE"
+
+
+@dataclass(frozen=True, slots=True)
+class PrimaryImportResult:
+    """A staging-only result: never written to disk until validated complete."""
+
+    status: ImportStatus
+    records: tuple[SpeciesStatsRecord, ...]
+    attempted_species: int
+    succeeded_species: int
+    failed_species: tuple[str, ...]
+    reason: str | None = None
+
+
 def _list_page_url(season: str, format_: str) -> str:
     return f"{POKECHAMDB_BASE_URL}/?view=pokemon&format={format_}&season={season}"
+
+
+def validate_records_for_promotion(records: Sequence[SpeciesStatsRecord]) -> str | None:
+    """Defensive final check before a staged result may be promoted.
+
+    Returns ``None`` when the staged records are safe to promote, or a
+    reason string when they are not (duplicate species id, or a record
+    missing a required identity field). This runs *in addition to* --
+    never instead of -- the per-field validation already enforced when each
+    record was normalized.
+    """
+
+    seen: set[str] = set()
+    for record in records:
+        if not record.species_id.strip() or not record.display_name.strip():
+            return f"RECORD_MISSING_IDENTITY:{record.species_id!r}"
+        if record.species_id in seen:
+            return f"DUPLICATE_SPECIES_ID:{record.species_id}"
+        seen.add(record.species_id)
+    return None
 
 
 def fetch_primary_species(
@@ -61,13 +108,16 @@ def fetch_primary_species(
     season: str,
     format_: str,
     species_filter: str | None,
-) -> list[SpeciesStatsRecord]:
-    """Fetch + parse the primary (pokechamdb) source.
+) -> PrimaryImportResult:
+    """Fetch + parse the primary (pokechamdb) source into a staged result.
 
-    Raises :class:`CliError` only if the primary source fails completely
-    (list page unreachable/unparsable, or zero species end up importable).
-    A partial result -- some species parsed, others individually skipped --
-    is returned rather than raised.
+    Raises :class:`CliError` only when the import cannot be attempted at all
+    (list page unreachable/unparsable, or an explicit ``--species`` filter
+    matches nothing). Otherwise returns a :class:`PrimaryImportResult`
+    describing exactly how many of the species discovered on the list page
+    were actually imported -- the caller decides whether that is complete
+    enough to promote; this function never silently treats a partial result
+    as good and never hardcodes an expected species count.
     """
 
     list_url = _list_page_url(season, format_)
@@ -87,12 +137,16 @@ def fetch_primary_species(
             raise CliError(f"PRIMARY_SOURCE_SPECIES_NOT_FOUND:{species_filter}")
 
     records: list[SpeciesStatsRecord] = []
+    failed_species: list[str] = []
     for stub in stubs:
         detail_url = urljoin(POKECHAMDB_BASE_URL, stub.detail_path)
         try:
             detail_html = downloader.get(detail_url)
         except DownloadError as exc:
-            logger.warning("skipping species %s: fetch failed (%s)", stub.species_id, exc)
+            logger.warning(
+                "species %s fetch failed, import is now incomplete (%s)", stub.species_id, exc
+            )
+            failed_species.append(stub.species_id)
             continue
 
         fetched_at = datetime.now(UTC).isoformat()
@@ -109,14 +163,55 @@ def fetch_primary_species(
             )
             record = species_record_from_parsed(parsed)
         except (parser_pokechamdb.ParseError, NormalizationError) as exc:
-            logger.warning("skipping species %s: parse failed (%s)", stub.species_id, exc)
+            logger.warning(
+                "species %s parse failed, import is now incomplete (%s)", stub.species_id, exc
+            )
+            failed_species.append(stub.species_id)
             continue
 
         records.append(record)
 
-    if not records:
-        raise CliError("PRIMARY_SOURCE_YIELDED_ZERO_SPECIES")
-    return records
+    attempted = len(stubs)
+    succeeded = len(records)
+
+    if succeeded == 0:
+        return PrimaryImportResult(
+            status=ImportStatus.SOURCE_FAILURE,
+            records=(),
+            attempted_species=attempted,
+            succeeded_species=0,
+            failed_species=tuple(failed_species),
+            reason="PRIMARY_SOURCE_YIELDED_ZERO_SPECIES",
+        )
+
+    if failed_species:
+        return PrimaryImportResult(
+            status=ImportStatus.PARTIAL,
+            records=tuple(records),
+            attempted_species=attempted,
+            succeeded_species=succeeded,
+            failed_species=tuple(failed_species),
+            reason=f"REQUIRED_SPECIES_FETCH_OR_PARSE_FAILED:{len(failed_species)}/{attempted}",
+        )
+
+    validation_failure = validate_records_for_promotion(records)
+    if validation_failure is not None:
+        return PrimaryImportResult(
+            status=ImportStatus.VALIDATION_FAILURE,
+            records=tuple(records),
+            attempted_species=attempted,
+            succeeded_species=succeeded,
+            failed_species=(),
+            reason=validation_failure,
+        )
+
+    return PrimaryImportResult(
+        status=ImportStatus.COMPLETE,
+        records=tuple(records),
+        attempted_species=attempted,
+        succeeded_species=succeeded,
+        failed_species=(),
+    )
 
 
 def merge_secondary_supplement(
@@ -230,7 +325,7 @@ def run_update_opponent_intel(args: argparse.Namespace) -> int:
     downloader = SnapshotDownloader(min_interval_seconds=args.min_interval_seconds)
 
     try:
-        records = fetch_primary_species(
+        result = fetch_primary_species(
             downloader,
             season=args.season,
             format_=args.format_,
@@ -240,6 +335,21 @@ def run_update_opponent_intel(args: argparse.Namespace) -> int:
         print(f"UPDATE_FAILED: {exc}", file=sys.stderr)
         return 1
 
+    if result.status is not ImportStatus.COMPLETE:
+        # Fail-closed promotion gate: a partial, source-failed, or
+        # validation-failed staged result is never written to disk. Whatever
+        # snapshot/move-catalog files already exist at ``intel_directory``
+        # (a previous complete import, or nothing at all) are left exactly
+        # as they were -- this function returns before touching either file.
+        print(
+            f"UPDATE_INCOMPLETE: status={result.status.value} "
+            f"attempted={result.attempted_species} succeeded={result.succeeded_species} "
+            f"failed_species={list(result.failed_species)} reason={result.reason}",
+            file=sys.stderr,
+        )
+        return 1
+
+    records = list(result.records)
     if not args.skip_secondary:
         records = merge_secondary_supplement(downloader, records, species_filter=args.species)
 

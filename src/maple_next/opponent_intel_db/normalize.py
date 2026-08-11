@@ -9,12 +9,42 @@ coercing bad data into a record.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
 
 class NormalizationError(ValueError):
     """Raised when parser output or a JSON document cannot be normalized."""
+
+
+def _validate_percentage(percentage: Any) -> float | None:
+    """Validate a usage percentage, or ``None`` when genuinely missing.
+
+    ``None`` (missing/unknown) passes through unchanged -- that's the
+    existing schema's representation of "no data", not an invented default.
+    Anything else must be a finite real number in ``[0, 100]``: non-numeric
+    values, ``NaN``, ``+/-Infinity`` (Python's ``json`` module accepts the
+    non-standard ``NaN``/``Infinity``/``-Infinity`` literals by default, so
+    this cannot rely on JSON parsing alone to keep them out), and anything
+    outside the 0-100 range are all rejected outright -- never silently
+    clamped or coerced to ``None``.
+    """
+
+    if percentage is None:
+        return None
+    if not isinstance(percentage, (int, float)):
+        raise NormalizationError(
+            f"RankedEntry.percentage must be numeric or null, got {percentage!r}"
+        )
+    value = float(percentage)
+    if not math.isfinite(value):
+        raise NormalizationError(f"RankedEntry.percentage must be finite, got {percentage!r}")
+    if not (0.0 <= value <= 100.0):
+        raise NormalizationError(
+            f"RankedEntry.percentage must be within [0, 100], got {percentage!r}"
+        )
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,11 +63,8 @@ class RankedEntry:
         if not isinstance(name, str) or not name.strip():
             raise NormalizationError(f"RankedEntry.name must be a non-empty string, got {name!r}")
         percentage = data.get("percentage")
-        if percentage is not None and not isinstance(percentage, (int, float)):
-            raise NormalizationError(
-                f"RankedEntry.percentage must be numeric or null, got {percentage!r}"
-            )
-        return RankedEntry(name=name, percentage=None if percentage is None else float(percentage))
+        percentage_value = _validate_percentage(percentage)
+        return RankedEntry(name=name, percentage=percentage_value)
 
 
 def _ranked_entries_from_json(data: Any, *, field_name: str) -> tuple[RankedEntry, ...]:

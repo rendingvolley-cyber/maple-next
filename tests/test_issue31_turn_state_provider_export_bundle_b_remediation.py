@@ -433,11 +433,12 @@ def test_rich_prompt_requires_japanese_only_for_human_facing_text(
 
     prompt = build_rich_provider_prompt(request)
 
-    assert (
-        "Write opponent_prediction.summary, every reasons item, and every warnings item "
-        "in natural Japanese."
-    ) in prompt
+    assert "opponent_prediction.summary" in prompt
+    assert "decision-oriented, non-repetitive natural Japanese" in prompt
     assert "these human-facing fields must be Japanese" in prompt
+    assert "Use at most two reasons" in prompt
+    assert "actionable current-turn risk" in prompt
+    assert "otherwise return an empty warnings" in prompt
     assert "Do not translate or alter machine/contract values" in prompt
     assert "action_id" in prompt
     assert "action_type" in prompt

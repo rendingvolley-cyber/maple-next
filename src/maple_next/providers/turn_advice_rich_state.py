@@ -79,8 +79,12 @@ RICH_STATE_JOB_TYPE = "TURN_ADVICE"
 #: at the canonical rich prompt boundary rather than changing the shared
 #: Initial Prompt, the response schema, or any machine-facing request value.
 _RICH_JAPANESE_HUMAN_TEXT_INSTRUCTION: Final[str] = """Human-facing language requirement:
-Write opponent_prediction.summary, every reasons item, and every warnings item in natural Japanese.
+Write opponent_prediction.summary, every reasons item, and every warnings item in concise,
+decision-oriented, non-repetitive natural Japanese that a human can scan during the current turn.
 Even when the canonical request contains English text, these human-facing fields must be Japanese.
+Use at most two reasons and include only the most important decision factors.
+Add a warning only for a concrete, actionable current-turn risk; otherwise return an empty warnings
+array. Do not repeat a reason as a warning or inflate warnings with generic uncertainty.
 Do not translate or alter machine/contract values, including recommended_action action_id,
 action_type, or action_name; opponent_prediction category, predicted_action, or confidence;
 source/model/binding/legality values; IDs; hashes; or enum-like tokens."""

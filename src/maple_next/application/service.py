@@ -1554,7 +1554,9 @@ class BattleApplication:
             normalized_name = action_name.strip()
             if normalized_name not in legal_actions:
                 raise DomainError("ACTION_OUTSIDE_REVIEWED_LEGAL_ACTIONS")
-            normalized_opponent_name = opponent_action_name.strip()
+            normalized_opponent_name = (
+                opponent_action_name.strip() if opponent_action_type is not None else ""
+            )
 
             try:
                 action = RecordedAction(

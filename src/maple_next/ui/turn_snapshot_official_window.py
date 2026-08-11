@@ -67,6 +67,21 @@ class TurnSnapshotMatchFlowWindow(_BaseTurnSnapshotMatchFlowWindow):
             label.clear()
             label.setText("—")
         if reset_origins:
+            # A genuinely new Turn must not retain the previous Turn's
+            # visible form values after their origin metadata has been
+            # reset.  The following render re-projects every confirmed
+            # draft value; fields whose new draft is UNKNOWN stay empty and
+            # are therefore eligible for a fresh current-Turn OCR value.
+            # Programmatic clearing is guarded so it can never become a
+            # current-Turn human lock.
+            self._turn_snapshot_setting_fields = True
+            try:
+                self.self_active_box.setCurrentIndex(0)
+                self.opponent_active_input.clear()
+                self.self_hp_box.setCurrentIndex(0)
+                self.opponent_hp_box.setCurrentIndex(0)
+            finally:
+                self._turn_snapshot_setting_fields = False
             for field_key in self._turn_snapshot_field_locks:
                 self._turn_snapshot_field_locks[field_key] = False
                 self._turn_snapshot_origins[field_key] = "未入力"

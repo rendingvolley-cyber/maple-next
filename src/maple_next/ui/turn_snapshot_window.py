@@ -615,8 +615,13 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
                     and origin != _TURN_SNAPSHOT_ORIGIN_CARRY_FORWARD
                 ):
                     continue
-                self._set_turn_field(field_key, candidate.suggested_value)
+                # Publish the OCR origin before changing the widget.  Qt
+                # emits text/current-value signals synchronously; consumers
+                # that project identity-dependent UI (notably the opponent
+                # entry ability prompt) must observe this as fresh OCR, not
+                # as the preceding carry-forward origin.
                 self._turn_snapshot_origins[field_key] = _TURN_SNAPSHOT_ORIGIN_OCR
+                self._set_turn_field(field_key, candidate.suggested_value)
         finally:
             self._turn_snapshot_setting_fields = False
 
@@ -665,6 +670,9 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
         if field_key == OcrFieldKey.OPPONENT_HP.value:
             return self.opponent_hp_box.currentText() in {"", _PLACEHOLDER}
         return False
+
+    def _turn_field_has_fresh_ocr_origin(self, field_key: str) -> bool:
+        return self._turn_snapshot_origins.get(field_key) == _TURN_SNAPSHOT_ORIGIN_OCR
 
     def _set_turn_field(self, field_key: str, value: str) -> None:
         if field_key == OcrFieldKey.SELF_ACTIVE.value:

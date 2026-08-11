@@ -46,7 +46,11 @@ from maple_next.domain.battle_events import (
     apply_stage_event,
 )
 from maple_next.domain.enums import ActionType, ResultDisposition
-from maple_next.domain.opponent_intel import MatchOpponentFacts, possible_abilities_for_species
+from maple_next.domain.opponent_intel import (
+    MatchOpponentFacts,
+    possible_abilities_for_species,
+    species_has_entry_relevant_ability,
+)
 from maple_next.domain.species_ability_catalog import (
     SpeciesCatalogCoverageError,
     canonical_species_ability_catalog,
@@ -393,6 +397,61 @@ class TurnStateFlowController(MatchFlowController):
         except SpeciesCatalogCoverageError:
             return ()
         return (*possible, "不明") if possible else ()
+
+    def ocr_opponent_entry_ability_candidates(self, species: str) -> tuple[str, ...]:
+        """Project an immediate, read-only prompt for a fresh OCR identity.
+
+        This does not create or consume an entry event and never confirms an
+        ability.  It only exposes the same legal candidate set while the
+        current Turn is still awaiting human fact confirmation.  Durable
+        event creation remains exclusively in ``confirm_turn_facts``.
+        """
+
+        identity = self._safe_current_identity()
+        if identity is None:
+            return ()
+        candidates = self.opponent_ability_candidates(species)
+        if len(candidates) <= 1:
+            return ()
+        try:
+            entry_relevant = species_has_entry_relevant_ability(species)
+            opponent_entity_id = self.opponent_entity_id_for_species(species)
+        except SpeciesCatalogCoverageError:
+            return ()
+        if not entry_relevant:
+            return ()
+
+        events = self._repository.list_opponent_entry_events(
+            session_id=identity.session_id,
+            match_id=identity.match_id,
+            generation=identity.generation,
+        )
+        if any(event.turn_id == identity.turn_id for event in events):
+            return ()
+
+        previous_state = self._repository.get_latest_confirmed_turn_state_for_identity(
+            session_id=identity.session_id,
+            match_id=identity.match_id,
+            generation=identity.generation,
+        )
+        if previous_state is not None:
+            if previous_state.identity.turn_number >= identity.turn_number:
+                return ()
+            previous_active = previous_state.opponent_side.active
+            if (
+                previous_active.is_confirmed
+                and previous_active.value is not None
+                and self._same_opponent_species(previous_active.value, species)
+            ):
+                return ()
+
+        remembered = self._repository.get_opponent_ability_memory(
+            session_id=identity.session_id,
+            match_id=identity.match_id,
+            generation=identity.generation,
+            opponent_entity_id=opponent_entity_id,
+        )
+        return () if remembered is not None else candidates
 
     @staticmethod
     def opponent_entity_id_for_species(species: str) -> str:

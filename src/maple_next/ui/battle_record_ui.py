@@ -1010,6 +1010,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._evidence_dialog: QDialog | None = None
         self._state_event_dialog: QDialog | None = None
         self._active_ability_entry_event_id: str | None = None
+        self._provisional_ability_species: str | None = None
+        self._pending_ocr_ability_confirmation: tuple[str, str] | None = None
         self._build_bundle_c_state_widgets()
         self._restructure_battle_record_layout()
         self.actual_action_type_box.currentTextChanged.connect(
@@ -1919,23 +1921,29 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         ):
             self.workbench_stack.addWidget(workbench_page)
 
-        # Right rail occupies the full height: advice grows; INTEL is ~255px.
+        # The right rail is content-driven above and flexible below.  Advice
+        # retains its visual hierarchy without claiming blank vertical space;
+        # INTEL receives the remaining useful rail height.
         self.rich_gemini_group.setObjectName("geminiPanel")
         self.rich_gemini_group.setTitle("GEMINI TURN ADVICE")
         self.rich_gemini_group.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
         self.gemini_empty_label = QLabel("Turn撮影後に確認へ")
         self.gemini_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.gemini_empty_label.setObjectName("geminiEmpty")
         self.gemini_empty_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
+        self.gemini_empty_label.setMaximumHeight(64)
         self._rich_gemini_layout.addRow(self.gemini_empty_label)
         self.opponent_intel_widget.setMinimumHeight(245)
-        self.opponent_intel_widget.setMaximumHeight(255)
-        self._right_column_layout.setStretch(0, 55)
-        self._right_column_layout.setStretch(1, 0)
+        self.opponent_intel_widget.setMaximumHeight(16777215)
+        self.opponent_intel_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self._right_column_layout.setStretch(0, 0)
+        self._right_column_layout.setStretch(1, 1)
 
         # HTML palette and component language. No bright green state.
         page.setStyleSheet(
@@ -2017,18 +2025,24 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             if row_label is not None:
                 row_label.setVisible(False)
 
-        primary_card = QWidget()
-        primary_card.setObjectName("advicePrimaryCard")
-        primary_layout = QVBoxLayout(primary_card)
+        self.turn_advice_primary_card = QWidget()
+        self.turn_advice_primary_card.setObjectName("advicePrimaryCard")
+        self.turn_advice_primary_card.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        primary_layout = QVBoxLayout(self.turn_advice_primary_card)
         primary_layout.setContentsMargins(14, 12, 14, 12)
         primary_layout.setSpacing(4)
         primary_heading = QLabel("推奨行動")
         primary_heading.setProperty("muted", True)
         self.turn_advice_action_label.setObjectName("advicePrimaryAction")
         self.turn_advice_action_label.setWordWrap(True)
-        self.turn_advice_action_label.setMinimumHeight(64)
+        self.turn_advice_action_label.setMinimumHeight(36)
+        self.turn_advice_action_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
         primary_layout.addWidget(primary_heading)
-        primary_layout.addWidget(self.turn_advice_action_label, 1)
+        primary_layout.addWidget(self.turn_advice_action_label)
 
         prediction_card = QWidget()
         prediction_card.setObjectName("advicePredictionCard")
@@ -2089,7 +2103,10 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         audit_contents.setVisible(False)
         self.turn_advice_audit_group.toggled.connect(audit_contents.setVisible)
 
-        form.addRow(primary_card)
+        self.turn_advice_group.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        form.addRow(self.turn_advice_primary_card)
         form.addRow(prediction_card)
         form.addRow(reasons_card)
         form.addRow(self.turn_advice_warning_card)
@@ -3000,6 +3017,20 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if self.opponent_ability_box.findText(ability) < 0:
             self.opponent_ability_box.addItem(ability)
         self.opponent_ability_box.setCurrentText(ability)
+        if (
+            self._active_ability_entry_event_id is None
+            and self._provisional_ability_species is not None
+        ):
+            # The OCR projection is intentionally read-only: the human's
+            # explicit choice is staged until confirming the Turn creates
+            # the canonical entry event, then applied to that exact event.
+            self._pending_ocr_ability_confirmation = (
+                self._provisional_ability_species,
+                ability,
+            )
+            self.ability_resolution_group.setVisible(False)
+            self.parity_ability_card.setVisible(False)
+            return
         self._on_confirm_opponent_ability()
 
     @staticmethod
@@ -3614,6 +3645,27 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             weather=self.weather_field.to_known(),
             terrain=self.terrain_field.to_known(),
         )
+        pending_confirmation = self._pending_ocr_ability_confirmation
+        if pending_confirmation is not None:
+            species, ability = pending_confirmation
+            event = self._bundle_c_controller.turn_state_summary().pending_opponent_entry_event
+            if event is not None and event.species_name == species:
+                confirmed = self._bundle_c_controller.confirm_opponent_ability(
+                    opponent_entity_id=event.opponent_entity_id,
+                    species=event.species_name,
+                    ability=ability,
+                    entry_event_id=event.event_id,
+                )
+                self._pending_ocr_ability_confirmation = None
+                self._provisional_ability_species = None
+                self._active_ability_entry_event_id = None
+                if confirmed is not None:
+                    entry = find_effect(confirmed)
+                    if entry is not None:
+                        self.review_effect_candidate.propose(
+                            entry, prefix=f"相手の{entry.display_name_ja}"
+                        )
+                view = self._bundle_c_controller.refresh()
         self.render_view(view)
         # v5 has no separate facts/state phase. This trusted click is the
         # final pre-send confirmation and enters the existing rich-provider
@@ -3684,9 +3736,24 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         event = summary.pending_opponent_entry_event
         if event is None:
             self._active_ability_entry_event_id = None
-            self.ability_resolution_group.setVisible(False)
-            self.parity_ability_card.setVisible(False)
+            species = self.opponent_active_input.text().strip()
+            pending = self._pending_ocr_ability_confirmation
+            if pending is not None and pending[0] != species:
+                self._pending_ocr_ability_confirmation = None
+                pending = None
+            candidates: tuple[str, ...] = ()
+            if self._turn_field_has_fresh_ocr_origin("opponent_active"):
+                candidates = self._bundle_c_controller.ocr_opponent_entry_ability_candidates(
+                    species
+                )
+            should_ask = bool(candidates) and pending is None
+            self._provisional_ability_species = species if should_ask else None
+            self.ability_resolution_group.setVisible(should_ask)
+            self.parity_ability_card.setVisible(should_ask)
+            if should_ask:
+                self._set_ability_candidates(candidates)
             return
+        self._provisional_ability_species = None
         if event.species_id is None:
             self._bundle_c_controller.handle_opponent_entry_event(event.event_id)
             self._active_ability_entry_event_id = None
@@ -3711,6 +3778,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.parity_ability_card.setVisible(should_ask)
         if not should_ask:
             return
+        self._set_ability_candidates(candidates)
+
+    def _set_ability_candidates(self, candidates: tuple[str, ...]) -> None:
         current_items = tuple(
             self.opponent_ability_box.itemText(index)
             for index in range(self.opponent_ability_box.count())
@@ -3775,6 +3845,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             ability=ability,
             entry_event_id=event.event_id,
         )
+        self._pending_ocr_ability_confirmation = None
+        self._provisional_ability_species = None
         self._active_ability_entry_event_id = None
         self.ability_resolution_group.setVisible(False)
         self.parity_ability_card.setVisible(False)

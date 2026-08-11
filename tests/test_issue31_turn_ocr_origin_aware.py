@@ -53,6 +53,10 @@ def _fresh_candidates() -> tuple[OcrCandidate, ...]:
     )
 
 
+def _single_hp_candidate(field: OcrFieldKey, value: str) -> tuple[OcrCandidate, ...]:
+    return (_candidate(field.value, value),)
+
+
 def _advance_to_second_turn(window, controller) -> None:
     _advance_to_turn_capture_pending(controller)
     window.render_view()
@@ -164,6 +168,78 @@ def test_current_turn_human_locks_survive_later_fresh_ocr_and_remain_editable(
     assert window.self_hp_box.isEnabled()
     assert window.opponent_hp_box.isEnabled()
 
+    window.close()
+    repository.close()
+
+
+def test_opponent_hp_updates_independently_without_changing_names_or_self_hp(
+    tmp_path: Path,
+) -> None:
+    repository, controller, window, _transport = build_window(
+        tmp_path,
+        capture_backend=CountingCaptureBackend(),
+        auto_start_capture=False,
+    )
+    _advance_to_second_turn(window, controller)
+    before_names = (window.self_active_box.currentText(), window.opponent_active_input.text())
+    before_self_hp = window.self_hp_box.currentText()
+
+    window._auto_fill_turn_snapshot_candidates(  # noqa: SLF001
+        _single_hp_candidate(OcrFieldKey.OPPONENT_HP, "1-10")
+    )
+
+    assert (window.self_active_box.currentText(), window.opponent_active_input.text()) == (
+        before_names
+    )
+    assert window.self_hp_box.currentText() == before_self_hp
+    assert window.opponent_hp_box.currentText() == "1-10"
+    window.close()
+    repository.close()
+
+
+def test_self_hp_updates_independently_without_changing_names_or_opponent_hp(
+    tmp_path: Path,
+) -> None:
+    repository, controller, window, _transport = build_window(
+        tmp_path,
+        capture_backend=CountingCaptureBackend(),
+        auto_start_capture=False,
+    )
+    _advance_to_second_turn(window, controller)
+    before_names = (window.self_active_box.currentText(), window.opponent_active_input.text())
+    before_opponent_hp = window.opponent_hp_box.currentText()
+
+    window._auto_fill_turn_snapshot_candidates(  # noqa: SLF001
+        _single_hp_candidate(OcrFieldKey.SELF_HP, "61-70")
+    )
+
+    assert (window.self_active_box.currentText(), window.opponent_active_input.text()) == (
+        before_names
+    )
+    assert window.self_hp_box.currentText() == "61-70"
+    assert window.opponent_hp_box.currentText() == before_opponent_hp
+    window.close()
+    repository.close()
+
+
+def test_current_turn_human_opponent_hp_remains_locked_against_later_ocr(
+    tmp_path: Path,
+) -> None:
+    repository, controller, window, _transport = build_window(
+        tmp_path,
+        capture_backend=CountingCaptureBackend(),
+        auto_start_capture=False,
+    )
+    _advance_to_second_turn(window, controller)
+    window._set_turn_field(OcrFieldKey.OPPONENT_HP.value, "31-40")  # noqa: SLF001
+    window._mark_turn_snapshot_manual(OcrFieldKey.OPPONENT_HP.value)  # noqa: SLF001
+
+    window._auto_fill_turn_snapshot_candidates(  # noqa: SLF001
+        _single_hp_candidate(OcrFieldKey.OPPONENT_HP, "1-10")
+    )
+
+    assert window.opponent_hp_box.currentText() == "31-40"
+    assert window._turn_snapshot_field_locks[OcrFieldKey.OPPONENT_HP.value]  # noqa: SLF001
     window.close()
     repository.close()
 

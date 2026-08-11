@@ -1,0 +1,3715 @@
+{
+  "action_history": [
+    {
+      "action_name": "とんぼがえり",
+      "action_order": "SELF_FIRST",
+      "action_type": "MOVE",
+      "opponent_action_name": "じゃれつく",
+      "opponent_action_type": "MOVE",
+      "turn_number": 1
+    },
+    {
+      "action_name": "バレットパンチ",
+      "action_order": "SELF_FIRST",
+      "action_type": "MOVE",
+      "opponent_action_name": "",
+      "opponent_action_type": null,
+      "turn_number": 2
+    },
+    {
+      "action_name": "つるぎのまい",
+      "action_order": "OPPONENT_FIRST",
+      "action_type": "MOVE",
+      "opponent_action_name": "りゅうのはどう",
+      "opponent_action_type": "MOVE",
+      "turn_number": 3
+    },
+    {
+      "action_name": "はたきおとす",
+      "action_order": "UNKNOWN",
+      "action_type": "MOVE",
+      "opponent_action_name": "ちょうはつ",
+      "opponent_action_type": "MOVE",
+      "turn_number": 4
+    },
+    {
+      "action_name": "バレットパンチ",
+      "action_order": "SELF_FIRST",
+      "action_type": "MOVE",
+      "opponent_action_name": "",
+      "opponent_action_type": null,
+      "turn_number": 5
+    },
+    {
+      "action_name": "バレットパンチ",
+      "action_order": "SELF_FIRST",
+      "action_type": "MOVE",
+      "opponent_action_name": "クイックターン",
+      "opponent_action_type": "MOVE",
+      "turn_number": 6
+    },
+    {
+      "action_name": "バレットパンチ",
+      "action_order": "SELF_FIRST",
+      "action_type": "MOVE",
+      "opponent_action_name": "",
+      "opponent_action_type": null,
+      "turn_number": 7
+    }
+  ],
+  "ended_at_utc": "2026-08-11T10:48:02.926981+00:00",
+  "final_battle_revision": 33,
+  "generation": 20,
+  "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+  "outcome": "WIN",
+  "schema_version": "maple-match.v3",
+  "selection": {
+    "lead": "マスカーニャ",
+    "opponent_team": [
+      "イルカマン",
+      "ゲンガー",
+      "ボスゴドラ",
+      "スピアー",
+      "ニンフィア",
+      "サザンドラ"
+    ],
+    "selected_three": [
+      "マスカーニャ",
+      "ハッサム",
+      "ガブリアス"
+    ],
+    "selected_three_builds": [
+      {
+        "ability": "へんげんじざい",
+        "held_item": "きあいのタスキ",
+        "moves": [
+          "トリックフラワー",
+          "トリプルアクセル",
+          "とんぼがえり",
+          "はたきおとす"
+        ],
+        "nature": "いじっぱり",
+        "pokemon": "マスカーニャ",
+        "stat_points": {
+          "attack": 32,
+          "defense": 0,
+          "hp": 2,
+          "special_attack": 0,
+          "special_defense": 0,
+          "speed": 32
+        }
+      },
+      {
+        "ability": "テクニシャン",
+        "held_item": "ハッサムナイト",
+        "moves": [
+          "バレットパンチ",
+          "つるぎのまい",
+          "インファイト",
+          "はたきおとす"
+        ],
+        "nature": "いじっぱり",
+        "pokemon": "ハッサム",
+        "stat_points": {
+          "attack": 32,
+          "defense": 2,
+          "hp": 32,
+          "special_attack": 0,
+          "special_defense": 0,
+          "speed": 0
+        }
+      },
+      {
+        "ability": "さめはだ",
+        "held_item": "こだわりスカーフ",
+        "moves": [
+          "じしん",
+          "げきりん",
+          "いわなだれ",
+          "ほのおのキバ"
+        ],
+        "nature": "ようき",
+        "pokemon": "ガブリアス",
+        "stat_points": {
+          "attack": 32,
+          "defense": 0,
+          "hp": 2,
+          "special_attack": 0,
+          "special_defense": 0,
+          "speed": 32
+        }
+      }
+    ],
+    "self_team": [
+      "ブリジュラス",
+      "ハッサム",
+      "ゲッコウガ",
+      "ガブリアス",
+      "ラウドボーン",
+      "マスカーニャ"
+    ],
+    "self_team_build": {
+      "battle_format": "SINGLE_3",
+      "game": "pokemon-champions",
+      "members": [
+        {
+          "ability": "じきゅうりょく",
+          "held_item": "オボンのみ",
+          "moves": [
+            "ステルスロック",
+            "１０まんボルト",
+            "りゅうせいぐん",
+            "ラスターカノン"
+          ],
+          "nature": "ひかえめ",
+          "pokemon": "ブリジュラス",
+          "stat_points": {
+            "attack": 0,
+            "defense": 0,
+            "hp": 2,
+            "special_attack": 32,
+            "special_defense": 0,
+            "speed": 32
+          }
+        },
+        {
+          "ability": "テクニシャン",
+          "held_item": "ハッサムナイト",
+          "moves": [
+            "バレットパンチ",
+            "つるぎのまい",
+            "インファイト",
+            "はたきおとす"
+          ],
+          "nature": "いじっぱり",
+          "pokemon": "ハッサム",
+          "stat_points": {
+            "attack": 32,
+            "defense": 2,
+            "hp": 32,
+            "special_attack": 0,
+            "special_defense": 0,
+            "speed": 0
+          }
+        },
+        {
+          "ability": "へんげんじざい",
+          "held_item": "ゲッコウガナイト",
+          "moves": [
+            "れいとうビーム",
+            "あくのはどう",
+            "ヘドロウェーブ",
+            "なみのり"
+          ],
+          "nature": "ひかえめ",
+          "pokemon": "ゲッコウガ",
+          "stat_points": {
+            "attack": 0,
+            "defense": 0,
+            "hp": 2,
+            "special_attack": 32,
+            "special_defense": 0,
+            "speed": 32
+          }
+        },
+        {
+          "ability": "さめはだ",
+          "held_item": "こだわりスカーフ",
+          "moves": [
+            "じしん",
+            "げきりん",
+            "いわなだれ",
+            "ほのおのキバ"
+          ],
+          "nature": "ようき",
+          "pokemon": "ガブリアス",
+          "stat_points": {
+            "attack": 32,
+            "defense": 0,
+            "hp": 2,
+            "special_attack": 0,
+            "special_defense": 0,
+            "speed": 32
+          }
+        },
+        {
+          "ability": "てんねん",
+          "held_item": "たべのこし",
+          "moves": [
+            "フレアソング",
+            "なまける",
+            "おにび",
+            "シャドーボール"
+          ],
+          "nature": "ずぶとい",
+          "pokemon": "ラウドボーン",
+          "stat_points": {
+            "attack": 0,
+            "defense": 32,
+            "hp": 32,
+            "special_attack": 0,
+            "special_defense": 2,
+            "speed": 0
+          }
+        },
+        {
+          "ability": "へんげんじざい",
+          "held_item": "きあいのタスキ",
+          "moves": [
+            "トリックフラワー",
+            "トリプルアクセル",
+            "とんぼがえり",
+            "はたきおとす"
+          ],
+          "nature": "いじっぱり",
+          "pokemon": "マスカーニャ",
+          "stat_points": {
+            "attack": 32,
+            "defense": 0,
+            "hp": 2,
+            "special_attack": 0,
+            "special_defense": 0,
+            "speed": 32
+          }
+        }
+      ],
+      "name": "旧Maple最終構築（復元）",
+      "schema_version": "maple-team.v2"
+    },
+    "self_team_build_sha256": "f318d983a4410b89e7d6ed132bb2095412a378fa0909a076dd67ca9bdf4dce81"
+  },
+  "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+  "turns": [
+    {
+      "action_order": "SELF_FIRST",
+      "actual_action": {
+        "action_name": "とんぼがえり",
+        "action_type": "MOVE"
+      },
+      "advice": {
+        "binding": "APPLIED",
+        "created_at_utc": "2026-08-11T10:43:50.167495+00:00",
+        "legality": "VALID",
+        "model": "gemini-3.5-flash-lite",
+        "opponent_prediction": "ニンフィアはフェアリー技やサブウェポンによる攻撃、または交代を選択する可能性が高いです。",
+        "rationale": "ニンフィア対面において、相手の行動選択や交代に対応しつつ有利な対面を作り直すため",
+        "recommended_action_name": "とんぼがえり",
+        "recommended_action_type": "MOVE",
+        "source_type": "GEMINI",
+        "warnings": [
+          "相手が攻撃的なフェアリー技や特殊技を選択した場合、マスカーニャが大きなダメージを受けるリスクがあります"
+        ]
+      },
+      "opponent_executed_action": {
+        "action_name": "じゃれつく",
+        "action_type": "MOVE"
+      },
+      "recorded_at_utc": "2026-08-11T10:44:28.931272+00:00",
+      "reviewed_facts": {
+        "created_at_utc": "2026-08-11T10:43:48.474424+00:00",
+        "human_note": "",
+        "legal_moves": [
+          "トリックフラワー",
+          "トリプルアクセル",
+          "とんぼがえり",
+          "はたきおとす"
+        ],
+        "legal_switches": [],
+        "opponent_active": "ニンフィア",
+        "opponent_hp": "100",
+        "provenance": "HUMAN_CONFIRMED",
+        "self_active": "マスカーニャ",
+        "self_active_build": {
+          "ability": "へんげんじざい",
+          "held_item": "きあいのタスキ",
+          "moves": [
+            "トリックフラワー",
+            "トリプルアクセル",
+            "とんぼがえり",
+            "はたきおとす"
+          ],
+          "nature": "いじっぱり",
+          "pokemon": "マスカーニャ",
+          "stat_points": {
+            "attack": 32,
+            "defense": 0,
+            "hp": 2,
+            "special_attack": 0,
+            "special_defense": 0,
+            "speed": 32
+          }
+        },
+        "self_hp": "100"
+      },
+      "rich_state": {
+        "confirmed_legal_actions": [
+          {
+            "action_name": "トリプルアクセル",
+            "action_type": "MOVE",
+            "confirmation_id": "0ff8ca02-2a29-4928-b36b-58cc1845224d",
+            "confirmed_at_utc": "2026-08-11T10:43:48.475424+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 6,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "14f21808-dbc3-44e7-894b-13c2d4ef49a2",
+              "turn_number": 1
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "トリックフラワー",
+            "action_type": "MOVE",
+            "confirmation_id": "45fc593e-e9d1-40ca-9c17-77b5494bf588",
+            "confirmed_at_utc": "2026-08-11T10:43:48.475424+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 6,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "14f21808-dbc3-44e7-894b-13c2d4ef49a2",
+              "turn_number": 1
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "はたきおとす",
+            "action_type": "MOVE",
+            "confirmation_id": "6e470a83-c9ed-4e67-a54b-ab06b25b6b63",
+            "confirmed_at_utc": "2026-08-11T10:43:48.475424+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 6,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "14f21808-dbc3-44e7-894b-13c2d4ef49a2",
+              "turn_number": 1
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "とんぼがえり",
+            "action_type": "MOVE",
+            "confirmation_id": "a9b6feb1-cea1-4f2a-91fc-e8af2a8c7bdf",
+            "confirmed_at_utc": "2026-08-11T10:43:48.475424+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 6,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "14f21808-dbc3-44e7-894b-13c2d4ef49a2",
+              "turn_number": 1
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          }
+        ],
+        "confirmed_turn_state": {
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:43:48.475424+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "confirmed_state_id": "69252a61-6971-44e0-8b54-f998bf80784c",
+          "evidence_id": null,
+          "identity": {
+            "battle_revision": 6,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "14f21808-dbc3-44e7-894b-13c2d4ef49a2",
+            "turn_number": 1
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "ニンフィア"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "100"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "previous_confirmed_state_id": null,
+          "self_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "マスカーニャ"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "100"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "terrain": {
+            "provenance_chain": [
+              "UNKNOWN"
+            ],
+            "status": "UNKNOWN"
+          },
+          "weather": {
+            "provenance_chain": [
+              "HUMAN_INPUT"
+            ],
+            "status": "CONFIRMED",
+            "value": "砂嵐"
+          }
+        },
+        "contract_version": "maple-match-rich-state.v1",
+        "evidence": null,
+        "source_action_result_delta": {
+          "based_on_confirmed_state_id": "69252a61-6971-44e0-8b54-f998bf80784c",
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:44:28.932276+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "delta_id": "724c2b09-d892-4cac-82ed-ad7ada1b6fc8",
+          "identity": {
+            "battle_revision": 6,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "14f21808-dbc3-44e7-894b-13c2d4ef49a2",
+            "turn_number": 1
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "self_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "terrain": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          },
+          "weather": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          }
+        }
+      },
+      "self_executed_action": {
+        "action_name": "とんぼがえり",
+        "action_type": "MOVE"
+      },
+      "turn_number": 1
+    },
+    {
+      "action_order": "SELF_FIRST",
+      "actual_action": {
+        "action_name": "バレットパンチ",
+        "action_type": "MOVE"
+      },
+      "advice": {
+        "binding": "APPLIED",
+        "created_at_utc": "2026-08-11T10:44:41.487933+00:00",
+        "legality": "VALID",
+        "model": "gemini-3.5-flash-lite",
+        "opponent_prediction": "ニンフィアが特殊技や引き先への交代を選択する可能性がある",
+        "rationale": "相手のニンフィアに対して先制かつ効果抜群のバレットパンチで大きなダメージを狙える; 天候が砂嵐の中、ハッサムのHPを維持しつつ安全に攻め手を継続できる",
+        "recommended_action_name": "バレットパンチ",
+        "recommended_action_type": "MOVE",
+        "source_type": "GEMINI",
+        "warnings": [
+          "相手が炎技やサブウェポンで反撃してくるリスクに注意する"
+        ]
+      },
+      "opponent_executed_action": null,
+      "recorded_at_utc": "2026-08-11T10:45:11.150830+00:00",
+      "reviewed_facts": {
+        "created_at_utc": "2026-08-11T10:44:39.714405+00:00",
+        "human_note": "",
+        "legal_moves": [
+          "バレットパンチ",
+          "つるぎのまい",
+          "インファイト",
+          "はたきおとす"
+        ],
+        "legal_switches": [],
+        "opponent_active": "ニンフィア",
+        "opponent_hp": "71-80",
+        "provenance": "HUMAN_CONFIRMED",
+        "self_active": "ハッサム",
+        "self_active_build": {
+          "ability": "テクニシャン",
+          "held_item": "ハッサムナイト",
+          "moves": [
+            "バレットパンチ",
+            "つるぎのまい",
+            "インファイト",
+            "はたきおとす"
+          ],
+          "nature": "いじっぱり",
+          "pokemon": "ハッサム",
+          "stat_points": {
+            "attack": 32,
+            "defense": 2,
+            "hp": 32,
+            "special_attack": 0,
+            "special_defense": 0,
+            "speed": 0
+          }
+        },
+        "self_hp": "81-90"
+      },
+      "rich_state": {
+        "confirmed_legal_actions": [
+          {
+            "action_name": "つるぎのまい",
+            "action_type": "MOVE",
+            "confirmation_id": "03cfd2e8-15a3-4808-bc96-fc9c4dfd25a7",
+            "confirmed_at_utc": "2026-08-11T10:44:39.715908+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 10,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "448b6c24-d31c-49cb-b395-e93a6aee2a15",
+              "turn_number": 2
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "バレットパンチ",
+            "action_type": "MOVE",
+            "confirmation_id": "3c9caae4-1f6b-40b2-b2f3-23e9610ebb40",
+            "confirmed_at_utc": "2026-08-11T10:44:39.715908+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 10,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "448b6c24-d31c-49cb-b395-e93a6aee2a15",
+              "turn_number": 2
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "インファイト",
+            "action_type": "MOVE",
+            "confirmation_id": "3e94a622-c432-41d4-bdef-0b46ea6f1607",
+            "confirmed_at_utc": "2026-08-11T10:44:39.715908+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 10,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "448b6c24-d31c-49cb-b395-e93a6aee2a15",
+              "turn_number": 2
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "はたきおとす",
+            "action_type": "MOVE",
+            "confirmation_id": "f088d8b5-77a2-4dec-8712-c599b9b4f905",
+            "confirmed_at_utc": "2026-08-11T10:44:39.715908+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 10,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "448b6c24-d31c-49cb-b395-e93a6aee2a15",
+              "turn_number": 2
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          }
+        ],
+        "confirmed_turn_state": {
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:44:39.715908+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "confirmed_state_id": "0524b4af-59b3-4cb0-a95d-9787f125f2cb",
+          "evidence_id": null,
+          "identity": {
+            "battle_revision": 10,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "448b6c24-d31c-49cb-b395-e93a6aee2a15",
+            "turn_number": 2
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "ニンフィア"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "71-80"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "previous_confirmed_state_id": "69252a61-6971-44e0-8b54-f998bf80784c",
+          "self_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "ハッサム"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "81-90"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "terrain": {
+            "provenance_chain": [
+              "UNKNOWN"
+            ],
+            "status": "UNKNOWN"
+          },
+          "weather": {
+            "provenance_chain": [
+              "HUMAN_INPUT"
+            ],
+            "status": "CONFIRMED",
+            "value": "砂嵐"
+          }
+        },
+        "contract_version": "maple-match-rich-state.v1",
+        "evidence": null,
+        "source_action_result_delta": {
+          "based_on_confirmed_state_id": "0524b4af-59b3-4cb0-a95d-9787f125f2cb",
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:45:11.151831+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "delta_id": "39d91792-eb8b-4596-8ece-30c2dbbf7d67",
+          "identity": {
+            "battle_revision": 10,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "448b6c24-d31c-49cb-b395-e93a6aee2a15",
+            "turn_number": 2
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "self_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "terrain": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          },
+          "weather": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          }
+        }
+      },
+      "self_executed_action": {
+        "action_name": "バレットパンチ",
+        "action_type": "MOVE"
+      },
+      "turn_number": 2
+    },
+    {
+      "action_order": "OPPONENT_FIRST",
+      "actual_action": {
+        "action_name": "つるぎのまい",
+        "action_type": "MOVE"
+      },
+      "advice": {
+        "binding": "APPLIED",
+        "created_at_utc": "2026-08-11T10:45:29.814179+00:00",
+        "legality": "VALID",
+        "model": "gemini-3.5-flash-lite",
+        "opponent_prediction": "サザンドラの攻撃または交代が予想されます。",
+        "rationale": "相手のサザンドラに対してハッサムの起点を作成し、裏のポケモンへの負荷を高める。; 相手の交代や行動に対して攻撃力を上げることで、次ターンの選択肢を有利に広げる。",
+        "recommended_action_name": "つるぎのまい",
+        "recommended_action_type": "MOVE",
+        "source_type": "GEMINI",
+        "warnings": [
+          "相手のサザンドラからの有効打による想定外のダメージや交代に注意する。"
+        ]
+      },
+      "opponent_executed_action": {
+        "action_name": "りゅうのはどう",
+        "action_type": "MOVE"
+      },
+      "recorded_at_utc": "2026-08-11T10:45:55.930900+00:00",
+      "reviewed_facts": {
+        "created_at_utc": "2026-08-11T10:45:27.996999+00:00",
+        "human_note": "",
+        "legal_moves": [
+          "バレットパンチ",
+          "つるぎのまい",
+          "インファイト",
+          "はたきおとす"
+        ],
+        "legal_switches": [],
+        "opponent_active": "サザンドラ",
+        "opponent_hp": "100",
+        "provenance": "HUMAN_CONFIRMED",
+        "self_active": "ハッサム",
+        "self_active_build": {
+          "ability": "テクニシャン",
+          "held_item": "ハッサムナイト",
+          "moves": [
+            "バレットパンチ",
+            "つるぎのまい",
+            "インファイト",
+            "はたきおとす"
+          ],
+          "nature": "いじっぱり",
+          "pokemon": "ハッサム",
+          "stat_points": {
+            "attack": 32,
+            "defense": 2,
+            "hp": 32,
+            "special_attack": 0,
+            "special_defense": 0,
+            "speed": 0
+          }
+        },
+        "self_hp": "81-90"
+      },
+      "rich_state": {
+        "confirmed_legal_actions": [
+          {
+            "action_name": "バレットパンチ",
+            "action_type": "MOVE",
+            "confirmation_id": "3f81a71f-40be-4526-bd9b-da24bc8a87e5",
+            "confirmed_at_utc": "2026-08-11T10:45:27.998503+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 14,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "cfb9e4c6-c6ba-47d4-9f4c-17a53cdb8f6f",
+              "turn_number": 3
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "はたきおとす",
+            "action_type": "MOVE",
+            "confirmation_id": "8ba60e02-69e6-4876-a9d6-37d66078411f",
+            "confirmed_at_utc": "2026-08-11T10:45:27.998503+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 14,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "cfb9e4c6-c6ba-47d4-9f4c-17a53cdb8f6f",
+              "turn_number": 3
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "インファイト",
+            "action_type": "MOVE",
+            "confirmation_id": "cbd0bc9c-9174-463c-b763-f9e813640e1e",
+            "confirmed_at_utc": "2026-08-11T10:45:27.998503+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 14,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "cfb9e4c6-c6ba-47d4-9f4c-17a53cdb8f6f",
+              "turn_number": 3
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "つるぎのまい",
+            "action_type": "MOVE",
+            "confirmation_id": "fea8c890-be3b-42d1-9514-da55a1ef831b",
+            "confirmed_at_utc": "2026-08-11T10:45:27.998503+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 14,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "cfb9e4c6-c6ba-47d4-9f4c-17a53cdb8f6f",
+              "turn_number": 3
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          }
+        ],
+        "confirmed_turn_state": {
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:45:27.998503+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "confirmed_state_id": "739c96eb-6d75-4331-84f1-bbdf6600d472",
+          "evidence_id": null,
+          "identity": {
+            "battle_revision": 14,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "cfb9e4c6-c6ba-47d4-9f4c-17a53cdb8f6f",
+            "turn_number": 3
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "サザンドラ"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "100"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "previous_confirmed_state_id": "0524b4af-59b3-4cb0-a95d-9787f125f2cb",
+          "self_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "ハッサム"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "81-90"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "terrain": {
+            "provenance_chain": [
+              "UNKNOWN"
+            ],
+            "status": "UNKNOWN"
+          },
+          "weather": {
+            "provenance_chain": [
+              "HUMAN_INPUT"
+            ],
+            "status": "CONFIRMED",
+            "value": "砂嵐"
+          }
+        },
+        "contract_version": "maple-match-rich-state.v1",
+        "evidence": null,
+        "source_action_result_delta": {
+          "based_on_confirmed_state_id": "739c96eb-6d75-4331-84f1-bbdf6600d472",
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:45:55.932900+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "delta_id": "2ea6cf80-ef5b-4a27-bbae-1b584854b4fd",
+          "identity": {
+            "battle_revision": 14,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "cfb9e4c6-c6ba-47d4-9f4c-17a53cdb8f6f",
+            "turn_number": 3
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "self_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "terrain": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          },
+          "weather": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          }
+        }
+      },
+      "self_executed_action": {
+        "action_name": "つるぎのまい",
+        "action_type": "MOVE"
+      },
+      "turn_number": 3
+    },
+    {
+      "action_order": "UNKNOWN",
+      "actual_action": {
+        "action_name": "はたきおとす",
+        "action_type": "MOVE"
+      },
+      "advice": {
+        "binding": "APPLIED",
+        "created_at_utc": "2026-08-11T10:46:04.224314+00:00",
+        "legality": "VALID",
+        "model": "gemini-3.5-flash-lite",
+        "opponent_prediction": "サザンドラ側は攻撃技を選択するか交代するか不確定である",
+        "rationale": "相手のサザンドラに対して高打点かつ道具を落とせるため有効である; ハッサムのHPが81-90の範囲で安定しており、リスクが低い",
+        "recommended_action_name": "はたきおとす",
+        "recommended_action_type": "MOVE",
+        "source_type": "GEMINI",
+        "warnings": [
+          "相手のサザンドラが交代するリスクがある"
+        ]
+      },
+      "opponent_executed_action": {
+        "action_name": "ちょうはつ",
+        "action_type": "MOVE"
+      },
+      "recorded_at_utc": "2026-08-11T10:46:19.988359+00:00",
+      "reviewed_facts": {
+        "created_at_utc": "2026-08-11T10:46:02.485531+00:00",
+        "human_note": "",
+        "legal_moves": [
+          "バレットパンチ",
+          "つるぎのまい",
+          "インファイト",
+          "はたきおとす"
+        ],
+        "legal_switches": [],
+        "opponent_active": "サザンドラ",
+        "opponent_hp": "100",
+        "provenance": "HUMAN_CONFIRMED",
+        "self_active": "ハッサム",
+        "self_active_build": {
+          "ability": "テクニシャン",
+          "held_item": "ハッサムナイト",
+          "moves": [
+            "バレットパンチ",
+            "つるぎのまい",
+            "インファイト",
+            "はたきおとす"
+          ],
+          "nature": "いじっぱり",
+          "pokemon": "ハッサム",
+          "stat_points": {
+            "attack": 32,
+            "defense": 2,
+            "hp": 32,
+            "special_attack": 0,
+            "special_defense": 0,
+            "speed": 0
+          }
+        },
+        "self_hp": "81-90"
+      },
+      "rich_state": {
+        "confirmed_legal_actions": [
+          {
+            "action_name": "つるぎのまい",
+            "action_type": "MOVE",
+            "confirmation_id": "4938de51-011c-4db5-a65d-0aa98f5520c5",
+            "confirmed_at_utc": "2026-08-11T10:46:02.491040+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 18,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "f8b91e91-9cb8-4adc-a56a-647d40a48151",
+              "turn_number": 4
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "はたきおとす",
+            "action_type": "MOVE",
+            "confirmation_id": "732c0ee1-6b28-42af-a28d-b4961c898bb5",
+            "confirmed_at_utc": "2026-08-11T10:46:02.491040+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 18,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "f8b91e91-9cb8-4adc-a56a-647d40a48151",
+              "turn_number": 4
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "インファイト",
+            "action_type": "MOVE",
+            "confirmation_id": "9c3dbff3-7a65-4797-b958-ce17b60fa77f",
+            "confirmed_at_utc": "2026-08-11T10:46:02.491040+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 18,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "f8b91e91-9cb8-4adc-a56a-647d40a48151",
+              "turn_number": 4
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "バレットパンチ",
+            "action_type": "MOVE",
+            "confirmation_id": "d73570f6-4598-4985-903b-0d65a5e2dae1",
+            "confirmed_at_utc": "2026-08-11T10:46:02.491040+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 18,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "f8b91e91-9cb8-4adc-a56a-647d40a48151",
+              "turn_number": 4
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          }
+        ],
+        "confirmed_turn_state": {
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:46:02.491040+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "confirmed_state_id": "75c5d8a5-9c84-4dbc-83fa-e1530651ea77",
+          "evidence_id": null,
+          "identity": {
+            "battle_revision": 18,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "f8b91e91-9cb8-4adc-a56a-647d40a48151",
+            "turn_number": 4
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "サザンドラ"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "100"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "previous_confirmed_state_id": "739c96eb-6d75-4331-84f1-bbdf6600d472",
+          "self_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "ハッサム"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "81-90"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "terrain": {
+            "provenance_chain": [
+              "UNKNOWN"
+            ],
+            "status": "UNKNOWN"
+          },
+          "weather": {
+            "provenance_chain": [
+              "HUMAN_INPUT"
+            ],
+            "status": "CONFIRMED",
+            "value": "砂嵐"
+          }
+        },
+        "contract_version": "maple-match-rich-state.v1",
+        "evidence": null,
+        "source_action_result_delta": {
+          "based_on_confirmed_state_id": "75c5d8a5-9c84-4dbc-83fa-e1530651ea77",
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:46:19.989359+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "delta_id": "263acef5-1daf-4dcf-be3c-25200af48c46",
+          "identity": {
+            "battle_revision": 18,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "f8b91e91-9cb8-4adc-a56a-647d40a48151",
+            "turn_number": 4
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "self_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "terrain": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          },
+          "weather": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          }
+        }
+      },
+      "self_executed_action": {
+        "action_name": "はたきおとす",
+        "action_type": "MOVE"
+      },
+      "turn_number": 4
+    },
+    {
+      "action_order": "SELF_FIRST",
+      "actual_action": {
+        "action_name": "バレットパンチ",
+        "action_type": "MOVE"
+      },
+      "advice": {
+        "binding": "APPLIED",
+        "created_at_utc": "2026-08-11T10:46:34.995118+00:00",
+        "legality": "VALID",
+        "model": "gemini-3.5-flash-lite",
+        "opponent_prediction": "サザンドラ側は攻撃または交代を選択してくる可能性が高い",
+        "rationale": "相手のサザンドラに対して先制の鋼技で大きな負荷を狙えるため; ハッサムの強力な先制技により行動順の不利を覆しやすいため",
+        "recommended_action_name": "バレットパンチ",
+        "recommended_action_type": "MOVE",
+        "source_type": "GEMINI",
+        "warnings": [
+          "相手の耐性や持ち物、隠し手によるカウンターに注意が必要"
+        ]
+      },
+      "opponent_executed_action": null,
+      "recorded_at_utc": "2026-08-11T10:46:54.323890+00:00",
+      "reviewed_facts": {
+        "created_at_utc": "2026-08-11T10:46:33.263964+00:00",
+        "human_note": "",
+        "legal_moves": [
+          "バレットパンチ",
+          "つるぎのまい",
+          "インファイト",
+          "はたきおとす"
+        ],
+        "legal_switches": [],
+        "opponent_active": "サザンドラ",
+        "opponent_hp": "61-70",
+        "provenance": "HUMAN_CONFIRMED",
+        "self_active": "ハッサム",
+        "self_active_build": {
+          "ability": "テクニシャン",
+          "held_item": "ハッサムナイト",
+          "moves": [
+            "バレットパンチ",
+            "つるぎのまい",
+            "インファイト",
+            "はたきおとす"
+          ],
+          "nature": "いじっぱり",
+          "pokemon": "ハッサム",
+          "stat_points": {
+            "attack": 32,
+            "defense": 2,
+            "hp": 32,
+            "special_attack": 0,
+            "special_defense": 0,
+            "speed": 0
+          }
+        },
+        "self_hp": "71-80"
+      },
+      "rich_state": {
+        "confirmed_legal_actions": [
+          {
+            "action_name": "はたきおとす",
+            "action_type": "MOVE",
+            "confirmation_id": "2b2c8300-0501-46f3-9f55-87835f66d4df",
+            "confirmed_at_utc": "2026-08-11T10:46:33.264964+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 22,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "7ab285b7-16f3-4d09-8d00-4652a5f60e56",
+              "turn_number": 5
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "バレットパンチ",
+            "action_type": "MOVE",
+            "confirmation_id": "2c2cfcba-17e2-47bd-9499-48bd7b47dd5f",
+            "confirmed_at_utc": "2026-08-11T10:46:33.264964+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 22,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "7ab285b7-16f3-4d09-8d00-4652a5f60e56",
+              "turn_number": 5
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "つるぎのまい",
+            "action_type": "MOVE",
+            "confirmation_id": "5f7e27b4-607e-4d62-8a03-7884307ce910",
+            "confirmed_at_utc": "2026-08-11T10:46:33.264964+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 22,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "7ab285b7-16f3-4d09-8d00-4652a5f60e56",
+              "turn_number": 5
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "インファイト",
+            "action_type": "MOVE",
+            "confirmation_id": "b82fb8ac-d832-4bfa-8034-25d89852d12b",
+            "confirmed_at_utc": "2026-08-11T10:46:33.264964+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 22,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "7ab285b7-16f3-4d09-8d00-4652a5f60e56",
+              "turn_number": 5
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          }
+        ],
+        "confirmed_turn_state": {
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:46:33.264964+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "confirmed_state_id": "3ba19efc-c075-4af7-a53c-26333c4e61d5",
+          "evidence_id": null,
+          "identity": {
+            "battle_revision": 22,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "7ab285b7-16f3-4d09-8d00-4652a5f60e56",
+            "turn_number": 5
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "サザンドラ"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "61-70"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "previous_confirmed_state_id": "75c5d8a5-9c84-4dbc-83fa-e1530651ea77",
+          "self_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "ハッサム"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "71-80"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "terrain": {
+            "provenance_chain": [
+              "UNKNOWN"
+            ],
+            "status": "UNKNOWN"
+          },
+          "weather": {
+            "provenance_chain": [
+              "HUMAN_INPUT"
+            ],
+            "status": "CONFIRMED",
+            "value": "砂嵐"
+          }
+        },
+        "contract_version": "maple-match-rich-state.v1",
+        "evidence": null,
+        "source_action_result_delta": {
+          "based_on_confirmed_state_id": "3ba19efc-c075-4af7-a53c-26333c4e61d5",
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:46:54.324889+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "delta_id": "b897d724-73b8-4747-83b9-b8121c98ab57",
+          "identity": {
+            "battle_revision": 22,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "7ab285b7-16f3-4d09-8d00-4652a5f60e56",
+            "turn_number": 5
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "self_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "after_value": 2,
+              "observation": "CHANGED",
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "terrain": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          },
+          "weather": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          }
+        }
+      },
+      "self_executed_action": {
+        "action_name": "バレットパンチ",
+        "action_type": "MOVE"
+      },
+      "turn_number": 5
+    },
+    {
+      "action_order": "SELF_FIRST",
+      "actual_action": {
+        "action_name": "バレットパンチ",
+        "action_type": "MOVE"
+      },
+      "advice": {
+        "binding": "APPLIED",
+        "created_at_utc": "2026-08-11T10:47:08.298540+00:00",
+        "legality": "VALID",
+        "model": "gemini-3.5-flash-lite",
+        "opponent_prediction": "イルカマン側はダメージを避けるための交代または攻撃技を選択してくると予想されます。",
+        "rationale": "ハッサムの攻撃が2段階上昇しており、先制技のバレットパンチでイルカマンに対して大ダメージを狙えます。; 天候が砂嵐状態であるため、継続的なダメージを考慮して先制で負荷をかけるのが有効です。",
+        "recommended_action_name": "バレットパンチ",
+        "recommended_action_type": "MOVE",
+        "source_type": "GEMINI",
+        "warnings": [
+          "相手が引き換える選択や耐久寄りの行動をとった場合の処理に注意してください。"
+        ]
+      },
+      "opponent_executed_action": {
+        "action_name": "クイックターン",
+        "action_type": "MOVE"
+      },
+      "recorded_at_utc": "2026-08-11T10:47:24.345142+00:00",
+      "reviewed_facts": {
+        "created_at_utc": "2026-08-11T10:47:06.608261+00:00",
+        "human_note": "",
+        "legal_moves": [
+          "バレットパンチ",
+          "つるぎのまい",
+          "インファイト",
+          "はたきおとす"
+        ],
+        "legal_switches": [],
+        "opponent_active": "イルカマン",
+        "opponent_hp": "100",
+        "provenance": "HUMAN_CONFIRMED",
+        "self_active": "ハッサム",
+        "self_active_build": {
+          "ability": "テクニシャン",
+          "held_item": "ハッサムナイト",
+          "moves": [
+            "バレットパンチ",
+            "つるぎのまい",
+            "インファイト",
+            "はたきおとす"
+          ],
+          "nature": "いじっぱり",
+          "pokemon": "ハッサム",
+          "stat_points": {
+            "attack": 32,
+            "defense": 2,
+            "hp": 32,
+            "special_attack": 0,
+            "special_defense": 0,
+            "speed": 0
+          }
+        },
+        "self_hp": "71-80"
+      },
+      "rich_state": {
+        "confirmed_legal_actions": [
+          {
+            "action_name": "はたきおとす",
+            "action_type": "MOVE",
+            "confirmation_id": "003c9bdb-79f9-4193-8877-c6c6c158bf04",
+            "confirmed_at_utc": "2026-08-11T10:47:06.609331+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 26,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "ac07c09d-dc97-474a-9c67-fc08e124e4db",
+              "turn_number": 6
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "つるぎのまい",
+            "action_type": "MOVE",
+            "confirmation_id": "45077a20-8fbe-494e-8ea7-d1c3e06eee49",
+            "confirmed_at_utc": "2026-08-11T10:47:06.609331+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 26,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "ac07c09d-dc97-474a-9c67-fc08e124e4db",
+              "turn_number": 6
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "バレットパンチ",
+            "action_type": "MOVE",
+            "confirmation_id": "808aef85-2cf5-41b2-998c-a86a7ab796ee",
+            "confirmed_at_utc": "2026-08-11T10:47:06.609331+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 26,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "ac07c09d-dc97-474a-9c67-fc08e124e4db",
+              "turn_number": 6
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "インファイト",
+            "action_type": "MOVE",
+            "confirmation_id": "8f4d2e3d-10ae-4db2-a3ce-d4fd3e47f18e",
+            "confirmed_at_utc": "2026-08-11T10:47:06.609331+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 26,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "ac07c09d-dc97-474a-9c67-fc08e124e4db",
+              "turn_number": 6
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          }
+        ],
+        "confirmed_turn_state": {
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:47:06.609331+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "confirmed_state_id": "18a657fd-cc2a-4fd1-be34-74a626cdc950",
+          "evidence_id": null,
+          "identity": {
+            "battle_revision": 26,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "ac07c09d-dc97-474a-9c67-fc08e124e4db",
+            "turn_number": 6
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "イルカマン"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "100"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "previous_confirmed_state_id": "3ba19efc-c075-4af7-a53c-26333c4e61d5",
+          "self_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "ハッサム"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 2
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "71-80"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "terrain": {
+            "provenance_chain": [
+              "UNKNOWN"
+            ],
+            "status": "UNKNOWN"
+          },
+          "weather": {
+            "provenance_chain": [
+              "HUMAN_INPUT"
+            ],
+            "status": "CONFIRMED",
+            "value": "砂嵐"
+          }
+        },
+        "contract_version": "maple-match-rich-state.v1",
+        "evidence": null,
+        "source_action_result_delta": {
+          "based_on_confirmed_state_id": "18a657fd-cc2a-4fd1-be34-74a626cdc950",
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:47:24.346143+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "delta_id": "6f8de69c-167d-40b3-9d68-4d99bd6bb7bf",
+          "identity": {
+            "battle_revision": 26,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "ac07c09d-dc97-474a-9c67-fc08e124e4db",
+            "turn_number": 6
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "self_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "after_value": 2,
+              "observation": "CHANGED",
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "terrain": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          },
+          "weather": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          }
+        }
+      },
+      "self_executed_action": {
+        "action_name": "バレットパンチ",
+        "action_type": "MOVE"
+      },
+      "turn_number": 6
+    },
+    {
+      "action_order": "SELF_FIRST",
+      "actual_action": {
+        "action_name": "バレットパンチ",
+        "action_type": "MOVE"
+      },
+      "advice": {
+        "binding": "APPLIED",
+        "created_at_utc": "2026-08-11T10:47:37.260100+00:00",
+        "legality": "VALID",
+        "model": "gemini-3.5-flash-lite",
+        "opponent_prediction": "HPが減少しているため、先制技や交代で生存を図る可能性が高いです",
+        "rationale": "攻撃が2段階上昇した状態で先制のバレットパンチを選択し、HPが41-50%の相手イルカマンを確実に仕留めにいくため; 砂嵐状態かつ自身の残りHPが61-70%であり、安全に先制技で処理することが最も確実なため",
+        "recommended_action_name": "バレットパンチ",
+        "recommended_action_type": "MOVE",
+        "source_type": "GEMINI",
+        "warnings": [
+          "相手がテラスタルや交代を選択した場合に備え、ダメージ量が不足するリスクに注意してください"
+        ]
+      },
+      "opponent_executed_action": null,
+      "recorded_at_utc": "2026-08-11T10:47:52.410445+00:00",
+      "reviewed_facts": {
+        "created_at_utc": "2026-08-11T10:47:35.352070+00:00",
+        "human_note": "",
+        "legal_moves": [
+          "バレットパンチ",
+          "つるぎのまい",
+          "インファイト",
+          "はたきおとす"
+        ],
+        "legal_switches": [],
+        "opponent_active": "イルカマン",
+        "opponent_hp": "41-50",
+        "provenance": "HUMAN_CONFIRMED",
+        "self_active": "ハッサム",
+        "self_active_build": {
+          "ability": "テクニシャン",
+          "held_item": "ハッサムナイト",
+          "moves": [
+            "バレットパンチ",
+            "つるぎのまい",
+            "インファイト",
+            "はたきおとす"
+          ],
+          "nature": "いじっぱり",
+          "pokemon": "ハッサム",
+          "stat_points": {
+            "attack": 32,
+            "defense": 2,
+            "hp": 32,
+            "special_attack": 0,
+            "special_defense": 0,
+            "speed": 0
+          }
+        },
+        "self_hp": "61-70"
+      },
+      "rich_state": {
+        "confirmed_legal_actions": [
+          {
+            "action_name": "バレットパンチ",
+            "action_type": "MOVE",
+            "confirmation_id": "cf1f9eb9-ae53-4bf5-9f3b-2716e05fb92c",
+            "confirmed_at_utc": "2026-08-11T10:47:35.353069+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 30,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "92ebf8b8-3ac7-4775-9ccc-38ad9343caf4",
+              "turn_number": 7
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "インファイト",
+            "action_type": "MOVE",
+            "confirmation_id": "da464be2-91a6-416d-aeb7-a7d6cd24e3a0",
+            "confirmed_at_utc": "2026-08-11T10:47:35.353069+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 30,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "92ebf8b8-3ac7-4775-9ccc-38ad9343caf4",
+              "turn_number": 7
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "つるぎのまい",
+            "action_type": "MOVE",
+            "confirmation_id": "e3748f38-51cc-42bb-9b15-4867bfc83f67",
+            "confirmed_at_utc": "2026-08-11T10:47:35.353069+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 30,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "92ebf8b8-3ac7-4775-9ccc-38ad9343caf4",
+              "turn_number": 7
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          },
+          {
+            "action_name": "はたきおとす",
+            "action_type": "MOVE",
+            "confirmation_id": "fe47ef35-da09-48b2-ac93-a3a364b9ceb0",
+            "confirmed_at_utc": "2026-08-11T10:47:35.353069+00:00",
+            "confirmed_by_human": true,
+            "identity": {
+              "battle_revision": 30,
+              "generation": 20,
+              "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+              "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+              "turn_id": "92ebf8b8-3ac7-4775-9ccc-38ad9343caf4",
+              "turn_number": 7
+            },
+            "provenance": "HUMAN_INPUT",
+            "source_prefill_id": null
+          }
+        ],
+        "confirmed_turn_state": {
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:47:35.353069+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "confirmed_state_id": "14273425-49e1-41a7-a861-dcac348862c5",
+          "evidence_id": null,
+          "identity": {
+            "battle_revision": 30,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "92ebf8b8-3ac7-4775-9ccc-38ad9343caf4",
+            "turn_number": 7
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "イルカマン"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "41-50"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "previous_confirmed_state_id": "18a657fd-cc2a-4fd1-be34-74a626cdc950",
+          "self_side": {
+            "accuracy_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "active": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "ハッサム"
+            },
+            "attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 2
+            },
+            "defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "evasion_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "hp_bucket": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": "61-70"
+            },
+            "side_effects": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            },
+            "special_attack_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "special_defense_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "speed_stage": {
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ],
+              "status": "CONFIRMED",
+              "value": 0
+            },
+            "status": {
+              "provenance_chain": [
+                "UNKNOWN"
+              ],
+              "status": "UNKNOWN"
+            }
+          },
+          "terrain": {
+            "provenance_chain": [
+              "UNKNOWN"
+            ],
+            "status": "UNKNOWN"
+          },
+          "weather": {
+            "provenance_chain": [
+              "HUMAN_INPUT"
+            ],
+            "status": "CONFIRMED",
+            "value": "砂嵐"
+          }
+        },
+        "contract_version": "maple-match-rich-state.v1",
+        "evidence": null,
+        "source_action_result_delta": {
+          "based_on_confirmed_state_id": "14273425-49e1-41a7-a861-dcac348862c5",
+          "confirmation": {
+            "confirmed_at_utc": "2026-08-11T10:47:52.411447+00:00",
+            "confirmed_by_human": true,
+            "provenance": "HUMAN_INPUT"
+          },
+          "delta_id": "3e8f2ebf-34b8-49c1-b9c2-3144b3856d49",
+          "identity": {
+            "battle_revision": 30,
+            "generation": 20,
+            "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+            "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+            "turn_id": "92ebf8b8-3ac7-4775-9ccc-38ad9343caf4",
+            "turn_number": 7
+          },
+          "opponent_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "self_side": {
+            "accuracy_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "active": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "attack_stage": {
+              "after_value": 2,
+              "observation": "CHANGED",
+              "provenance_chain": [
+                "HUMAN_INPUT"
+              ]
+            },
+            "defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "evasion_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "hp_bucket": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "side_effects": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_attack_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "special_defense_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "speed_stage": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            },
+            "status": {
+              "observation": "UNCHANGED",
+              "provenance_chain": [
+                "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+              ]
+            }
+          },
+          "terrain": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          },
+          "weather": {
+            "observation": "UNCHANGED",
+            "provenance_chain": [
+              "PREVIOUS_CONFIRMED_CARRY_FORWARD"
+            ]
+          }
+        }
+      },
+      "self_executed_action": {
+        "action_name": "バレットパンチ",
+        "action_type": "MOVE"
+      },
+      "turn_number": 7
+    }
+  ]
+}

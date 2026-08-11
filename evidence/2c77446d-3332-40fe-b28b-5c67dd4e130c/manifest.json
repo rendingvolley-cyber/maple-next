@@ -1,0 +1,18 @@
+{
+  "forbidden_key_scan": "passed: parse_match_export_v3 fail-closed scan found no api_key/authorization/headers/prompt/raw_request/raw_response/credential/secret/base64 image field anywhere in this document",
+  "manifest_schema": "opponent-intel-v2-field-evidence-manifest.v1",
+  "match_identity": {
+    "ended_at_utc": "2026-08-11T10:48:02.926981+00:00",
+    "generation": 20,
+    "match_id": "2c77446d-3332-40fe-b28b-5c67dd4e130c",
+    "outcome": "WIN",
+    "schema_version": "maple-match.v3",
+    "session_id": "5658bb15-534f-424e-9b9b-82e8f38db389",
+    "turn_count": 7
+  },
+  "original_sha256": "ce7b01761546a9bf7761b5278b92727bbe9a0ec99f078ffff4bc43648b947ffe",
+  "removed_or_redacted_fields": [],
+  "sanitization_applied": false,
+  "sanitized_sha256": "ce7b01761546a9bf7761b5278b92727bbe9a0ec99f078ffff4bc43648b947ffe",
+  "source_export_filename": "maple-match-2c77446d-3332-40fe-b28b-5c67dd4e130c.json"
+}

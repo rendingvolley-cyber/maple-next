@@ -65,9 +65,32 @@ _ALL_HEADER_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 _PERCENT_ENTRY_RE = re.compile(r"([^\d\n%]{1,40}?)\s*[:：]?\s*(\d{1,3}(?:\.\d+)?)\s*%")
-_SPECIES_LINK_RE = re.compile(
-    r'href="(/pokemon/([a-z0-9\-]+)[^"]*)"[^>]*>\s*(?:<[^>]*>\s*)*([^<>\n]{1,60})'
+# Each ranked-list anchor nests a rank-number span *before* the name span,
+# e.g. ``<a href="/pokemon/abomasnow?..."><span>118</span><img .../>
+# <span>アボマスノキ</span></a>`` -- so the anchor's whole inner HTML is
+# captured (non-greedy, up to the closing tag) and every text node inside it
+# is inspected below, skipping the leading purely-numeric rank token rather
+# than naively taking the first text run.
+_SPECIES_ANCHOR_RE = re.compile(
+    r'href="(/pokemon/([a-z0-9\-]+)[^"]*)"[^>]*>(.*?)</a>', re.DOTALL
 )
+_TEXT_NODE_RE = re.compile(r">([^<>]+)<")
+
+
+def _display_name_from_anchor_html(inner_html: str) -> str:
+    """First non-blank, non-purely-numeric text node inside a species anchor.
+
+    Skips the rank-number span (and any other blank/numeric-only nodes, e.g.
+    a screen-reader-only counter) and returns the first remaining text node,
+    which is the actual species display name.
+    """
+
+    for raw_text in _TEXT_NODE_RE.findall(f">{inner_html}<"):
+        text: str = str(raw_text).strip()
+        if not text or text.isdigit():
+            continue
+        return text
+    return ""
 
 
 class ParseError(Exception):
@@ -120,9 +143,9 @@ def parse_species_list(html: str) -> list[SpeciesListEntry]:
 
     entries: list[SpeciesListEntry] = []
     seen_slugs: set[str] = set()
-    for match in _SPECIES_LINK_RE.finditer(html):
-        detail_path, slug, display_name = match.groups()
-        display_name = display_name.strip()
+    for match in _SPECIES_ANCHOR_RE.finditer(html):
+        detail_path, slug, anchor_inner_html = match.groups()
+        display_name = _display_name_from_anchor_html(anchor_inner_html)
         if not slug or not display_name or slug in seen_slugs:
             continue
         seen_slugs.add(slug)

@@ -89,7 +89,9 @@ def main(output_directory: Path) -> int:
     layout.addWidget(field)
     host.show()
 
-    matcher = MoveMatcher(["じしん", "しんそく", "スケイルショット", "つるぎのまい", "インファイト"])
+    matcher = MoveMatcher(
+        ["じしん", "しんそく", "スケイルショット", "つるぎのまい", "インファイト"]
+    )
     popup = MoveAutocompletePopup(field, lambda: matcher)
     field.setText("じし")
     for _ in range(5):
@@ -112,4 +114,6 @@ def main(output_directory: Path) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(Path(sys.argv[1]) if len(sys.argv) > 1 else Path("C:/tmp/maple-intel-v2-evidence")))
+    default_output = Path("C:/tmp/maple-intel-v2-evidence")
+    output_arg = Path(sys.argv[1]) if len(sys.argv) > 1 else default_output
+    raise SystemExit(main(output_arg))

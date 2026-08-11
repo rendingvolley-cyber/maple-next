@@ -96,7 +96,7 @@ def test_recorded_opponent_move_feeds_exact_current_intel_without_meta(
     repository.close()
 
 
-def test_move_assist_is_grounded_ordered_and_model_refresh_does_not_mutate_draft(
+def test_move_assist_is_grounded_ordered_and_selector_refresh_does_not_mutate_draft(
     tmp_path: Path,
 ) -> None:
     repository, controller, window, _transport = build_window(tmp_path)
@@ -118,12 +118,14 @@ def test_move_assist_is_grounded_ordered_and_model_refresh_does_not_mutate_draft
     window.render_view()
 
     assert window.opponent_move_suggestions == ("Earthquake", "Protect")
-    assert window._opponent_action_suggestion_model.stringList() == [
-        "Earthquake",
-        "Protect",
-    ]
+    assert not hasattr(window, "opponent_action_completer")
+    assert [
+        window.opponent_action_suggestion_box.itemText(index)
+        for index in range(window.opponent_action_suggestion_box.count())
+    ] == ["Earthquake", "Protect"]
+    assert window.opponent_action_suggestion_box.currentIndex() == -1
     assert window.parity_opponent_action_input.text() == "人間のfree text"
-    window.opponent_action_completer.activated[str].emit("Earthquake")
+    window.opponent_action_suggestion_box.textActivated.emit("Earthquake")
     assert window.opponent_action_name_input.text() == "Earthquake"
     repository.close()
 
@@ -139,7 +141,10 @@ def test_switch_assist_is_confirmed_roster_minus_current_active(tmp_path: Path) 
     assert window.opponent_switch_suggestions == tuple(
         member for member in OPPONENT_TEAM if member != "Garchomp"
     )
-    assert "Garchomp" not in window._opponent_action_suggestion_model.stringList()
+    assert "Garchomp" not in {
+        window.opponent_action_suggestion_box.itemText(index)
+        for index in range(window.opponent_action_suggestion_box.count())
+    }
     repository.close()
 
 

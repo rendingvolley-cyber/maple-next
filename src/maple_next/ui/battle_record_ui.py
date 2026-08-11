@@ -24,14 +24,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, cast
 
-from PySide6.QtCore import QStringListModel, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase, QResizeEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QCompleter,
     QDialog,
     QFormLayout,
     QGridLayout,
@@ -2938,19 +2936,10 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         opponent_action_row = QHBoxLayout()
         self.parity_opponent_action_input = QLineEdit()
         self.parity_opponent_action_input.setPlaceholderText("相手の実際の技・交代先を入力")
-        self._opponent_action_suggestion_model = QStringListModel(self)
-        self.opponent_action_completer = QCompleter(
-            self._opponent_action_suggestion_model, self.parity_opponent_action_input
-        )
-        self.opponent_action_completer.setCaseSensitivity(
-            Qt.CaseSensitivity.CaseInsensitive
-        )
-        self.opponent_action_completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        self.opponent_action_completer.setCompletionMode(
-            QCompleter.CompletionMode.PopupCompletion
-        )
-        self.parity_opponent_action_input.setCompleter(self.opponent_action_completer)
-        cast(Any, self.opponent_action_completer.activated)[str].connect(
+        self.opponent_action_suggestion_box = QComboBox(opponent_card)
+        self.opponent_action_suggestion_box.setPlaceholderText("候補を選択")
+        self.opponent_action_suggestion_box.setMinimumContentsLength(12)
+        self.opponent_action_suggestion_box.textActivated.connect(
             self._select_opponent_action_suggestion
         )
         self.opponent_move_suggestions: tuple[str, ...] = ()
@@ -2961,6 +2950,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.opponent_action_name_input.textChanged.connect(
             self.parity_opponent_action_input.setText
         )
+        opponent_action_row.addWidget(self.opponent_action_suggestion_box)
         opponent_action_row.addWidget(self.parity_opponent_action_input, 1)
         opponent_layout.addLayout(opponent_action_row)
         actions_row.addWidget(opponent_card, 1)
@@ -3067,9 +3057,19 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             if action_type == "SWITCH"
             else ()
         )
-        # Updating the completion model is presentation-only. In particular,
-        # setStringList never writes the authoritative free-text draft.
-        self._opponent_action_suggestion_model.setStringList(list(suggestions))
+        # Rebuilding this explicitly human-operated selector is presentation-only.
+        # Blocking signals and leaving no current index ensures candidate display
+        # never writes the authoritative free-text draft.
+        self.opponent_action_suggestion_box.blockSignals(True)
+        try:
+            self.opponent_action_suggestion_box.clear()
+            self.opponent_action_suggestion_box.addItems(list(suggestions))
+            self.opponent_action_suggestion_box.setCurrentIndex(-1)
+        finally:
+            self.opponent_action_suggestion_box.blockSignals(False)
+        self.opponent_action_suggestion_box.setEnabled(
+            action_type in {"MOVE", "SWITCH"} and bool(suggestions)
+        )
 
     def _refresh_opponent_action_assist(
         self,
@@ -3740,7 +3740,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             remembered = self._bundle_c_controller.opponent_ability_for_entity(entity_id)
         self._render_ability_resolution()
         match_facts = self._render_opponent_intel(species, remembered)
-        if hasattr(self, "_opponent_action_suggestion_model"):
+        if hasattr(self, "opponent_action_suggestion_box"):
             self._refresh_opponent_action_assist(
                 self._bundle_c_controller.refresh(),
                 species=species,
@@ -3822,6 +3822,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.opponent_action_name_input.setVisible(opponent_type in {"MOVE", "SWITCH"})
         opponent_editable = opponent_type in {"MOVE", "SWITCH"}
         self.parity_opponent_action_input.setEnabled(opponent_editable)
+        self.opponent_action_suggestion_box.setVisible(opponent_editable)
         if not opponent_editable and self.opponent_action_name_input.text():
             self.opponent_action_name_input.clear()
         self._show_opponent_action_suggestions(opponent_type)

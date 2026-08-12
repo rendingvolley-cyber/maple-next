@@ -223,6 +223,14 @@ _ADVERTISED_TOTAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Explicit structured pagination metadata declaring the final page.  The
+#: absence of a next link is deliberately not treated as terminal proof;
+#: only a source-authored positive declaration is accepted.
+_DECLARED_LAST_PAGE_RE = re.compile(
+    r'data-(?:last-page|total-pages)=["\'](\d+)["\']',
+    re.IGNORECASE,
+)
+
 
 def page_is_well_formed(html: str) -> bool:
     """Whether the response body ends with a proper closing ``</html>`` tag.
@@ -255,6 +263,15 @@ def extract_advertised_total(html: str) -> int | None:
         if group is not None:
             return int(group)
     return None  # pragma: no cover - regex always has exactly one live group
+
+
+def extract_declared_last_page(html: str) -> int | None:
+    """Return explicit source-declared final-page metadata, if present."""
+
+    match = _DECLARED_LAST_PAGE_RE.search(html)
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 def _section_text(full_text: str, header_positions: list[tuple[int, str]], group_name: str) -> str:

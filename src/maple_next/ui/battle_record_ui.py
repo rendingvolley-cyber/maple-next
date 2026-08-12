@@ -22,7 +22,6 @@ OCR polling, match export, or the turn-snapshot fixed-image flow. It only:
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -82,6 +81,11 @@ from maple_next.domain.turn_state import (
     SideDelta,
     SideState,
 )
+from maple_next.opponent_intel_db.generation_store import GenerationStoreError
+from maple_next.opponent_intel_db.runtime_intel import (
+    RuntimeIntelBundle,
+    resolve_runtime_intel_bundle,
+)
 from maple_next.opponent_intel_db.runtime_paths import (
     intel_db_directory,
     resolve_intel_runtime_root,
@@ -97,8 +101,6 @@ from maple_next.ui.opponent_intel_charts import (
 )
 from maple_next.ui.turn_snapshot_official_window import TurnSnapshotMatchFlowWindow
 from maple_next.ui.turn_state_flow import TurnStateFlowController, TurnStateSummaryView
-
-_MOVE_CATALOG_FILENAME = "move_catalog.json"
 
 
 def _normalize_move_name(name: str) -> str:
@@ -1163,21 +1165,31 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
         self._apply_official_windows_font()
         self._bundle_c_controller: TurnStateFlowController = controller
-        self._opponent_meta_provider = opponent_meta_provider or ChainedOpponentMetaProvider(
-            (
-                SnapshotOpponentMetaProvider(
-                    intel_db_directory(resolve_intel_runtime_root())
-                    / "species_stats_snapshot.json"
-                ),
-                LocalJsonOpponentMetaProvider(ocr_data_directory / "opponent_meta_cache.json"),
+        self._runtime_intel_bundle = self._resolve_runtime_intel_bundle()
+        self._opponent_meta_provider: OpponentMetaProvider
+        if opponent_meta_provider is None:
+            providers: list[OpponentMetaProvider] = []
+            if self._runtime_intel_bundle is not None:
+                providers.append(
+                    SnapshotOpponentMetaProvider(
+                        self._runtime_intel_bundle.snapshot_path,
+                        document=self._runtime_intel_bundle.snapshot_document,
+                    )
+                )
+            providers.append(
+                LocalJsonOpponentMetaProvider(ocr_data_directory / "opponent_meta_cache.json")
             )
-        )
+            self._opponent_meta_provider = ChainedOpponentMetaProvider(tuple(providers))
+        else:
+            self._opponent_meta_provider = opponent_meta_provider
         self._evidence_dialog: QDialog | None = None
         self._state_event_dialog: QDialog | None = None
         self._active_ability_entry_event_id: str | None = None
         self._provisional_ability_species: str | None = None
         self._pending_ocr_ability_confirmation: tuple[str, str] | None = None
-        self._move_matcher_cache: MoveMatcher | None = None
+        self._move_matcher_cache = self._matcher_from_runtime_bundle(
+            self._runtime_intel_bundle
+        )
         self.opponent_move_autocomplete = MoveAutocompletePopup(
             self.opponent_action_name_input, self._load_move_matcher
         )
@@ -4071,32 +4083,23 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
     # -- move autocomplete (Bundle D/E) ---------------------------------------
 
-    def _load_move_matcher(self) -> MoveMatcher:
-        """Lazily build and cache the offline move matcher.
-
-        Missing/corrupt ``move_catalog.json`` fails soft to an empty
-        matcher -- autocomplete simply never shows candidates rather than
-        raising or taking down the input field.
-        """
-
-        if self._move_matcher_cache is not None:
-            return self._move_matcher_cache
-        names: list[str] = []
+    @staticmethod
+    def _resolve_runtime_intel_bundle() -> RuntimeIntelBundle | None:
+        intel_directory = intel_db_directory(resolve_intel_runtime_root())
         try:
-            root = resolve_intel_runtime_root()
-            catalog_path = intel_db_directory(root) / _MOVE_CATALOG_FILENAME
-            if catalog_path.is_file():
-                raw = json.loads(catalog_path.read_text(encoding="utf-8"))
-                moves = raw.get("moves") if isinstance(raw, dict) else None
-                if isinstance(moves, list):
-                    names = [
-                        str(entry["canonical_name"])
-                        for entry in moves
-                        if isinstance(entry, dict) and entry.get("canonical_name")
-                    ]
-        except Exception:
-            names = []
-        self._move_matcher_cache = MoveMatcher(names)
+            return resolve_runtime_intel_bundle(intel_directory)
+        except (GenerationStoreError, OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _matcher_from_runtime_bundle(bundle: RuntimeIntelBundle | None) -> MoveMatcher:
+        if bundle is None:
+            return MoveMatcher([])
+        return MoveMatcher(list(bundle.catalog_names))
+
+    def _load_move_matcher(self) -> MoveMatcher:
+        """Return the matcher pinned to this window's resolved generation."""
+
         return self._move_matcher_cache
 
     def _refresh_move_autocomplete_boosts(

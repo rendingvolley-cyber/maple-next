@@ -14,36 +14,35 @@ This module builds an explicit, source-native completeness proof instead:
 * the response body must be well-formed (:func:`parser_pokechamdb.
   page_is_well_formed`) -- a transfer cut off mid-stream is detected here,
   not silently accepted as "the whole list".
-* if a page advertises pagination (a "next page" link), that link is
-  followed until a terminal page (no further "next" link) is reached, with
-  duplicate-page/loop detection -- a link that points back to an
-  already-visited URL is treated as a broken/incomplete traversal, not
-  silently ignored.
+* pagination is followed with duplicate-page/loop detection, but an absent
+  "next" link is never itself terminal proof.
 * if any page advertises an explicit total species count, the number of
   *unique* species actually discovered across every page must match it
   exactly.
+* alternatively, explicit last-page metadata must declare the terminal page
+  and every page from 1 through that page must be fetched exactly once.
 * the source's own displayed rank numbers (``SpeciesListEntry.site_rank``,
   not this module's internal enumeration order) must form the exact
   contiguous set ``{1, .., N}`` with no gaps or duplicates -- self-
   consistency evidence for whatever pages were traversed.
 
-If none of the above can be established at all (the very first response
-isn't well-formed, or the source displays no rank numbers to check and
-offers no pagination/total-count signal either), this returns
-``UNPROVABLE`` rather than assuming completeness -- discovery is not
-proven complete just because nothing was proven *in*complete.
+Well-formed HTML and contiguous ranks are integrity checks only.  Neither
+can upgrade an otherwise unproven result to ``COMPLETE``.  Without one of
+the two positive terminal proofs above this returns ``UNPROVABLE``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from urllib.parse import parse_qs, urlparse
 
 from maple_next.opponent_intel_db.downloader import DownloadError, SnapshotDownloader
 from maple_next.opponent_intel_db.parser_pokechamdb import (
     ParseError,
     SpeciesListEntry,
     extract_advertised_total,
+    extract_declared_last_page,
     extract_next_page_url,
     page_is_well_formed,
     parse_species_list,
@@ -109,6 +108,21 @@ def _check_rank_sequence(entries: list[SpeciesListEntry]) -> str | None:
     return None
 
 
+def _page_number(url: str) -> int | None:
+    """Return the source page number (the first page omits ``page=1``)."""
+
+    values = parse_qs(urlparse(url).query).get("page")
+    if values is None:
+        return 1
+    if len(values) != 1:
+        return None
+    try:
+        page = int(values[0])
+    except ValueError:
+        return None
+    return page if page >= 1 else None
+
+
 def discover_all_species(
     downloader: SnapshotDownloader, list_url: str
 ) -> DiscoveryOutcome:
@@ -117,6 +131,7 @@ def discover_all_species(
     visited_urls: list[str] = []
     all_entries: list[SpeciesListEntry] = []
     advertised_total: int | None = None
+    declared_last_page: int | None = None
 
     current_url: str | None = list_url
     while current_url is not None:
@@ -183,7 +198,40 @@ def discover_all_species(
                 )
             advertised_total = page_total
 
-        current_url = extract_next_page_url(html, base_url=current_url)
+        page_last = extract_declared_last_page(html)
+        if page_last is not None:
+            if page_last < 1:
+                return DiscoveryOutcome(
+                    status=DiscoveryStatus.INCOMPLETE,
+                    entries=tuple(all_entries),
+                    pages_visited=len(visited_urls),
+                    reason=f"INVALID_DECLARED_LAST_PAGE:{page_last}",
+                )
+            if declared_last_page is not None and declared_last_page != page_last:
+                return DiscoveryOutcome(
+                    status=DiscoveryStatus.INCOMPLETE,
+                    entries=tuple(all_entries),
+                    pages_visited=len(visited_urls),
+                    reason=(
+                        f"CONFLICTING_DECLARED_LAST_PAGE:{declared_last_page}!={page_last}"
+                    ),
+                )
+            declared_last_page = page_last
+
+        next_url = extract_next_page_url(html, base_url=current_url)
+        if next_url is None and declared_last_page is not None:
+            current_page = _page_number(current_url)
+            if current_page is None or current_page < declared_last_page:
+                return DiscoveryOutcome(
+                    status=DiscoveryStatus.INCOMPLETE,
+                    entries=tuple(all_entries),
+                    pages_visited=len(visited_urls),
+                    reason=(
+                        "PAGINATION_TERMINATED_BEFORE_DECLARED_LAST_PAGE:"
+                        f"current={current_page}:last={declared_last_page}"
+                    ),
+                )
+        current_url = next_url
 
     deduped_entries, had_duplicate_species = _dedup_preserving_order(all_entries)
     if had_duplicate_species:
@@ -206,24 +254,36 @@ def discover_all_species(
         )
 
     rank_reason = _check_rank_sequence(deduped_entries)
-    if rank_reason == "NO_SITE_RANK_DATA":
-        # No independent signal at all (no pagination was followed beyond
-        # page one, no advertised total, and the page displays no rank
-        # numbers to cross-check) -- nothing here has been proven
-        # incomplete, but nothing has been proven complete either.
-        if advertised_total is None and len(visited_urls) == 1:
-            return DiscoveryOutcome(
-                status=DiscoveryStatus.UNPROVABLE,
-                entries=tuple(deduped_entries),
-                pages_visited=len(visited_urls),
-                reason="NO_COMPLETENESS_SIGNAL_AVAILABLE",
-            )
-    elif rank_reason is not None:
+    if rank_reason not in (None, "NO_SITE_RANK_DATA"):
         return DiscoveryOutcome(
             status=DiscoveryStatus.INCOMPLETE,
             entries=tuple(deduped_entries),
             pages_visited=len(visited_urls),
             reason=rank_reason,
+        )
+
+    if declared_last_page is not None:
+        page_numbers = [_page_number(url) for url in visited_urls]
+        expected_pages = list(range(1, declared_last_page + 1))
+        if page_numbers != expected_pages:
+            return DiscoveryOutcome(
+                status=DiscoveryStatus.INCOMPLETE,
+                entries=tuple(deduped_entries),
+                pages_visited=len(visited_urls),
+                reason=(
+                    "DECLARED_PAGE_COVERAGE_MISMATCH:"
+                    f"expected={expected_pages}:actual={page_numbers}"
+                ),
+            )
+
+    has_total_proof = advertised_total is not None
+    has_last_page_proof = declared_last_page is not None
+    if not has_total_proof and not has_last_page_proof:
+        return DiscoveryOutcome(
+            status=DiscoveryStatus.UNPROVABLE,
+            entries=tuple(deduped_entries),
+            pages_visited=len(visited_urls),
+            reason="NO_POSITIVE_TERMINAL_PROOF",
         )
 
     return DiscoveryOutcome(

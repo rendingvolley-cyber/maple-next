@@ -18,7 +18,7 @@ from maple_next.opponent_intel_db.snapshot_store import read_snapshot, write_sna
 
 ROBOTS_TXT_ALLOW_ALL = "User-agent: *\nAllow: /\n"
 
-LIST_HTML = """<!DOCTYPE html><html><body>
+LIST_HTML = """<!DOCTYPE html><html><body><div data-total-count="3"></div>
 <a href="/pokemon/garchomp?season=M-5&format=single"><span>1</span><span>ガブリアス</span></a>
 <a href="/pokemon/primarina?season=M-5&format=single"><span>2</span><span>アシレーヌ</span></a>
 <a href="/pokemon/gyarados?season=M-5&format=single"><span>3</span><span>ギャラドス</span></a>

@@ -10,7 +10,10 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from maple_next.opponent_intel_db.snapshot_store import SnapshotDocument
 
 from maple_next.domain.species_ability_catalog import (
     UNKNOWN_ABILITY_LABEL,
@@ -157,8 +160,21 @@ class SnapshotOpponentMetaProvider:
     :class:`OpponentMetaProvider`.
     """
 
-    def __init__(self, snapshot_path: Path) -> None:
+    def __init__(
+        self, snapshot_path: Path, *, document: SnapshotDocument | None = None
+    ) -> None:
         self._snapshot_path = snapshot_path
+        self._document = document
+        if document is None:
+            from maple_next.opponent_intel_db.snapshot_store import (
+                SnapshotStoreError,
+                read_snapshot,
+            )
+
+            try:
+                self._document = read_snapshot(snapshot_path)
+            except (SnapshotStoreError, OSError, ValueError):
+                self._document = None
 
     @staticmethod
     def _ranked(entries: Sequence[object] | None) -> tuple[RankedUsage, ...]:
@@ -176,22 +192,10 @@ class SnapshotOpponentMetaProvider:
         return tuple(result)
 
     def get(self, species: str) -> OpponentMetaSnapshot | None:
-        # Import kept local to this method (rather than module top-level) so
-        # nothing here forces a hard dependency for callers that never use
-        # this provider -- consistent with the read-only, no-network-client
-        # helpers this module is documented to allow importing from UI code.
-        from maple_next.opponent_intel_db.snapshot_store import (
-            SnapshotStoreError,
-            read_snapshot,
-        )
-
         species_key = species.strip()
         if not species_key:
             return None
-        try:
-            document = read_snapshot(self._snapshot_path)
-        except (SnapshotStoreError, OSError, ValueError):
-            return None
+        document = self._document
         if document is None:
             return None
 

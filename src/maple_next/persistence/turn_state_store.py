@@ -694,6 +694,13 @@ class TurnStateStoreMixin(StoreBase):
     # validates binding and writes rows. It must never be called outside an
     # already-open transaction.
 
+    # ``rich_action_completions.opponent_action_type``/``opponent_action_name``
+    # are TEXT NOT NULL (schema.py). A genuinely unobserved opponent action
+    # (``opponent_action_type=None``) is stored as this explicit sentinel --
+    # the exact same literal text ``ActionOrder.UNKNOWN`` already uses for
+    # this table's own ``action_order`` column -- never an empty string.
+    _OPPONENT_ACTION_UNKNOWN_SENTINEL = ActionOrder.UNKNOWN.value
+
     def _record_rich_action_completion_row(
         self,
         *,
@@ -701,7 +708,7 @@ class TurnStateStoreMixin(StoreBase):
         identity: TurnIdentity,
         own_action_type: ActionType,
         own_action_name: str,
-        opponent_action_type: ActionType,
+        opponent_action_type: ActionType | None,
         opponent_action_name: str,
         action_order: ActionOrder,
         delta: ActionResultDelta,
@@ -713,7 +720,9 @@ class TurnStateStoreMixin(StoreBase):
         ``delta.based_on_confirmed_state_id`` (session_id, match_id,
         generation, turn_id, turn_number, battle_revision). Any mismatch, or
         a missing based-on confirmed state, fails closed before any row is
-        written.
+        written. ``opponent_action_type=None`` (opponent action genuinely
+        not confirmed) is written and validated through this exact same
+        boundary -- there is no separate completion path for it.
         """
 
         if delta.identity != identity:
@@ -724,6 +733,17 @@ class TurnStateStoreMixin(StoreBase):
             raise TurnStateStaleError("BASED_ON_CONFIRMED_STATE_NOT_FOUND") from exc
         if based_on_state.identity != identity:
             raise TurnStateIdentityError("ACTION_COMPLETION_CONFIRMED_STATE_IDENTITY_MISMATCH")
+
+        stored_opponent_action_type = (
+            opponent_action_type.value
+            if opponent_action_type is not None
+            else self._OPPONENT_ACTION_UNKNOWN_SENTINEL
+        )
+        stored_opponent_action_name = (
+            opponent_action_name
+            if opponent_action_type is not None
+            else self._OPPONENT_ACTION_UNKNOWN_SENTINEL
+        )
 
         self.append_action_result_delta(delta)
         self.connection.execute(
@@ -746,8 +766,8 @@ class TurnStateStoreMixin(StoreBase):
                 delta.based_on_confirmed_state_id,
                 own_action_type.value,
                 own_action_name,
-                opponent_action_type.value,
-                opponent_action_name,
+                stored_opponent_action_type,
+                stored_opponent_action_name,
                 action_order.value,
                 delta.delta_id,
                 self._now(),
@@ -761,6 +781,10 @@ class TurnStateStoreMixin(StoreBase):
         ).fetchone()
         if row is None:
             return None
+        raw_opponent_action_type = str(row["opponent_action_type"])
+        is_opponent_action_unknown = (
+            raw_opponent_action_type == self._OPPONENT_ACTION_UNKNOWN_SENTINEL
+        )
         return {
             "transaction_id": str(row["transaction_id"]),
             "session_id": str(row["session_id"]),
@@ -772,8 +796,12 @@ class TurnStateStoreMixin(StoreBase):
             "based_on_confirmed_state_id": row["based_on_confirmed_state_id"],
             "own_action_type": ActionType(str(row["own_action_type"])),
             "own_action_name": str(row["own_action_name"]),
-            "opponent_action_type": ActionType(str(row["opponent_action_type"])),
-            "opponent_action_name": str(row["opponent_action_name"]),
+            "opponent_action_type": (
+                None if is_opponent_action_unknown else ActionType(raw_opponent_action_type)
+            ),
+            "opponent_action_name": (
+                None if is_opponent_action_unknown else str(row["opponent_action_name"])
+            ),
             "action_order": ActionOrder(str(row["action_order"])),
             "delta_id": str(row["delta_id"]),
         }

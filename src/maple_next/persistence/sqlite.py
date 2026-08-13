@@ -61,7 +61,7 @@ class SQLiteRepository(
         identity: TurnIdentity,
         own_action_type: ActionType,
         own_action_name: str,
-        opponent_action_type: ActionType,
+        opponent_action_type: ActionType | None,
         opponent_action_name: str,
         action_order: ActionOrder,
         delta: ActionResultDelta,
@@ -73,6 +73,12 @@ class SQLiteRepository(
         failure (binding mismatch, missing confirmed state, constraint
         violation) leaves neither the delta nor the completion committed.
         Callers must not wrap this in their own ``transaction()`` block.
+
+        ``opponent_action_type=None`` is the explicit typed observation
+        that the opponent's action was genuinely not confirmed -- the same
+        shape ``BattleApplication.record_actual_action`` already uses for
+        this case. It is still committed through this one boundary, not a
+        separate non-atomic path.
         """
 
         with self.transaction():

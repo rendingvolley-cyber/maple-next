@@ -1085,46 +1085,38 @@ class TurnStateFlowController(MatchFlowController):
         if delta is None:
             return view
 
-        # Wire the normal path through the existing atomic completion
-        # primitive (persistence/sqlite.py's ``record_rich_action_
-        # completion``) whenever both actions are typed -- it already
-        # validates delta/identity/based-on-state binding and writes the
-        # delta + completion audit row as one transaction, which is
-        # strictly stronger than the plain delta-only insert below. Its
-        # ``opponent_action_type``/``opponent_action_name`` columns are
-        # NOT NULL (schema.py), so it cannot represent a genuinely
-        # unobserved opponent action -- that case still uses the plain
-        # insert, unchanged from before.
-        typed_own_action: ActionType | None
-        try:
-            typed_own_action = ActionType(action_type.strip())
-        except ValueError:
-            typed_own_action = None
-        typed_opponent_action: ActionType | None = None
+        # Single canonical atomic completion boundary (R1-A): every rich
+        # record_actual_action call -- known opponent action, explicitly
+        # UNKNOWN opponent action, or UNKNOWN action order alike -- goes
+        # through record_rich_action_completion. There is no second,
+        # non-atomic completion path reachable from this method. ``own_
+        # action_type``/``action_name`` were already validated by the
+        # legacy ``super().record_actual_action()`` call above (it would
+        # not have reached TURN_RECORDED otherwise), so parsing them here
+        # cannot legitimately fail. ``opponent_action_type`` stays the
+        # same ``ActionType | None`` shape the legacy
+        # ``BattleApplication.record_actual_action`` already uses for "no
+        # confirmed opponent action" -- ``None`` is the explicit typed
+        # UNKNOWN observation, not an empty string.
+        typed_own_action = ActionType(action_type.strip())
         normalized_opponent_type = opponent_action_type.strip()
-        if normalized_opponent_type:
-            try:
-                typed_opponent_action = ActionType(normalized_opponent_type)
-            except ValueError:
-                typed_opponent_action = None
-        if typed_own_action is not None and typed_opponent_action is not None:
-            try:
-                typed_order = ActionOrder(action_order.strip() or ActionOrder.UNKNOWN.value)
-            except ValueError:
-                typed_order = ActionOrder.UNKNOWN
-            self._repository.record_rich_action_completion(
-                transaction_id=str(uuid4()),
-                identity=delta.identity,
-                own_action_type=typed_own_action,
-                own_action_name=action_name.strip(),
-                opponent_action_type=typed_opponent_action,
-                opponent_action_name=opponent_action_name.strip(),
-                action_order=typed_order,
-                delta=delta,
-            )
-        else:
-            with self._repository.transaction():
-                self._repository.append_action_result_delta(delta)
+        typed_opponent_action: ActionType | None = (
+            ActionType(normalized_opponent_type) if normalized_opponent_type else None
+        )
+        try:
+            typed_order = ActionOrder(action_order.strip() or ActionOrder.UNKNOWN.value)
+        except ValueError:
+            typed_order = ActionOrder.UNKNOWN
+        self._repository.record_rich_action_completion(
+            transaction_id=str(uuid4()),
+            identity=delta.identity,
+            own_action_type=typed_own_action,
+            own_action_name=action_name.strip(),
+            opponent_action_type=typed_opponent_action,
+            opponent_action_name=opponent_action_name.strip(),
+            action_order=typed_order,
+            delta=delta,
+        )
         self._error_message = None
         return self.refresh()
 

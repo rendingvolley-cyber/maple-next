@@ -45,7 +45,7 @@ from maple_next.domain.battle_events import (
     StageEventPreset,
     apply_stage_event,
 )
-from maple_next.domain.enums import ActionType, ResultDisposition
+from maple_next.domain.enums import ActionOrder, ActionType, ResultDisposition
 from maple_next.domain.opponent_intel import (
     MatchOpponentFacts,
     possible_abilities_for_species,
@@ -1021,6 +1021,12 @@ class TurnStateFlowController(MatchFlowController):
         legacy call bumps ``battle_revision`` again afterward.
         """
 
+        rich_delta_requested = (
+            self_side_delta is not None
+            and opponent_side_delta is not None
+            and weather_delta is not None
+            and terrain_delta is not None
+        )
         identity = self._safe_current_identity()
         latest_state = None
         if identity is not None:
@@ -1029,6 +1035,38 @@ class TurnStateFlowController(MatchFlowController):
                 match_id=identity.match_id,
                 generation=identity.generation,
             )
+
+        # Build and validate the delta *before* touching the legacy action
+        # record (00 R2 lifecycle fix, closing the atomicity gap where the
+        # legacy write could commit while the rich delta failed to
+        # construct, leaving a "action persisted, delta lost" partial
+        # completion that the operator could still advance past). Nothing
+        # here depends on the legacy call's own result -- only on
+        # ``latest_state`` (already read above) and the caller-supplied
+        # delta pieces -- so validating first costs nothing.
+        delta: ActionResultDelta | None = None
+        if (
+            self_side_delta is not None
+            and opponent_side_delta is not None
+            and weather_delta is not None
+            and terrain_delta is not None
+            and latest_state is not None
+        ):
+            try:
+                delta = ActionResultDelta(
+                    delta_id=str(uuid4()),
+                    identity=latest_state.identity,
+                    based_on_confirmed_state_id=latest_state.confirmed_state_id,
+                    self_side=self_side_delta,
+                    opponent_side=opponent_side_delta,
+                    weather=weather_delta,
+                    terrain=terrain_delta,
+                    confirmation=_confirmation_meta(),
+                )
+            except (ValueError, TurnStateError) as exc:
+                self._error_message = f"action result delta を保存できません: {exc}"
+                return self.refresh()
+
         before_error = self._error_message
         view = super().record_actual_action(
             action_type=action_type,
@@ -1038,35 +1076,55 @@ class TurnStateFlowController(MatchFlowController):
             opponent_action_name=opponent_action_name,
             action_order=action_order,
         )
-        if (
-            self_side_delta is None
-            or opponent_side_delta is None
-            or weather_delta is None
-            or terrain_delta is None
-        ):
+        if not rich_delta_requested:
             return view
         if view.error_message is not None and view.error_message != before_error:
             return view
         if view.projection.session_state != "TURN_RECORDED":
             return view
-        if latest_state is None:
+        if delta is None:
             return view
+
+        # Wire the normal path through the existing atomic completion
+        # primitive (persistence/sqlite.py's ``record_rich_action_
+        # completion``) whenever both actions are typed -- it already
+        # validates delta/identity/based-on-state binding and writes the
+        # delta + completion audit row as one transaction, which is
+        # strictly stronger than the plain delta-only insert below. Its
+        # ``opponent_action_type``/``opponent_action_name`` columns are
+        # NOT NULL (schema.py), so it cannot represent a genuinely
+        # unobserved opponent action -- that case still uses the plain
+        # insert, unchanged from before.
+        typed_own_action: ActionType | None
         try:
-            delta = ActionResultDelta(
-                delta_id=str(uuid4()),
-                identity=latest_state.identity,
-                based_on_confirmed_state_id=latest_state.confirmed_state_id,
-                self_side=self_side_delta,
-                opponent_side=opponent_side_delta,
-                weather=weather_delta,
-                terrain=terrain_delta,
-                confirmation=_confirmation_meta(),
+            typed_own_action = ActionType(action_type.strip())
+        except ValueError:
+            typed_own_action = None
+        typed_opponent_action: ActionType | None = None
+        normalized_opponent_type = opponent_action_type.strip()
+        if normalized_opponent_type:
+            try:
+                typed_opponent_action = ActionType(normalized_opponent_type)
+            except ValueError:
+                typed_opponent_action = None
+        if typed_own_action is not None and typed_opponent_action is not None:
+            try:
+                typed_order = ActionOrder(action_order.strip() or ActionOrder.UNKNOWN.value)
+            except ValueError:
+                typed_order = ActionOrder.UNKNOWN
+            self._repository.record_rich_action_completion(
+                transaction_id=str(uuid4()),
+                identity=delta.identity,
+                own_action_type=typed_own_action,
+                own_action_name=action_name.strip(),
+                opponent_action_type=typed_opponent_action,
+                opponent_action_name=opponent_action_name.strip(),
+                action_order=typed_order,
+                delta=delta,
             )
-        except (ValueError, TurnStateError) as exc:
-            self._error_message = f"action result delta を保存できません: {exc}"
-            return self.refresh()
-        with self._repository.transaction():
-            self._repository.append_action_result_delta(delta)
+        else:
+            with self._repository.transaction():
+                self._repository.append_action_result_delta(delta)
         self._error_message = None
         return self.refresh()
 
@@ -1112,6 +1170,24 @@ class TurnStateFlowController(MatchFlowController):
                     latest_state.confirmed_state_id
                 )
                 delta = deltas[-1] if deltas else None
+
+        if latest_state is not None and delta is None:
+            # The rich-state contract is active for this Turn (a
+            # ConfirmedTurnState exists) but no ActionResultDelta was ever
+            # durably recorded for it -- e.g. the rich delta write failed
+            # after the legacy action already committed, or a caller
+            # skipped the rich path entirely mid-match. Advancing now would
+            # silently skip draft derivation while still moving the legacy
+            # Turn forward, leaving Turn N+1 hydrating from a stale or
+            # absent draft (00 R2 lifecycle fix). Fail closed: neither the
+            # legacy Turn transition nor a partial/absent draft may
+            # proceed. The operator must resolve this Turn (re-run the
+            # delta capture, or restart the match if truly unrecoverable)
+            # before NEXT TURN succeeds again.
+            self._error_message = (
+                "行動結果(delta)が未確定のため、NEXT TURNへ進めません。"
+            )
+            return self.refresh()
 
         view = super().next_turn()
 

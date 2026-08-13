@@ -315,6 +315,14 @@ class _DeltaIntField(QWidget):
             return FieldDelta.unchanged()
         return FieldDelta.unknown()
 
+    def reset(self) -> None:
+        """Back to a fresh UNCHANGED draft -- never carries a prior Turn's
+        CHANGED value forward into a new Turn identity."""
+
+        self.unknown_box.setChecked(False)
+        self.spin.setValue(0)
+        self.mode_box.setCurrentText("UNCHANGED")
+
 
 class _DeltaTextField(QWidget):
     def __init__(self, placeholder: str = "") -> None:
@@ -349,6 +357,11 @@ class _DeltaTextField(QWidget):
         if mode == "UNCHANGED":
             return FieldDelta.unchanged()
         return FieldDelta.unknown()
+
+    def reset(self) -> None:
+        self.unknown_box.setChecked(False)
+        self.line.clear()
+        self.mode_box.setCurrentText("UNCHANGED")
 
 
 class _DeltaHpField(QWidget):
@@ -386,6 +399,11 @@ class _DeltaHpField(QWidget):
             return FieldDelta.unchanged()
         return FieldDelta.unknown()
 
+    def reset(self) -> None:
+        self.unknown_box.setChecked(False)
+        self.value_box.setCurrentIndex(0)
+        self.mode_box.setCurrentText("UNCHANGED")
+
 
 class _DeltaSideEffectsField(QWidget):
     def __init__(self) -> None:
@@ -418,6 +436,11 @@ class _DeltaSideEffectsField(QWidget):
         if mode == "UNCHANGED":
             return FieldDelta.unchanged()
         return FieldDelta.unknown()
+
+    def reset(self) -> None:
+        self.unknown_box.setChecked(False)
+        self.line.clear()
+        self.mode_box.setCurrentText("UNCHANGED")
 
 
 def _add_compact_stage_grid(
@@ -672,6 +695,25 @@ class _SideDeltaEditor(QGroupBox):
             evasion_stage=self.stage_fields["evasion_stage"].to_delta(),
             side_effects=self.side_effects_field.to_delta(),
         )
+
+    def reset(self) -> None:
+        """Identity-bound reset (00 R2 lifecycle fix): every CHANGED/
+        UNKNOWN value a human entered for one Turn's result must never
+        survive into the next Turn's own result-delta draft. A confirmed
+        CHANGED value from Turn N still carries forward correctly through
+        the *domain projection* into Turn N+1's current STATE -- this only
+        clears the separate, reusable result-delta editor widgets."""
+
+        self.hp_field.reset()
+        self.side_effects_field.reset()
+        self.status_preset_box.setCurrentIndex(0)
+        self.status_field.reset()
+        self.event_preset_box.setCurrentIndex(0)
+        self.event_preview_label.setText("")
+        self.event_apply_button.setEnabled(False)
+        self._pending_stage_preview = {}
+        for field in self.stage_fields.values():
+            field.reset()
 
 
 class _CollapsibleSection(QWidget):
@@ -3450,6 +3492,22 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.action_order_box.setCurrentText(order)
         self.actual_action_confirm_checkbox.setChecked(confirmed)
 
+    def _reset_action_result_delta_editors(self) -> None:
+        """Clear every result-delta widget and pending effect candidate.
+
+        Called whenever ``render_view`` observes a new Turn identity (see
+        ``same_action_result_identity`` above) -- distinct from
+        ``_capture_action_result_draft``/``_restore_action_result_draft``,
+        which only preserve the action-selection boxes across an in-phase
+        re-render of the *same* Turn.
+        """
+
+        self.self_delta_editor.reset()
+        self.opponent_delta_editor.reset()
+        self.weather_delta_field.reset()
+        self.terrain_delta_field.reset()
+        self.result_effect_candidate.clear()
+
     @staticmethod
     def _reflow_form_into_grid(
         form: QFormLayout, widgets: list[QWidget], *, columns: int = 2
@@ -3513,15 +3571,28 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             projection.current_reviewed_board_id,
         )
         action_result_phase = projection.primary_cta == "RECORD_ACTUAL_ACTION"
+        same_action_result_identity = (
+            getattr(self, "_action_result_draft_identity", None) == action_result_identity
+        )
         preserve_action_result_draft = (
             action_result_phase
             and getattr(self, "_action_result_phase_active", False)
-            and getattr(self, "_action_result_draft_identity", None)
-            == action_result_identity
+            and same_action_result_identity
         )
         action_result_draft = (
             self._capture_action_result_draft() if preserve_action_result_draft else None
         )
+        if not same_action_result_identity:
+            # 00 R2 lifecycle fix (Issue #31 historical defect: a Turn 3
+            # human-confirmed Swords Dance CHANGED:+2 stayed visible in
+            # this editor into later Turns because nothing here was ever
+            # bound to TurnIdentity). A fresh identity always starts its
+            # own result-delta draft UNCHANGED -- the CHANGED value the
+            # human already confirmed for the prior Turn still carries
+            # forward correctly through the persisted domain projection
+            # into the *current state* editor; only this reusable capture
+            # widget needs clearing.
+            self._reset_action_result_delta_editors()
 
         super().render_view(current)
         if hasattr(self, "match_end_local_group"):

@@ -52,7 +52,11 @@ class SQLiteRepository(
             self.connection.rollback()
             raise
         else:
-            self.connection.commit()
+            try:
+                self.connection.commit()
+            except BaseException:
+                self.connection.rollback()
+                raise
 
     def record_rich_action_completion(
         self,
@@ -82,7 +86,7 @@ class SQLiteRepository(
         """
 
         with self.transaction():
-            self._record_rich_action_completion_row(
+            self.append_rich_action_completion(
                 transaction_id=transaction_id,
                 identity=identity,
                 own_action_type=own_action_type,
@@ -92,6 +96,39 @@ class SQLiteRepository(
                 action_order=action_order,
                 delta=delta,
             )
+
+    def append_rich_action_completion(
+        self,
+        *,
+        transaction_id: str,
+        identity: TurnIdentity,
+        own_action_type: ActionType,
+        own_action_name: str,
+        opponent_action_type: ActionType | None,
+        opponent_action_name: str,
+        action_order: ActionOrder,
+        delta: ActionResultDelta,
+    ) -> None:
+        """Append a rich completion inside the caller's active transaction.
+
+        The application Battle Record command uses this transaction-aware
+        form so the legacy action, rich result, and session transition share
+        one commit boundary. Standalone callers should continue to use
+        :meth:`record_rich_action_completion`.
+        """
+
+        if not self.connection.in_transaction:
+            raise RuntimeError("RICH_ACTION_COMPLETION_TRANSACTION_REQUIRED")
+        self._record_rich_action_completion_row(
+            transaction_id=transaction_id,
+            identity=identity,
+            own_action_type=own_action_type,
+            own_action_name=own_action_name,
+            opponent_action_type=opponent_action_type,
+            opponent_action_name=opponent_action_name,
+            action_order=action_order,
+            delta=delta,
+        )
 
     def close(self) -> None:
         self.connection.close()

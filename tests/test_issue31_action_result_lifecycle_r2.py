@@ -30,6 +30,7 @@ from __future__ import annotations
 import inspect
 import os
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -40,8 +41,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+import maple_next.application.service as application_service
 from maple_next.application.match_service import MatchApplication
-from maple_next.domain.enums import ActionOrder, ActionType, HpBucket
+from maple_next.domain.enums import ActionOrder, ActionType, BattleState, HpBucket
 from maple_next.domain.turn_state import (
     ActionResultDelta,
     ConfirmationMeta,
@@ -52,6 +54,7 @@ from maple_next.domain.turn_state import (
     SideDelta,
     SideState,
     TurnIdentity,
+    TurnStateError,
 )
 from maple_next.domain.turn_state_projection import GateDenialReason, evaluate_provider_ready_gate
 from maple_next.persistence.sqlite import SQLiteRepository
@@ -898,12 +901,13 @@ def test_r1a_restart_hydration_of_unknown_opponent_completion_is_identical(
 
 
 def test_r1a_no_plain_non_atomic_completion_path_reachable_from_normal_recording() -> None:
-    """F (static): the only way ``record_actual_action`` persists a rich
-    delta is through ``record_rich_action_completion`` -- its source has
-    no reachable call to the plain ``append_action_result_delta`` insert."""
+    """F (static): the controller delegates the rich values into the same
+    application command as the legacy action instead of writing afterward."""
 
     source = inspect.getsource(TurnStateFlowController.record_actual_action)
-    assert "record_rich_action_completion" in source
+    assert "action_result_delta=delta" in source
+    assert "rich_transaction_id=" in source
+    assert "record_rich_action_completion" not in source
     assert "append_action_result_delta" not in source
 
 
@@ -933,5 +937,267 @@ def test_r1a_normal_recording_with_unset_opponent_action_still_atomic(
     assert completion is not None
     assert completion["opponent_action_type"] is None
     assert completion["opponent_action_name"] is None
+    assert transport.call_count == 0
+    repository.close()
+
+
+# --- R2-A/B/C: outer atomicity, strict sentinel, coherent advance ----------
+
+
+def _prepare_normal_recording(
+    tmp_path: Path, *, known_opponent: bool
+) -> tuple[
+    SQLiteRepository,
+    TurnStateFlowController,
+    BattleRecordUiWindow,
+    FakeTurnAdviceTransport,
+]:
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+    _confirm_and_send(window)
+    window.actual_action_type_box.setCurrentText("MOVE")
+    window.actual_action_name_box.setCurrentText("Flower Trick")
+    window.actual_action_confirm_checkbox.setChecked(True)
+    if known_opponent:
+        window.opponent_action_type_box.setCurrentText("MOVE")
+        window.opponent_action_name_input.setText("Earthquake")
+    else:
+        window.opponent_action_type_box.setCurrentText("UNKNOWN")
+    return repository, controller, window, transport
+
+
+def _completion_counts(repository: SQLiteRepository) -> tuple[int, int, int]:
+    return tuple(
+        int(repository.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in ("recorded_actions", "action_result_deltas", "rich_action_completions")
+    )  # type: ignore[return-value]
+
+
+@pytest.mark.parametrize("known_opponent", [True, False], ids=["known", "unknown"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "before_recorded_action",
+        "after_recorded_action",
+        "after_delta",
+        "completion_constraint",
+        "session_transition",
+        "commit",
+    ],
+)
+def test_r2_normal_battle_record_faults_roll_back_and_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    known_opponent: bool,
+    fault: str,
+) -> None:
+    repository, controller, window, transport = _prepare_normal_recording(
+        tmp_path, known_opponent=known_opponent
+    )
+    identity_before = controller.turn_state_summary().identity
+    assert identity_before is not None
+
+    original_append_action = repository.append_recorded_action
+    original_append_rich = repository.append_rich_action_completion
+    original_save_session = repository.save_session
+    original_transaction = repository.transaction
+
+    if fault == "before_recorded_action":
+        monkeypatch.setattr(
+            repository,
+            "append_recorded_action",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("BEFORE_ACTION")),
+        )
+    elif fault == "after_recorded_action":
+        monkeypatch.setattr(
+            repository,
+            "append_rich_action_completion",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("AFTER_ACTION")),
+        )
+    elif fault == "after_delta":
+        def fail_after_delta(**kwargs: object) -> None:
+            repository.append_action_result_delta(cast(ActionResultDelta, kwargs["delta"]))
+            raise RuntimeError("AFTER_DELTA")
+
+        monkeypatch.setattr(repository, "append_rich_action_completion", fail_after_delta)
+    elif fault == "completion_constraint":
+        def fail_completion_constraint(**kwargs: object) -> None:
+            original_append_rich(**kwargs)  # type: ignore[arg-type]
+            second = dict(kwargs)
+            second["transaction_id"] = "duplicate-turn-transaction"
+            second["delta"] = replace(
+                cast(ActionResultDelta, kwargs["delta"]), delta_id="duplicate-turn-delta"
+            )
+            original_append_rich(**second)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            repository, "append_rich_action_completion", fail_completion_constraint
+        )
+    elif fault == "session_transition":
+        monkeypatch.setattr(
+            repository,
+            "save_session",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("SESSION_SAVE")),
+        )
+    else:
+        @contextmanager
+        def fail_commit():
+            repository.connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                repository.connection.rollback()
+                raise RuntimeError("COMMIT_FAILURE")
+            except BaseException:
+                repository.connection.rollback()
+                raise
+
+        monkeypatch.setattr(repository, "transaction", fail_commit)
+
+    window._on_record_action()  # noqa: SLF001
+    assert _completion_counts(repository) == (0, 0, 0)
+    session = repository.load_active_session()
+    assert session is not None
+    assert session.state is BattleState.TURN_REVIEWED
+    assert controller.turn_state_summary().identity == identity_before
+    assert controller.turn_state_summary().provider_ready is False
+
+    monkeypatch.setattr(repository, "append_recorded_action", original_append_action)
+    monkeypatch.setattr(repository, "append_rich_action_completion", original_append_rich)
+    monkeypatch.setattr(repository, "save_session", original_save_session)
+    monkeypatch.setattr(repository, "transaction", original_transaction)
+    window._on_record_action()  # noqa: SLF001
+
+    assert _completion_counts(repository) == (1, 1, 1)
+    session = repository.load_active_session()
+    assert session is not None
+    assert session.state is BattleState.TURN_RECORDED
+    action = repository.list_recorded_actions(session.session_id)[0]
+    completion = repository.get_rich_action_completion_by_turn(action.turn_id)
+    assert completion is not None
+    assert completion["turn_id"] == action.turn_id == identity_before.turn_id
+    assert completion["delta_id"] == controller.turn_state_summary().latest_delta.delta_id
+    assert completion["opponent_action_type"] is (
+        ActionType.MOVE if known_opponent else None
+    )
+    assert transport.call_count == 0
+    repository.close()
+
+
+def test_r2_known_switch_and_unknown_sentinel_round_trip(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "sentinel-roundtrip.db")
+    for suffix, opponent_type, opponent_name in (
+        ("switch", ActionType.SWITCH, "Garchomp"),
+        ("unknown", None, ""),
+    ):
+        identity = _r1a_identity(turn_id=f"turn-{suffix}")
+        confirmed = _r1a_confirmed_state(identity, confirmed_state_id=f"cs-{suffix}")
+        with repository.transaction():
+            repository.append_confirmed_turn_state(confirmed)
+        repository.record_rich_action_completion(
+            transaction_id=f"txn-{suffix}",
+            identity=identity,
+            own_action_type=ActionType.MOVE,
+            own_action_name="Swords Dance",
+            opponent_action_type=opponent_type,
+            opponent_action_name=opponent_name,
+            action_order=ActionOrder.UNKNOWN,
+            delta=_r1a_delta(identity, delta_id=f"delta-{suffix}", based_on=f"cs-{suffix}"),
+        )
+        completion = repository.get_rich_action_completion_by_turn(identity.turn_id)
+        assert completion is not None
+        assert completion["opponent_action_type"] is opponent_type
+        assert completion["opponent_action_name"] == (opponent_name or None)
+    repository.close()
+
+
+@pytest.mark.parametrize(
+    ("stored_type", "stored_name"),
+    [
+        ("MOVE", "UNKNOWN"),
+        ("SWITCH", "UNKNOWN"),
+        ("UNKNOWN", "Earthquake"),
+        ("UNKNOWN", ""),
+        ("INVALID", "Earthquake"),
+    ],
+)
+def test_r2_malformed_unknown_storage_fails_closed(
+    tmp_path: Path, stored_type: str, stored_name: str
+) -> None:
+    repository = SQLiteRepository(tmp_path / "malformed-sentinel.db")
+    identity = _r1a_identity()
+    confirmed = _r1a_confirmed_state(identity, confirmed_state_id="cs-malformed")
+    with repository.transaction():
+        repository.append_confirmed_turn_state(confirmed)
+    repository.record_rich_action_completion(
+        transaction_id="txn-malformed",
+        identity=identity,
+        own_action_type=ActionType.MOVE,
+        own_action_name="Swords Dance",
+        opponent_action_type=ActionType.MOVE,
+        opponent_action_name="Earthquake",
+        action_order=ActionOrder.UNKNOWN,
+        delta=_r1a_delta(identity, delta_id="delta-malformed", based_on="cs-malformed"),
+    )
+    with repository.transaction():
+        repository.connection.execute(
+            "UPDATE rich_action_completions SET opponent_action_type = ?, "
+            "opponent_action_name = ?",
+            (stored_type, stored_name),
+        )
+    with pytest.raises(TurnStateError):
+        repository.get_rich_action_completion_by_turn(identity.turn_id)
+    repository.close()
+
+
+@pytest.mark.parametrize("fault", ["derive", "persist"])
+def test_r2_next_turn_failure_does_not_advance_and_retry_is_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    repository, controller, window, transport = _prepare_normal_recording(
+        tmp_path, known_opponent=False
+    )
+    window._on_record_action()  # noqa: SLF001
+    identity_before = controller.turn_state_summary().identity
+    assert identity_before is not None
+
+    original_derive = application_service.derive_next_turn_state_draft
+    original_persist = repository.upsert_next_turn_state_draft
+    if fault == "derive":
+        monkeypatch.setattr(
+            application_service,
+            "derive_next_turn_state_draft",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(TurnStateError("DERIVE_FAIL")),
+        )
+    else:
+        monkeypatch.setattr(
+            repository,
+            "upsert_next_turn_state_draft",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("PERSIST_FAIL")),
+        )
+
+    window._on_next_turn()  # noqa: SLF001
+    session = repository.load_active_session()
+    assert session is not None
+    assert session.state is BattleState.TURN_RECORDED
+    assert session.current_turn_id == identity_before.turn_id
+    assert controller.turn_state_summary().identity == identity_before
+    assert repository.get_latest_next_turn_state_draft(session.session_id) is None
+    assert controller.turn_state_summary().provider_ready is False
+    assert repository.connection.execute("SELECT COUNT(*) FROM battle_turns").fetchone()[0] == 1
+
+    monkeypatch.setattr(application_service, "derive_next_turn_state_draft", original_derive)
+    monkeypatch.setattr(repository, "upsert_next_turn_state_draft", original_persist)
+    window._on_next_turn()  # noqa: SLF001
+    after = controller.turn_state_summary()
+    assert after.identity is not None
+    assert after.identity.turn_number == identity_before.turn_number + 1
+    assert after.open_draft is not None
+    assert after.open_draft.identity == after.identity
+    assert repository.connection.execute("SELECT COUNT(*) FROM battle_turns").fetchone()[0] == 2
+    assert repository.connection.execute(
+        "SELECT COUNT(*) FROM next_turn_state_drafts"
+    ).fetchone()[0] == 1
     assert transport.call_count == 0
     repository.close()

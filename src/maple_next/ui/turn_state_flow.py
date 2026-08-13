@@ -45,7 +45,7 @@ from maple_next.domain.battle_events import (
     StageEventPreset,
     apply_stage_event,
 )
-from maple_next.domain.enums import ActionOrder, ActionType, ResultDisposition
+from maple_next.domain.enums import ActionType, ResultDisposition
 from maple_next.domain.opponent_intel import (
     MatchOpponentFacts,
     possible_abilities_for_species,
@@ -71,7 +71,6 @@ from maple_next.domain.turn_state import (
     TurnIdentity,
     TurnStateError,
     confirm_legal_action_selection,
-    derive_next_turn_state_draft,
 )
 from maple_next.domain.turn_state_projection import (
     GateDenialReason,
@@ -1009,16 +1008,19 @@ class TurnStateFlowController(MatchFlowController):
         opponent_side_delta: SideDelta | None = None,
         weather_delta: FieldDelta[str] | None = None,
         terrain_delta: FieldDelta[str] | None = None,
+        completion_identity: TurnIdentity | None = None,
+        action_result_delta: ActionResultDelta | None = None,
+        rich_transaction_id: str | None = None,
     ) -> OperatorView:
-        """Record the legacy actual action, then persist the Bundle A delta.
+        """Atomically record the legacy action and the Bundle A result.
 
         Backward compatible: omitting the four delta kwargs (every existing
         caller) reproduces :meth:`MatchFlowController.record_actual_action`
         exactly. When supplied, the delta is bound to whatever
         :class:`ConfirmedTurnState` is currently latest for this Turn
-        identity -- captured *before* the legacy call runs, so the delta's
-        identity is exactly the confirmed state's identity even though the
-        legacy call bumps ``battle_revision`` again afterward.
+        identity. The application command owns one transaction containing
+        ``recorded_actions``, the delta, the rich completion, and the
+        ``TURN_RECORDED`` session transition.
         """
 
         rich_delta_requested = (
@@ -1027,6 +1029,11 @@ class TurnStateFlowController(MatchFlowController):
             and weather_delta is not None
             and terrain_delta is not None
         )
+        if any(
+            value is not None
+            for value in (completion_identity, action_result_delta, rich_transaction_id)
+        ):
+            raise ValueError("RICH_COMPLETION_ARGUMENTS_ARE_CONTROLLER_OWNED")
         identity = self._safe_current_identity()
         latest_state = None
         if identity is not None:
@@ -1075,6 +1082,9 @@ class TurnStateFlowController(MatchFlowController):
             opponent_action_type=opponent_action_type,
             opponent_action_name=opponent_action_name,
             action_order=action_order,
+            completion_identity=delta.identity if delta is not None else None,
+            action_result_delta=delta,
+            rich_transaction_id=str(uuid4()) if delta is not None else None,
         )
         if not rich_delta_requested:
             return view
@@ -1085,45 +1095,12 @@ class TurnStateFlowController(MatchFlowController):
         if delta is None:
             return view
 
-        # Single canonical atomic completion boundary (R1-A): every rich
-        # record_actual_action call -- known opponent action, explicitly
-        # UNKNOWN opponent action, or UNKNOWN action order alike -- goes
-        # through record_rich_action_completion. There is no second,
-        # non-atomic completion path reachable from this method. ``own_
-        # action_type``/``action_name`` were already validated by the
-        # legacy ``super().record_actual_action()`` call above (it would
-        # not have reached TURN_RECORDED otherwise), so parsing them here
-        # cannot legitimately fail. ``opponent_action_type`` stays the
-        # same ``ActionType | None`` shape the legacy
-        # ``BattleApplication.record_actual_action`` already uses for "no
-        # confirmed opponent action" -- ``None`` is the explicit typed
-        # UNKNOWN observation, not an empty string.
-        typed_own_action = ActionType(action_type.strip())
-        normalized_opponent_type = opponent_action_type.strip()
-        typed_opponent_action: ActionType | None = (
-            ActionType(normalized_opponent_type) if normalized_opponent_type else None
-        )
-        try:
-            typed_order = ActionOrder(action_order.strip() or ActionOrder.UNKNOWN.value)
-        except ValueError:
-            typed_order = ActionOrder.UNKNOWN
-        self._repository.record_rich_action_completion(
-            transaction_id=str(uuid4()),
-            identity=delta.identity,
-            own_action_type=typed_own_action,
-            own_action_name=action_name.strip(),
-            opponent_action_type=typed_opponent_action,
-            opponent_action_name=opponent_action_name.strip(),
-            action_order=typed_order,
-            delta=delta,
-        )
-        self._error_message = None
-        return self.refresh()
+        return view
 
     # -- NEXT TURN + draft derivation ------------------------------------------
 
     def next_turn(self) -> OperatorView:
-        """Advance the legacy Turn, then derive+persist the Bundle A draft.
+        """Derive and atomically persist the next Turn and Bundle A draft.
 
         00 design decision (Issue #31 comment 5217661584, closing the
         DESIGN_CONFLICT raised in comment 5217523903): ``battle_revision``
@@ -1142,10 +1119,10 @@ class TurnStateFlowController(MatchFlowController):
         stamped on the Turn's ``ConfirmedTurnState`` -- so this now
         genuinely succeeds under the accepted rule, not just in principle.
 
-        Draft derivation can still fail closed (``TurnStateError``, no
-        draft persisted, the legacy Turn advancement itself still
-        completes and is returned) for a genuinely corrupt/foreign chain --
-        e.g. a delta that does not belong to the latest confirmed state.
+        Draft derivation happens before either the new Turn or draft is
+        written. Derivation, Turn/session advancement, and draft persistence
+        share one application transaction, so any failure preserves the
+        current Turn identity.
         """
 
         identity_before = self._safe_current_identity()
@@ -1181,37 +1158,21 @@ class TurnStateFlowController(MatchFlowController):
             )
             return self.refresh()
 
-        view = super().next_turn()
-
         if latest_state is None or delta is None:
-            return view
-
-        session = self._repository.load_active_session()
-        if session is None or session.current_turn_id is None:
-            return view
-        new_turn = self._repository.get_turn(session.current_turn_id)
-        # Durable only: the real, current session identity -- never a
-        # fabricated "previous + 1". See the DESIGN_CONFLICT note above.
-        next_identity = TurnIdentity(
-            session_id=session.session_id,
-            match_id=session.match_id,
-            generation=session.generation,
-            turn_id=new_turn.turn_id,
-            turn_number=new_turn.turn_number,
-            battle_revision=session.battle_revision,
-        )
+            return super().next_turn()
         try:
-            draft = derive_next_turn_state_draft(
-                latest_state,
-                delta,
+            self._application.next_turn_with_action_result(
+                confirmed_state=latest_state,
+                delta=delta,
                 draft_id=str(uuid4()),
-                next_identity=next_identity,
                 derived_at_utc=_now_iso(),
             )
-        except TurnStateError:
+        except (TurnStateError, RuntimeError):
+            self._error_message = (
+                "NEXT TURN縺ｨ豁｡Turn state draft縺ｮ菫晏ｭ倥↓螟ｱ謨励＠縺ｾ縺励◆縲・"
+            )
             return self.refresh()
-        with self._repository.transaction():
-            self._repository.upsert_next_turn_state_draft(draft)
+        self._error_message = None
         return self.refresh()
 
     # -- rich-state Gemini send -------------------------------------------------

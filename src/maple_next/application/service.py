@@ -31,11 +31,13 @@ from maple_next.domain.models import (
 )
 from maple_next.domain.team_build import ChampionsTeamBuild
 from maple_next.domain.turn_state import (
+    ActionResultDelta,
     ConfirmedTurnState,
     NextTurnStateDraft,
     TurnIdentity,
     TurnStateIdentityError,
     TurnStateStaleError,
+    derive_next_turn_state_draft,
     validate_turn_state_full_chain,
 )
 from maple_next.domain.turn_state_projection import ProviderReadyGateError
@@ -1532,6 +1534,9 @@ class BattleApplication:
         opponent_action_type: ActionType | None = None,
         opponent_action_name: str = "",
         action_order: ActionOrder = ActionOrder.UNKNOWN,
+        completion_identity: TurnIdentity | None = None,
+        action_result_delta: ActionResultDelta | None = None,
+        rich_transaction_id: str | None = None,
     ) -> RecordedAction:
         if not human_confirmed:
             raise DomainError("HUMAN_ACTION_CONFIRMATION_REQUIRED")
@@ -1572,10 +1577,77 @@ class BattleApplication:
             except ValueError as exc:
                 raise DomainError(f"INVALID_RECORDED_ACTION:{exc}") from exc
             self.repository.append_recorded_action(session.session_id, action)
+            rich_values = (
+                completion_identity,
+                action_result_delta,
+                rich_transaction_id,
+            )
+            if any(value is not None for value in rich_values):
+                if not all(value is not None for value in rich_values):
+                    raise DomainError("INCOMPLETE_RICH_ACTION_COMPLETION")
+                assert completion_identity is not None
+                assert action_result_delta is not None
+                assert rich_transaction_id is not None
+                if completion_identity.turn_id != action.turn_id:
+                    raise DomainError("ACTION_COMPLETION_TURN_MISMATCH")
+                self.repository.append_rich_action_completion(
+                    transaction_id=rich_transaction_id,
+                    identity=completion_identity,
+                    own_action_type=action.action_type,
+                    own_action_name=action.action_name,
+                    opponent_action_type=action.opponent_action_type,
+                    opponent_action_name=action.opponent_action_name,
+                    action_order=action.action_order,
+                    delta=action_result_delta,
+                )
             session.state = BattleState.TURN_RECORDED
             session.bump_battle()
             self.repository.save_session(session)
         return action
+
+    def next_turn_with_action_result(
+        self,
+        *,
+        confirmed_state: ConfirmedTurnState,
+        delta: ActionResultDelta,
+        draft_id: str,
+        derived_at_utc: str,
+    ) -> BattleTurn:
+        """Atomically derive and persist the next Turn plus its rich draft."""
+
+        with self.repository.transaction():
+            session = self._require_session(BattleState.TURN_RECORDED)
+            if session.current_turn_id is None:
+                raise DomainError("CURRENT_TURN_REQUIRED")
+            current_turn = self.repository.get_turn(session.current_turn_id)
+            if confirmed_state.identity.turn_id != current_turn.turn_id:
+                raise DomainError("CONFIRMED_STATE_NOT_CURRENT_BINDING")
+            turn = BattleTurn(
+                turn_id=str(uuid4()),
+                turn_number=current_turn.turn_number + 1,
+            )
+            next_identity = TurnIdentity(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                turn_id=turn.turn_id,
+                turn_number=turn.turn_number,
+                battle_revision=session.battle_revision + 1,
+            )
+            draft = derive_next_turn_state_draft(
+                confirmed_state,
+                delta,
+                draft_id=draft_id,
+                next_identity=next_identity,
+                derived_at_utc=derived_at_utc,
+            )
+            self.repository.append_turn(session.session_id, turn)
+            self._set_pending_turn(session, turn)
+            if session.battle_revision != next_identity.battle_revision:
+                raise DomainError("NEXT_TURN_REVISION_MISMATCH")
+            self.repository.save_session(session)
+            self.repository.upsert_next_turn_state_draft(draft)
+        return turn
 
     def next_turn(self) -> BattleTurn:
         with self.repository.transaction():

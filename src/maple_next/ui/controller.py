@@ -13,6 +13,7 @@ from maple_next.application.service import BattleApplication, DomainError
 from maple_next.domain.enums import ActionOrder, ActionType, HpBucket, ResultDisposition
 from maple_next.domain.models import AppliedSelectionSnapshot, SelfTeamPreset
 from maple_next.domain.team_build import ChampionsTeamBuild
+from maple_next.domain.turn_state import ActionResultDelta, TurnIdentity
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter, describe_gemini_failure
@@ -786,6 +787,9 @@ class SelectionFlowController:
         opponent_action_type: str = "",
         opponent_action_name: str = "",
         action_order: str = ActionOrder.UNKNOWN.value,
+        completion_identity: TurnIdentity | None = None,
+        action_result_delta: ActionResultDelta | None = None,
+        rich_transaction_id: str | None = None,
     ) -> OperatorView:
         try:
             typed_action = validate_action_type(action_type)
@@ -812,12 +816,15 @@ class SelectionFlowController:
                 opponent_action_type=typed_opponent_type,
                 opponent_action_name=normalized_opponent_name,
                 action_order=typed_order,
+                completion_identity=completion_identity,
+                action_result_delta=action_result_delta,
+                rich_transaction_id=rich_transaction_id,
             )
         except OperatorInputError as error:
             self._error_message = str(error)
         except DomainError as error:
             self._error_message = _domain_message(error)
-        except RuntimeError:
+        except (sqlite3.Error, RuntimeError):
             self._error_message = "実際の行動の保存に失敗しました。履歴は変更されていません。"
         else:
             self._error_message = None

@@ -69,7 +69,7 @@ class RecordedActionView:
     action_type: str
     action_name: str
     opponent_action_type: str | None = None
-    opponent_action_name: str = ""
+    opponent_action_name: str | None = None
     action_order: str = "UNKNOWN"
 
 
@@ -785,11 +785,8 @@ class SelectionFlowController:
         action_name: str,
         human_confirmed: bool,
         opponent_action_type: str = "",
-        opponent_action_name: str = "",
+        opponent_action_name: str | None = None,
         action_order: str = ActionOrder.UNKNOWN.value,
-        completion_identity: TurnIdentity | None = None,
-        action_result_delta: ActionResultDelta | None = None,
-        rich_transaction_id: str | None = None,
     ) -> OperatorView:
         try:
             typed_action = validate_action_type(action_type)
@@ -801,7 +798,9 @@ class SelectionFlowController:
             if normalized_opponent_type:
                 typed_opponent_type = validate_action_type(normalized_opponent_type)
             normalized_opponent_name = (
-                opponent_action_name.strip() if typed_opponent_type is not None else ""
+                opponent_action_name.strip()
+                if typed_opponent_type is not None and opponent_action_name is not None
+                else None
             )
             if typed_opponent_type is not None and not normalized_opponent_name:
                 raise OperatorInputError("相手の実際の行動名を入力してください。")
@@ -810,6 +809,63 @@ class SelectionFlowController:
             except ValueError as exc:
                 raise OperatorInputError("行動順序は一覧から選択してください。") from exc
             self._application.record_actual_action(
+                action_type=typed_action,
+                action_name=normalized_name,
+                human_confirmed=human_confirmed,
+                opponent_action_type=typed_opponent_type,
+                opponent_action_name=normalized_opponent_name,
+                action_order=typed_order,
+            )
+        except OperatorInputError as error:
+            self._error_message = str(error)
+        except DomainError as error:
+            self._error_message = _domain_message(error)
+        except (sqlite3.Error, RuntimeError):
+            self._error_message = "実際の行動の保存に失敗しました。履歴は変更されていません。"
+        else:
+            self._error_message = None
+        return self.refresh()
+
+    def record_rich_actual_action(
+        self,
+        *,
+        action_type: str,
+        action_name: str,
+        human_confirmed: bool,
+        opponent_action_type: str,
+        opponent_action_name: str | None,
+        action_order: str,
+        completion_identity: TurnIdentity,
+        action_result_delta: ActionResultDelta,
+        rich_transaction_id: str,
+    ) -> OperatorView:
+        """Mandatory-rich Bundle 1 action completion boundary."""
+
+        try:
+            typed_action = validate_action_type(action_type)
+            normalized_name = action_name.strip()
+            if not normalized_name:
+                raise OperatorInputError("実際に選んだ行動を選択してください。")
+            normalized_opponent_type = opponent_action_type.strip()
+            typed_opponent_type = (
+                validate_action_type(normalized_opponent_type)
+                if normalized_opponent_type
+                else None
+            )
+            normalized_opponent_name = (
+                opponent_action_name.strip()
+                if typed_opponent_type is not None and opponent_action_name is not None
+                else None
+            )
+            if typed_opponent_type is not None and not normalized_opponent_name:
+                raise OperatorInputError("相手の実際の行動名を入力してください。")
+            if typed_opponent_type is None and opponent_action_name not in (None, ""):
+                raise OperatorInputError("未確認の相手行動には行動名を指定できません。")
+            try:
+                typed_order = ActionOrder(action_order.strip() or ActionOrder.UNKNOWN.value)
+            except ValueError as exc:
+                raise OperatorInputError("行動順を一覧から選択してください。") from exc
+            self._application.record_rich_actual_action(
                 action_type=typed_action,
                 action_name=normalized_name,
                 human_confirmed=human_confirmed,

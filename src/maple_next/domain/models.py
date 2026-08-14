@@ -259,7 +259,7 @@ class RecordedAction:
     action_type: ActionType
     action_name: str
     opponent_action_type: ActionType | None = None
-    opponent_action_name: str = ""
+    opponent_action_name: str | None = None
     action_order: ActionOrder = ActionOrder.UNKNOWN
 
     def __post_init__(self) -> None:
@@ -267,7 +267,11 @@ class RecordedAction:
             raise ValueError("turn number must be positive")
         if not self.action_name.strip():
             raise ValueError("recorded action must be explicit")
-        if self.opponent_action_type is not None and not self.opponent_action_name.strip():
+        if self.opponent_action_type is None and self.opponent_action_name is not None:
+            raise ValueError("unknown opponent action name must be None")
+        if self.opponent_action_type is not None and (
+            self.opponent_action_name is None or not self.opponent_action_name.strip()
+        ):
             raise ValueError("opponent action name must be explicit when type is provided")
 
 

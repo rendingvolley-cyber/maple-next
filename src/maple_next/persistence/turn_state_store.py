@@ -704,13 +704,17 @@ class TurnStateStoreMixin(StoreBase):
 
     @classmethod
     def _encode_opponent_action(
-        cls, action_type: ActionType | None, action_name: str
+        cls, action_type: ActionType | None, action_name: str | None
     ) -> tuple[str, str]:
         if action_type is None:
+            if action_name is not None:
+                raise TurnStateError("INVALID_UNKNOWN_OPPONENT_ACTION_NAME")
             return (
                 cls._OPPONENT_ACTION_UNKNOWN_SENTINEL,
                 cls._OPPONENT_ACTION_UNKNOWN_SENTINEL,
             )
+        if action_name is None:
+            raise TurnStateError("INVALID_KNOWN_OPPONENT_ACTION_NAME")
         normalized_name = action_name.strip()
         if not normalized_name or normalized_name == cls._OPPONENT_ACTION_UNKNOWN_SENTINEL:
             raise TurnStateError("INVALID_KNOWN_OPPONENT_ACTION_NAME")
@@ -743,7 +747,7 @@ class TurnStateStoreMixin(StoreBase):
         own_action_type: ActionType,
         own_action_name: str,
         opponent_action_type: ActionType | None,
-        opponent_action_name: str,
+        opponent_action_name: str | None,
         action_order: ActionOrder,
         delta: ActionResultDelta,
     ) -> None:

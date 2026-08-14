@@ -296,5 +296,5 @@ def test_unknown_and_no_action_clear_stale_name_before_persistence(
     recorded = repository.get_recorded_action_for_turn(session.current_turn_id)
     assert recorded is not None
     assert recorded.opponent_action_type is None
-    assert recorded.opponent_action_name == ""
+    assert recorded.opponent_action_name is None
     repository.close()

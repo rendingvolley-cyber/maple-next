@@ -314,7 +314,9 @@ class MatchApplication(BattleApplication):
                     if action.opponent_action_type is not None
                     else None
                 ),
-                "opponent_action_name": action.opponent_action_name,
+                # Preserve the accepted v2 export representation while the
+                # in-process domain contract uses typed None/None.
+                "opponent_action_name": action.opponent_action_name or "",
                 "action_order": action.action_order.value,
             }
             for action in self.repository.list_recorded_actions(session.session_id)

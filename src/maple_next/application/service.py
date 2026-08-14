@@ -1532,14 +1532,79 @@ class BattleApplication:
         action_name: str,
         human_confirmed: bool,
         opponent_action_type: ActionType | None = None,
-        opponent_action_name: str = "",
+        opponent_action_name: str | None = None,
         action_order: ActionOrder = ActionOrder.UNKNOWN,
-        completion_identity: TurnIdentity | None = None,
-        action_result_delta: ActionResultDelta | None = None,
-        rich_transaction_id: str | None = None,
+    ) -> RecordedAction:
+        """Explicit legacy-only compatibility operation.
+
+        Bundle 1 Battle Record must use :meth:`record_rich_actual_action`,
+        whose rich completion arguments cannot be omitted.
+        """
+
+        return self._record_actual_action(
+            action_type=action_type,
+            action_name=action_name,
+            human_confirmed=human_confirmed,
+            opponent_action_type=opponent_action_type,
+            opponent_action_name=opponent_action_name,
+            action_order=action_order,
+            rich_completion=None,
+        )
+
+    def record_rich_actual_action(
+        self,
+        *,
+        action_type: ActionType,
+        action_name: str,
+        human_confirmed: bool,
+        opponent_action_type: ActionType | None,
+        opponent_action_name: str | None,
+        action_order: ActionOrder,
+        completion_identity: TurnIdentity,
+        action_result_delta: ActionResultDelta,
+        rich_transaction_id: str,
+    ) -> RecordedAction:
+        """Record one mandatory, identity-bound Bundle 1 completion."""
+
+        if (
+            completion_identity is None
+            or action_result_delta is None
+            or rich_transaction_id is None
+        ):
+            raise DomainError("INCOMPLETE_RICH_ACTION_COMPLETION")
+        return self._record_actual_action(
+            action_type=action_type,
+            action_name=action_name,
+            human_confirmed=human_confirmed,
+            opponent_action_type=opponent_action_type,
+            opponent_action_name=opponent_action_name,
+            action_order=action_order,
+            rich_completion=(
+                completion_identity,
+                action_result_delta,
+                rich_transaction_id,
+            ),
+        )
+
+    def _record_actual_action(
+        self,
+        *,
+        action_type: ActionType,
+        action_name: str,
+        human_confirmed: bool,
+        opponent_action_type: ActionType | None,
+        opponent_action_name: str | None,
+        action_order: ActionOrder,
+        rich_completion: tuple[TurnIdentity, ActionResultDelta, str] | None,
     ) -> RecordedAction:
         if not human_confirmed:
             raise DomainError("HUMAN_ACTION_CONFIRMATION_REQUIRED")
+        if opponent_action_type is None and opponent_action_name is not None:
+            raise DomainError("INVALID_UNKNOWN_OPPONENT_ACTION_NAME")
+        if opponent_action_type is not None and (
+            opponent_action_name is None or not opponent_action_name.strip()
+        ):
+            raise DomainError("INVALID_KNOWN_OPPONENT_ACTION_NAME")
 
         with self.repository.transaction():
             session = self._require_session(BattleState.TURN_REVIEWED)
@@ -1560,7 +1625,9 @@ class BattleApplication:
             if normalized_name not in legal_actions:
                 raise DomainError("ACTION_OUTSIDE_REVIEWED_LEGAL_ACTIONS")
             normalized_opponent_name = (
-                opponent_action_name.strip() if opponent_action_type is not None else ""
+                opponent_action_name.strip()
+                if opponent_action_type is not None and opponent_action_name is not None
+                else None
             )
 
             try:
@@ -1576,20 +1643,28 @@ class BattleApplication:
                 )
             except ValueError as exc:
                 raise DomainError(f"INVALID_RECORDED_ACTION:{exc}") from exc
-            self.repository.append_recorded_action(session.session_id, action)
-            rich_values = (
-                completion_identity,
-                action_result_delta,
-                rich_transaction_id,
-            )
-            if any(value is not None for value in rich_values):
-                if not all(value is not None for value in rich_values):
-                    raise DomainError("INCOMPLETE_RICH_ACTION_COMPLETION")
-                assert completion_identity is not None
-                assert action_result_delta is not None
-                assert rich_transaction_id is not None
+            if rich_completion is not None:
+                completion_identity, action_result_delta, rich_transaction_id = rich_completion
+                if not rich_transaction_id.strip():
+                    raise DomainError("RICH_ACTION_COMPLETION_ID_REQUIRED")
                 if completion_identity.turn_id != action.turn_id:
                     raise DomainError("ACTION_COMPLETION_TURN_MISMATCH")
+                if action_result_delta.identity != completion_identity:
+                    raise DomainError("ACTION_COMPLETION_DELTA_IDENTITY_MISMATCH")
+                try:
+                    based_on_state = self.repository.get_confirmed_turn_state(
+                        action_result_delta.based_on_confirmed_state_id
+                    )
+                except KeyError as exc:
+                    raise DomainError("BASED_ON_CONFIRMED_STATE_NOT_FOUND") from exc
+                if based_on_state.identity != completion_identity:
+                    raise DomainError("ACTION_COMPLETION_CONFIRMED_STATE_IDENTITY_MISMATCH")
+
+            # Every mandatory rich prerequisite above is validated before
+            # the first durable write. The writes below still share the
+            # same outer transaction for rollback on persistence failures.
+            self.repository.append_recorded_action(session.session_id, action)
+            if rich_completion is not None:
                 self.repository.append_rich_action_completion(
                     transaction_id=rich_transaction_id,
                     identity=completion_identity,
@@ -1613,34 +1688,77 @@ class BattleApplication:
         draft_id: str,
         derived_at_utc: str,
     ) -> BattleTurn:
-        """Atomically derive and persist the next Turn plus its rich draft."""
+        """Derive first, then atomically advance and persist the exact draft."""
 
+        # Phase 1: read and purely derive while Turn N remains current. No
+        # BEGIN IMMEDIATE is entered until the complete draft validates.
+        session_before = self._require_session(BattleState.TURN_RECORDED)
+        if session_before.current_turn_id is None:
+            raise DomainError("CURRENT_TURN_REQUIRED")
+        current_turn_before = self.repository.get_turn(session_before.current_turn_id)
+        if confirmed_state.identity.turn_id != current_turn_before.turn_id:
+            raise DomainError("CONFIRMED_STATE_NOT_CURRENT_BINDING")
+        latest_state_before = self.repository.get_latest_confirmed_turn_state_for_identity(
+            session_id=session_before.session_id,
+            match_id=session_before.match_id,
+            generation=session_before.generation,
+        )
+        if latest_state_before != confirmed_state:
+            raise DomainError("CONFIRMED_STATE_NOT_CURRENT_BINDING")
+        deltas_before = self.repository.list_action_result_deltas_based_on(
+            confirmed_state.confirmed_state_id
+        )
+        if not deltas_before or deltas_before[-1] != delta:
+            raise DomainError("ACTION_RESULT_DELTA_NOT_CURRENT_BINDING")
+
+        turn = BattleTurn(
+            turn_id=str(uuid4()),
+            turn_number=current_turn_before.turn_number + 1,
+        )
+        next_identity = TurnIdentity(
+            session_id=session_before.session_id,
+            match_id=session_before.match_id,
+            generation=session_before.generation,
+            turn_id=turn.turn_id,
+            turn_number=turn.turn_number,
+            battle_revision=session_before.battle_revision + 1,
+        )
+        draft = derive_next_turn_state_draft(
+            confirmed_state,
+            delta,
+            draft_id=draft_id,
+            next_identity=next_identity,
+            derived_at_utc=derived_at_utc,
+        )
+        validate_turn_state_full_chain(confirmed_state, delta, draft)
+
+        # Phase 2: re-read every current binding after BEGIN. A stale Phase-1
+        # snapshot fails closed; the draft is never recomputed in-transaction.
         with self.repository.transaction():
             session = self._require_session(BattleState.TURN_RECORDED)
-            if session.current_turn_id is None:
-                raise DomainError("CURRENT_TURN_REQUIRED")
-            current_turn = self.repository.get_turn(session.current_turn_id)
-            if confirmed_state.identity.turn_id != current_turn.turn_id:
-                raise DomainError("CONFIRMED_STATE_NOT_CURRENT_BINDING")
-            turn = BattleTurn(
-                turn_id=str(uuid4()),
-                turn_number=current_turn.turn_number + 1,
-            )
-            next_identity = TurnIdentity(
+            if (
+                session.session_id != session_before.session_id
+                or session.match_id != session_before.match_id
+                or session.generation != session_before.generation
+                or session.current_turn_id != session_before.current_turn_id
+                or session.battle_revision != session_before.battle_revision
+            ):
+                raise DomainError("NEXT_TURN_PHASE1_BINDING_STALE")
+            current_turn = self.repository.get_turn(session.current_turn_id or "")
+            if current_turn != current_turn_before:
+                raise DomainError("NEXT_TURN_PHASE1_BINDING_STALE")
+            latest_state = self.repository.get_latest_confirmed_turn_state_for_identity(
                 session_id=session.session_id,
                 match_id=session.match_id,
                 generation=session.generation,
-                turn_id=turn.turn_id,
-                turn_number=turn.turn_number,
-                battle_revision=session.battle_revision + 1,
             )
-            draft = derive_next_turn_state_draft(
-                confirmed_state,
-                delta,
-                draft_id=draft_id,
-                next_identity=next_identity,
-                derived_at_utc=derived_at_utc,
+            if latest_state != confirmed_state:
+                raise DomainError("NEXT_TURN_PHASE1_BINDING_STALE")
+            deltas = self.repository.list_action_result_deltas_based_on(
+                confirmed_state.confirmed_state_id
             )
+            if not deltas or deltas[-1] != delta:
+                raise DomainError("NEXT_TURN_PHASE1_BINDING_STALE")
             self.repository.append_turn(session.session_id, turn)
             self._set_pending_turn(session, turn)
             if session.battle_revision != next_identity.battle_revision:

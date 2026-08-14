@@ -541,6 +541,7 @@ class TurnStateFlowController(MatchFlowController):
                 or not self._same_opponent_species(active.value, species_name)
             ):
                 continue
+            assert action.opponent_action_name is not None
             move = action.opponent_action_name.strip()
             if move and move not in moves:
                 moves.append(move)
@@ -1002,15 +1003,12 @@ class TurnStateFlowController(MatchFlowController):
         action_name: str,
         human_confirmed: bool,
         opponent_action_type: str = "",
-        opponent_action_name: str = "",
+        opponent_action_name: str | None = None,
         action_order: str = "UNKNOWN",
         self_side_delta: SideDelta | None = None,
         opponent_side_delta: SideDelta | None = None,
         weather_delta: FieldDelta[str] | None = None,
         terrain_delta: FieldDelta[str] | None = None,
-        completion_identity: TurnIdentity | None = None,
-        action_result_delta: ActionResultDelta | None = None,
-        rich_transaction_id: str | None = None,
     ) -> OperatorView:
         """Atomically record the legacy action and the Bundle A result.
 
@@ -1023,25 +1021,31 @@ class TurnStateFlowController(MatchFlowController):
         ``TURN_RECORDED`` session transition.
         """
 
-        rich_delta_requested = (
-            self_side_delta is not None
-            and opponent_side_delta is not None
-            and weather_delta is not None
-            and terrain_delta is not None
-        )
-        if any(
+        rich_delta_requested = all(
             value is not None
-            for value in (completion_identity, action_result_delta, rich_transaction_id)
-        ):
-            raise ValueError("RICH_COMPLETION_ARGUMENTS_ARE_CONTROLLER_OWNED")
+            for value in (self_side_delta, opponent_side_delta, weather_delta, terrain_delta)
+        )
+        if not rich_delta_requested:
+            self._error_message = "行動結果の必須項目が不足しています。"
+            return self.refresh()
         identity = self._safe_current_identity()
-        latest_state = None
-        if identity is not None:
-            latest_state = self._repository.get_latest_confirmed_turn_state_for_identity(
-                session_id=identity.session_id,
-                match_id=identity.match_id,
-                generation=identity.generation,
-            )
+        if identity is None:
+            self._error_message = "現在のTurn identityがありません。"
+            return self.refresh()
+        latest_state = self._repository.get_latest_confirmed_turn_state_for_identity(
+            session_id=identity.session_id,
+            match_id=identity.match_id,
+            generation=identity.generation,
+        )
+        if latest_state is None or (
+            latest_state.identity.session_id != identity.session_id
+            or latest_state.identity.match_id != identity.match_id
+            or latest_state.identity.generation != identity.generation
+            or latest_state.identity.turn_id != identity.turn_id
+            or latest_state.identity.turn_number != identity.turn_number
+        ):
+            self._error_message = "現在のTurnに一致する確定状態がありません。"
+            return self.refresh()
 
         # Build and validate the delta *before* touching the legacy action
         # record (00 R2 lifecycle fix, closing the atomicity gap where the
@@ -1052,49 +1056,41 @@ class TurnStateFlowController(MatchFlowController):
         # ``latest_state`` (already read above) and the caller-supplied
         # delta pieces -- so validating first costs nothing.
         delta: ActionResultDelta | None = None
-        if (
-            self_side_delta is not None
-            and opponent_side_delta is not None
-            and weather_delta is not None
-            and terrain_delta is not None
-            and latest_state is not None
-        ):
-            try:
-                delta = ActionResultDelta(
-                    delta_id=str(uuid4()),
-                    identity=latest_state.identity,
-                    based_on_confirmed_state_id=latest_state.confirmed_state_id,
-                    self_side=self_side_delta,
-                    opponent_side=opponent_side_delta,
-                    weather=weather_delta,
-                    terrain=terrain_delta,
-                    confirmation=_confirmation_meta(),
-                )
-            except (ValueError, TurnStateError) as exc:
-                self._error_message = f"action result delta を保存できません: {exc}"
-                return self.refresh()
+        assert self_side_delta is not None
+        assert opponent_side_delta is not None
+        assert weather_delta is not None
+        assert terrain_delta is not None
+        try:
+            delta = ActionResultDelta(
+                delta_id=str(uuid4()),
+                identity=latest_state.identity,
+                based_on_confirmed_state_id=latest_state.confirmed_state_id,
+                self_side=self_side_delta,
+                opponent_side=opponent_side_delta,
+                weather=weather_delta,
+                terrain=terrain_delta,
+                confirmation=_confirmation_meta(),
+            )
+        except (ValueError, TurnStateError) as exc:
+            self._error_message = f"action result delta を保存できません: {exc}"
+            return self.refresh()
 
         before_error = self._error_message
-        view = super().record_actual_action(
+        view = super().record_rich_actual_action(
             action_type=action_type,
             action_name=action_name,
             human_confirmed=human_confirmed,
             opponent_action_type=opponent_action_type,
             opponent_action_name=opponent_action_name,
             action_order=action_order,
-            completion_identity=delta.identity if delta is not None else None,
+            completion_identity=delta.identity,
             action_result_delta=delta,
-            rich_transaction_id=str(uuid4()) if delta is not None else None,
+            rich_transaction_id=str(uuid4()),
         )
-        if not rich_delta_requested:
-            return view
         if view.error_message is not None and view.error_message != before_error:
             return view
         if view.projection.session_state != "TURN_RECORDED":
             return view
-        if delta is None:
-            return view
-
         return view
 
     # -- NEXT TURN + draft derivation ------------------------------------------
@@ -1167,7 +1163,7 @@ class TurnStateFlowController(MatchFlowController):
                 draft_id=str(uuid4()),
                 derived_at_utc=_now_iso(),
             )
-        except (TurnStateError, RuntimeError):
+        except (DomainError, TurnStateError, RuntimeError):
             self._error_message = (
                 "NEXT TURN縺ｨ豁｡Turn state draft縺ｮ菫晏ｭ倥↓螟ｱ謨励＠縺ｾ縺励◆縲・"
             )

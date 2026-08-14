@@ -156,7 +156,7 @@ class TurnStoreMixin(StoreBase):
                     if action.opponent_action_type is not None
                     else None
                 ),
-                action.opponent_action_name,
+                action.opponent_action_name or "",
                 action.action_order.value,
                 self._now(),
             ),
@@ -183,7 +183,11 @@ class TurnStoreMixin(StoreBase):
                 if opponent_action_type_raw is not None
                 else None
             ),
-            opponent_action_name=str(row["opponent_action_name"]),  # type: ignore[index]
+            opponent_action_name=(
+                str(row["opponent_action_name"])  # type: ignore[index]
+                if opponent_action_type_raw is not None
+                else None
+            ),
             action_order=ActionOrder(str(row["action_order"])),  # type: ignore[index]
         )
 

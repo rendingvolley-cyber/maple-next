@@ -209,6 +209,10 @@ class MatchStoreMixin(StoreBase):
                 if opponent_action_type_raw is not None
                 else None
             ),
-            opponent_action_name=str(row["opponent_action_name"]),
+            opponent_action_name=(
+                str(row["opponent_action_name"])
+                if opponent_action_type_raw is not None
+                else None
+            ),
             action_order=ActionOrder(str(row["action_order"])),
         )

@@ -66,7 +66,7 @@ class SQLiteRepository(
         own_action_type: ActionType,
         own_action_name: str,
         opponent_action_type: ActionType | None,
-        opponent_action_name: str,
+        opponent_action_name: str | None,
         action_order: ActionOrder,
         delta: ActionResultDelta,
     ) -> None:
@@ -105,7 +105,7 @@ class SQLiteRepository(
         own_action_type: ActionType,
         own_action_name: str,
         opponent_action_type: ActionType | None,
-        opponent_action_name: str,
+        opponent_action_name: str | None,
         action_order: ActionOrder,
         delta: ActionResultDelta,
     ) -> None:

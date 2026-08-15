@@ -22,6 +22,7 @@ from test_issue31_action_result_lifecycle_r2 import (
 from test_issue31_turn_state_ui_bundle_c import (
     _advance_to_turn_capture_pending,
     _fill_minimal_current_state,
+    build_production_compatible_window,
     build_window,
 )
 
@@ -75,6 +76,31 @@ def test_2_confirm_two_candidates_selected_is_confirmed_nonempty(tmp_path: Path)
     repository.close()
 
 
+def test_2b_confirm_none_via_direct_controller_call_makes_no_dispatch(tmp_path: Path) -> None:
+    """R2-E: the controller/application command for CONFIRMED_NONE, called
+    directly (never through a UI click), makes zero dispatch attempts and
+    zero transport calls -- symmetric with test_2's CONFIRMED_NONEMPTY case.
+    """
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+    window._on_confirm_turn_facts()  # noqa: SLF001
+
+    view = controller.confirm_legal_switches(
+        legal_switches=(), status=LegalSwitchStatus.CONFIRMED_NONE
+    )
+    assert view.error_message is None
+    assert transport.call_count == 0
+
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is not None
+    assert summary.legal_switch_confirmation.status is LegalSwitchStatus.CONFIRMED_NONE
+    assert summary.legal_switch_confirmation.legal_switches == ()
+    repository.close()
+
+
 def test_3_explicit_confirm_none_is_visually_distinct_from_unresolved(tmp_path: Path) -> None:
     repository, controller, window, transport = build_window(tmp_path)
     _advance_to_turn_capture_pending(controller)
@@ -94,6 +120,37 @@ def test_3_explicit_confirm_none_is_visually_distinct_from_unresolved(tmp_path: 
     assert confirmed_none_label != unresolved_label
     assert "CONFIRMED_NONE" in confirmed_none_label
     assert transport.call_count == 0  # not yet provider-ready overall (no legal move confirmed)
+    repository.close()
+
+
+def test_3b_confirm_none_reaches_provider_ready_but_never_sends(tmp_path: Path) -> None:
+    """R2-D: even when CONFIRMED_NONE is the last missing provider-ready
+    prerequisite (every other requirement already satisfied, matching the
+    v5 production-compatible fixture), confirming it must not dispatch --
+    only the separate explicit send action may reach the transport."""
+
+    repository, controller, window, transport, adapter = (
+        build_production_compatible_window(tmp_path)
+    )
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+    window.confirm_turn_facts_button.click()
+    assert transport.call_count == 0
+
+    window._on_confirm_legal_switches_none()  # noqa: SLF001
+
+    assert transport.call_count == 0
+    assert adapter.dispatch_count == 0
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is not None
+    assert summary.legal_switch_confirmation.status is LegalSwitchStatus.CONFIRMED_NONE
+    assert summary.provider_ready is True
+    assert window._bundle_c_gemini_send_button.isEnabled()  # noqa: SLF001
+
+    window._on_trusted_send_turn_to_gemini()  # noqa: SLF001
+    assert transport.call_count == 1
+    assert adapter.dispatch_count == 1
     repository.close()
 
 

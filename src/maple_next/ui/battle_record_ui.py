@@ -1511,12 +1511,27 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self.turn_gemini_box.setVisible(False)
 
         self.start_turn_button.setText("Turn撮影")
-        self.confirm_turn_facts_button.setText("SEND TURN TO GEMINI")
+        # Bundle 2 (Gemini V2) R2: this button is CONFIRM TURN FACTS only --
+        # it no longer sends. It previously read "SEND TURN TO GEMINI" back
+        # when v5 conflated the two into one trusted click; that label would
+        # now be a lie, since a distinct explicit send action (below) is
+        # required after it.
+        self.confirm_turn_facts_button.setText("CONFIRM TURN FACTS")
         self.record_action_button.setText("行動・結果記録")
         self.next_turn_button.setText("NEXT TURN")
 
         if gemini_send_button is not None:
-            gemini_send_button.setVisible(False)
+            # Bundle 2 (Gemini V2) R2: reuse this pre-existing, already-
+            # correctly-wired (via the inherited ``_on_trusted_send_turn_to_
+            # gemini`` override -> ``send_rich_turn_advice_to_gemini``)
+            # explicit send control instead of inventing a new one. v5 had
+            # hidden it because confirming facts used to double as sending;
+            # now that confirming facts and confirming legal switches are
+            # both purely factual, this is the one and only path to a
+            # provider dispatch. Placed in the rich-state status group it
+            # already reports readiness/denial reasons for.
+            gemini_send_button.setText("SEND TURN TO GEMINI")
+            self._rich_gemini_layout.addRow(gemini_send_button)
             self._bundle_c_gemini_send_button = gemini_send_button
         self.turn_facts_confirm_checkbox.setVisible(False)
 
@@ -3866,13 +3881,18 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
         gemini_button = getattr(self, "_bundle_c_gemini_send_button", None)
         if gemini_button is not None:
+            # Bundle 2 (Gemini V2) R2: this is the one distinct, explicit
+            # send action -- visible/enabled only once every provider-ready
+            # prerequisite (including legal-switch confirmation) already
+            # holds. Confirming facts or confirming legal switches never
+            # sets these themselves; only this control's own click does.
+            gemini_button.setVisible(projection.primary_cta == "REQUEST_TURN_ADVICE")
             gemini_button.setEnabled(
                 current.persistence_reads_allowed
                 and projection.primary_cta == "REQUEST_TURN_ADVICE"
                 and summary.provider_ready
                 and status.status != "PENDING"
             )
-            gemini_button.setVisible(False)
 
         species = self.opponent_active_input.text().strip()
         try:
@@ -4021,25 +4041,16 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                         )
                 view = self._bundle_c_controller.refresh()
         self.render_view(view)
-        # v5 has no separate facts/state phase, so this trusted click is
-        # otherwise the final pre-send confirmation and enters the existing
-        # rich-provider dispatch path directly. Bundle 2 (Gemini V2) inserts
-        # exactly one additional gate here: confirming Turn facts must never
-        # itself dispatch while this exact binding's legal-switch truth is
-        # still NOT_CAPTURED_OR_UNRESOLVED (the historical legal_switches=[]
-        # defect). When unresolved, the confirmed factual state and the
-        # derived candidates are retained/rendered (see the legal-switch
-        # workbench group below) and the operator must explicitly confirm
-        # before the existing send boundary can run -- this call is skipped
-        # entirely rather than attempted-and-denied, so it is never counted
-        # as a dispatch attempt.
-        summary = self._bundle_c_controller.turn_state_summary()
-        if (
-            view.error_message is None
-            and view.projection.session_state == "TURN_REVIEWED"
-            and summary.legal_switch_confirmation is not None
-        ):
-            self._on_trusted_send_turn_to_gemini()
+        # Bundle 2 (Gemini V2) R2: confirming Turn facts is purely a factual
+        # persistence step -- it never dispatches, whether or not this exact
+        # binding's legal-switch truth happens to already be resolved (in
+        # practice it never is: confirming facts always mints a fresh
+        # binding, so any prior legal-switch confirmation can no longer
+        # match it -- see LegalSwitchStoreMixin.get_legal_switch_confirmation's
+        # exact-binding lookup). The only path to a provider dispatch is the
+        # distinct, explicit send control in ``rich_gemini_group`` below
+        # (``_on_trusted_send_turn_to_gemini``), which the operator invokes
+        # as its own separate action once provider-ready.
 
     def _on_record_action(self, _checked: bool = False) -> None:
         if not self._mutation_slots_allowed():
@@ -4273,7 +4284,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         view = self._bundle_c_controller.confirm_legal_switches(
             legal_switches=tuple(selected), status=LegalSwitchStatus.CONFIRMED_NONEMPTY
         )
-        self._render_after_legal_switch_confirmation(view)
+        self.render_view(view)
 
     def _on_confirm_legal_switches_none(self, _checked: bool = False) -> None:
         """Bundle 2: explicit human confirmation of zero legal switches.
@@ -4286,30 +4297,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         view = self._bundle_c_controller.confirm_legal_switches(
             legal_switches=(), status=LegalSwitchStatus.CONFIRMED_NONE
         )
-        self._render_after_legal_switch_confirmation(view)
-
-    def _render_after_legal_switch_confirmation(self, view: OperatorView) -> None:
-        """Legal-switch confirmation is itself only a factual persistence
-        operation -- it never talks to a transport. But once it is exactly
-        this exact binding's last missing provider-ready prerequisite (the
-        confirmed factual state and every other legal action were already
-        confirmed by the earlier trusted "confirm facts" click, which
-        deliberately skipped its own send because switches were still
-        unresolved), completing it is the operator's trusted signal to
-        proceed -- the same "confirm this, then continue toward the
-        existing explicit send boundary" cascade ``_on_confirm_turn_facts``
-        already performs for its own completion, not a new automatic send
-        path. Re-running ``confirm_turn_facts`` here would be wrong: it
-        would bump ``battle_revision`` again and orphan the confirmation
-        just persisted, so this reuses the *current* view/binding as-is."""
-
         self.render_view(view)
-        if (
-            view.error_message is None
-            and view.projection.session_state == "TURN_REVIEWED"
-            and self._bundle_c_controller.turn_state_summary().provider_ready
-        ):
-            self._on_trusted_send_turn_to_gemini()
 
     def _render_legal_switch_workbench(self, summary: TurnStateSummaryView) -> None:
         """Bundle 2: reflect the current binding's derived candidates and

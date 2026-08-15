@@ -274,15 +274,28 @@ def test_window_constructs_with_fixed_header_body_and_bottom_bar(tmp_path: Path)
 def test_visible_v5_send_dispatches_production_compatible_transport_once(
     tmp_path: Path,
 ) -> None:
-    """Bundle 2 (Gemini V2) R1: the v5 "confirm facts" click no longer
-    dispatches by itself while this exact binding's legal-switch truth is
-    unresolved -- it must retain the confirmed factual state and surface the
-    derived candidates instead. Only after the operator explicitly confirms
-    the legal-switch truth does the existing production-compatible transport
-    wiring this test exists to prove get exercised -- confirming the switches
-    is itself only a factual persistence operation (proven separately below:
-    it makes zero transport calls on its own), and completing it is what
-    lets the *already pending* trusted send proceed, exactly once."""
+    """Bundle 2 (Gemini V2) R2: three distinct operator actions, none of
+    which dispatch except the last.
+
+    STEP 1 -- confirm Turn facts: persists the canonical confirmed state;
+    legal switches remain NOT_CAPTURED_OR_UNRESOLVED; zero dispatch.
+
+    STEP 2 -- explicitly confirm legal switches: persists the confirmation
+    (never an automatic promotion of the derived candidate list);
+    provider-ready becomes true; still zero dispatch -- legal-switch
+    confirmation is purely a factual persistence operation and never itself
+    reaches a transport.
+
+    STEP 3 -- the existing, separate explicit Gemini-send control (the
+    pre-existing ``TrustedSendButton`` this test's production-compatible
+    transport double exists to prove is wired correctly -- v5 previously
+    hid it because confirming facts used to double as sending): only this
+    distinct action reaches the transport, exactly once. Its ``clicked``
+    signal is deliberately inert for synthetic events (see
+    ``TrustedSendButton``/``test_trusted_send_gate.py``), so the handler is
+    invoked directly here, exactly as this suite's other trusted-button
+    tests already do for the legacy send action.
+    """
 
     repository, controller, window, transport, adapter = (
         build_production_compatible_window(tmp_path)
@@ -291,12 +304,11 @@ def test_visible_v5_send_dispatches_production_compatible_transport_once(
     window.render_view()
     _fill_minimal_current_state(window)
 
+    # -- STEP 1: confirm Turn facts. --
     assert not window.confirm_turn_facts_button.isHidden()
     assert window.confirm_turn_facts_button.isEnabled()
     window.confirm_turn_facts_button.click()
 
-    # -- Confirming facts alone must not dispatch: legal switches for this
-    # exact binding are still NOT_CAPTURED_OR_UNRESOLVED. --
     assert transport.call_count == 0
     assert adapter.dispatch_count == 0
     summary = controller.turn_state_summary()
@@ -306,20 +318,29 @@ def test_visible_v5_send_dispatches_production_compatible_transport_once(
     assert summary.provider_ready is False
     assert "LEGAL_SWITCHES_UNRESOLVED" in summary.provider_ready_denial_reasons
 
-    # -- Explicit human confirmation of both real candidates -- never an
-    # automatic promotion of the derived list. The confirmation call itself
-    # makes no transport call; only the already-pending send it unblocks
-    # does, exactly once. --
+    # -- STEP 2: explicitly confirm both real candidates. --
     for index in range(window.legal_switch_list.count()):
         window.legal_switch_list.item(index).setSelected(True)
     window._on_confirm_legal_switches_selected()  # noqa: SLF001
 
+    assert transport.call_count == 0
+    assert adapter.dispatch_count == 0
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is not None
+    assert summary.legal_switch_confirmation.legal_switches == ("Gholdengo", "Dragonite")
+    assert summary.provider_ready is True
+    send_button = window._bundle_c_gemini_send_button  # noqa: SLF001
+    assert send_button.isEnabled()
+
+    # -- STEP 3: the distinct explicit send action. --
+    window._on_trusted_send_turn_to_gemini()  # noqa: SLF001
+
     assert transport.call_count == 1
     assert adapter.dispatch_count == 1
 
-    # -- Re-clicking confirm-facts re-confirms (bumping the binding) and
-    # again requires a fresh legal-switch confirmation before it can send
-    # again -- never a second dispatch as a side effect of the same click. --
+    # -- Re-confirming facts (a fresh binding) again requires a fresh
+    # legal-switch confirmation before another send is even possible --
+    # never a second dispatch as a side effect of any confirm click. --
     window.confirm_turn_facts_button.click()
     assert transport.call_count == 1
     assert adapter.dispatch_count == 1

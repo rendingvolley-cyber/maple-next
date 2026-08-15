@@ -29,6 +29,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase, QResizeEvent
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -62,6 +64,7 @@ from maple_next.domain.effect_catalog import (
     find_effect,
 )
 from maple_next.domain.enums import HpBucket, MatchOutcome
+from maple_next.domain.legal_switches import LegalSwitchStatus
 from maple_next.domain.move_catalog import MoveMatcher, normalize_move_query
 from maple_next.domain.opponent_intel import (
     ChainedOpponentMetaProvider,
@@ -1366,6 +1369,35 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.review_state_event_button = QPushButton("＋ 状態変化を記録")
         self.review_state_event_button.clicked.connect(self._open_common_state_event_dialog)
         editor_layout.addWidget(self.review_state_event_button)
+
+        # Bundle 2 (Gemini V2): explicit legal-switch confirmation workbench.
+        # Factual only -- no strategy content, no Opponent INTEL, no
+        # mechanics inference. An empty selection alone is never
+        # CONFIRMED_NONE; that requires the separate explicit button below.
+        self.legal_switch_group = QGroupBox("交代可能なポケモン（Legal Switches）")
+        legal_switch_layout = QVBoxLayout(self.legal_switch_group)
+        legal_switch_layout.setContentsMargins(2, 2, 2, 2)
+        legal_switch_layout.setSpacing(2)
+        self.legal_switch_status_label = QLabel("未確認 (UNRESOLVED)")
+        legal_switch_layout.addWidget(self.legal_switch_status_label)
+        self.legal_switch_list = QListWidget()
+        self.legal_switch_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+        self.legal_switch_list.setMaximumHeight(70)
+        legal_switch_layout.addWidget(self.legal_switch_list)
+        legal_switch_buttons_row = QHBoxLayout()
+        self.confirm_legal_switches_selected_button = QPushButton("選択した交代先を確定")
+        self.confirm_legal_switches_selected_button.clicked.connect(
+            self._on_confirm_legal_switches_selected
+        )
+        self.confirm_legal_switches_none_button = QPushButton("交代先なしを確定")
+        self.confirm_legal_switches_none_button.clicked.connect(
+            self._on_confirm_legal_switches_none
+        )
+        legal_switch_buttons_row.addWidget(self.confirm_legal_switches_selected_button)
+        legal_switch_buttons_row.addWidget(self.confirm_legal_switches_none_button)
+        legal_switch_layout.addLayout(legal_switch_buttons_row)
+        editor_layout.addWidget(self.legal_switch_group)
+
         state_layout.addWidget(self.current_state_editor_container)
 
         self.action_result_delta_group = QGroupBox("結果 — 変わった項目だけ記録")
@@ -3625,6 +3657,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             return
         summary = self._bundle_c_controller.turn_state_summary()
         self._render_selection_v3(current)
+        if hasattr(self, "legal_switch_group"):
+            self._render_legal_switch_workbench(summary)
 
         # The base class's
         # setEnabled(...) for these three buttons was written for a UI
@@ -3987,14 +4021,23 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                         )
                 view = self._bundle_c_controller.refresh()
         self.render_view(view)
-        # v5 has no separate facts/state phase. This trusted click is the
-        # final pre-send confirmation and enters the existing rich-provider
-        # dispatch path. The controller/adapter retain every provider-ready,
-        # one-attempt, authorization, and fail-closed gate for both injected
-        # and production-compatible transports.
+        # v5 has no separate facts/state phase, so this trusted click is
+        # otherwise the final pre-send confirmation and enters the existing
+        # rich-provider dispatch path directly. Bundle 2 (Gemini V2) inserts
+        # exactly one additional gate here: confirming Turn facts must never
+        # itself dispatch while this exact binding's legal-switch truth is
+        # still NOT_CAPTURED_OR_UNRESOLVED (the historical legal_switches=[]
+        # defect). When unresolved, the confirmed factual state and the
+        # derived candidates are retained/rendered (see the legal-switch
+        # workbench group below) and the operator must explicitly confirm
+        # before the existing send boundary can run -- this call is skipped
+        # entirely rather than attempted-and-denied, so it is never counted
+        # as a dispatch attempt.
+        summary = self._bundle_c_controller.turn_state_summary()
         if (
             view.error_message is None
             and view.projection.session_state == "TURN_REVIEWED"
+            and summary.legal_switch_confirmation is not None
         ):
             self._on_trusted_send_turn_to_gemini()
 
@@ -4215,6 +4258,92 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             if entry is not None:
                 self.review_effect_candidate.propose(entry, prefix=f"相手の{entry.display_name_ja}")
         self.render_view()
+
+    def _on_confirm_legal_switches_selected(self, _checked: bool = False) -> None:
+        """Bundle 2: explicit human confirmation of one or more legal switches.
+
+        Never automatic -- reads exactly the operator's current list
+        selection. An empty selection here is a no-op (use the dedicated
+        "none" button instead, never an implicit empty-selection confirm).
+        """
+
+        selected = [item.text() for item in self.legal_switch_list.selectedItems()]
+        if not selected:
+            return
+        view = self._bundle_c_controller.confirm_legal_switches(
+            legal_switches=tuple(selected), status=LegalSwitchStatus.CONFIRMED_NONEMPTY
+        )
+        self._render_after_legal_switch_confirmation(view)
+
+    def _on_confirm_legal_switches_none(self, _checked: bool = False) -> None:
+        """Bundle 2: explicit human confirmation of zero legal switches.
+
+        A separate, deliberate action from simply leaving the list
+        unselected -- CONFIRMED_NONE must never be inferred from an empty
+        UI selection alone.
+        """
+
+        view = self._bundle_c_controller.confirm_legal_switches(
+            legal_switches=(), status=LegalSwitchStatus.CONFIRMED_NONE
+        )
+        self._render_after_legal_switch_confirmation(view)
+
+    def _render_after_legal_switch_confirmation(self, view: OperatorView) -> None:
+        """Legal-switch confirmation is itself only a factual persistence
+        operation -- it never talks to a transport. But once it is exactly
+        this exact binding's last missing provider-ready prerequisite (the
+        confirmed factual state and every other legal action were already
+        confirmed by the earlier trusted "confirm facts" click, which
+        deliberately skipped its own send because switches were still
+        unresolved), completing it is the operator's trusted signal to
+        proceed -- the same "confirm this, then continue toward the
+        existing explicit send boundary" cascade ``_on_confirm_turn_facts``
+        already performs for its own completion, not a new automatic send
+        path. Re-running ``confirm_turn_facts`` here would be wrong: it
+        would bump ``battle_revision`` again and orphan the confirmation
+        just persisted, so this reuses the *current* view/binding as-is."""
+
+        self.render_view(view)
+        if (
+            view.error_message is None
+            and view.projection.session_state == "TURN_REVIEWED"
+            and self._bundle_c_controller.turn_state_summary().provider_ready
+        ):
+            self._on_trusted_send_turn_to_gemini()
+
+    def _render_legal_switch_workbench(self, summary: TurnStateSummaryView) -> None:
+        """Bundle 2: reflect the current binding's derived candidates and
+        confirmed/unresolved status. Always re-derives from ``summary``
+        (never carries forward stale selection state) -- a new TurnIdentity
+        or invalidated binding renders as fresh candidates / unresolved,
+        exactly like every other identity-bound workbench control here."""
+
+        confirmation = summary.legal_switch_confirmation
+        candidates = summary.legal_switch_candidates
+        previously_selected = {item.text() for item in self.legal_switch_list.selectedItems()}
+        self.legal_switch_list.clear()
+        for name in candidates:
+            self.legal_switch_list.addItem(name)
+        if confirmation is not None:
+            for index in range(self.legal_switch_list.count()):
+                item = self.legal_switch_list.item(index)
+                item.setSelected(item.text() in confirmation.legal_switches)
+        else:
+            # Same-binding re-render (e.g. an unrelated field edit) keeps
+            # the operator's unfinished selection; a genuinely new
+            # candidate set (new TurnIdentity/binding) cannot contain it.
+            for index in range(self.legal_switch_list.count()):
+                item = self.legal_switch_list.item(index)
+                item.setSelected(item.text() in previously_selected)
+        if confirmation is None:
+            self.legal_switch_status_label.setText("未確認 (UNRESOLVED)")
+        elif confirmation.status is LegalSwitchStatus.CONFIRMED_NONE:
+            self.legal_switch_status_label.setText("確定: 交代先なし (CONFIRMED_NONE)")
+        else:
+            names = "、".join(confirmation.legal_switches)
+            self.legal_switch_status_label.setText(f"確定 (CONFIRMED_NONEMPTY): {names}")
+        has_confirmed_state = summary.confirmed_state is not None
+        self.legal_switch_group.setEnabled(has_confirmed_state)
 
     def _open_state_event_dialog(self, context: str) -> None:
         callback = self._apply_review_effect if context == "review" else self._apply_result_effect

@@ -38,6 +38,27 @@ from maple_next.ui.battle_record_ui import BattleRecordUiWindow
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
 from maple_next.ui.turn_state_flow import TurnStateFlowController
 
+
+def _confirm_legal_switches_honestly(window) -> None:
+    """Bundle 2 R1-F: an honest fixture default for tests that do not
+    themselves exercise legal-switch behavior. Reviews the *real* derived
+    candidates for the current binding and confirms exactly that set --
+    never a fabricated CONFIRMED_NONE used only to clear the gate. When the
+    team fixture genuinely has no legal switch candidates, this still
+    produces CONFIRMED_NONE, but because it is actually empty."""
+
+    controller = window._bundle_c_controller  # noqa: SLF001
+    candidates = controller.derive_legal_switch_candidates()
+    status = (
+        _B2_LegalSwitchStatus.CONFIRMED_NONEMPTY
+        if candidates
+        else _B2_LegalSwitchStatus.CONFIRMED_NONE
+    )
+    controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=candidates, status=status, human_confirmed=True
+    )
+
+
 # --- pure domain: presets / clamping (items 2, 4) ---------------------------
 
 
@@ -74,9 +95,7 @@ def test_reset_preset_zeroes_every_stage_regardless_of_current_value() -> None:
 def _confirm_full_turn_facts(controller: TurnStateFlowController, window) -> None:
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
 
 
 def _advance_through_mock_turn_advice(window) -> None:

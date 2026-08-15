@@ -167,20 +167,31 @@ def _submit_turn_advice(window: BattleRecordUiWindow) -> None:
     window._on_submit_mock_turn()  # noqa: SLF001
 
 
+def _confirm_legal_switches_honestly(window: BattleRecordUiWindow) -> None:
+    """Bundle 2 R1-F: an honest fixture default for tests that do not
+    themselves exercise legal-switch behavior. Reviews the *real* derived
+    candidates for the current binding and confirms exactly that set --
+    never a fabricated CONFIRMED_NONE used only to clear the gate. When the
+    team fixture genuinely has no legal switch candidates, this still
+    produces CONFIRMED_NONE, but because it is actually empty."""
+
+    controller = window._bundle_c_controller  # noqa: SLF001
+    candidates = controller.derive_legal_switch_candidates()
+    status = (
+        LegalSwitchStatus.CONFIRMED_NONEMPTY if candidates else LegalSwitchStatus.CONFIRMED_NONE
+    )
+    controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=candidates, status=status, human_confirmed=True
+    )
+
+
 def _confirm_and_send(window: BattleRecordUiWindow) -> None:
     """Confirm the (already-hydrated) current-state editor and clear the
     provider-ready gate for RECORD_ACTUAL_ACTION, without touching move/
     switch/status/weather -- those were already re-filled by the caller."""
 
     window._on_confirm_turn_facts()  # noqa: SLF001
-    # Bundle 2 (Gemini V2): none of this file's fixtures exercise the
-    # switch-legality dimension, so an explicit human "no legal switches"
-    # confirmation for the current binding is the correct default here --
-    # never a silent/implicit one. Every scenario below keeps asserting
-    # zero provider dispatch on top of this.
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
     _submit_turn_advice(window)
 
 
@@ -298,9 +309,7 @@ def test_historical_swords_dance_turn3_attack_plus2_projects_to_turn4_and_editor
 
         _fill_minimal_current_state(window)
         window._on_confirm_turn_facts()  # noqa: SLF001
-        window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-            legal_switches=(), status=LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-        )
+        _confirm_legal_switches_honestly(window)
         confirmed = controller.turn_state_summary().confirmed_state
         assert confirmed is not None
         assert confirmed.identity.turn_number == expected_turn_number
@@ -576,9 +585,7 @@ def test_provider_ready_gate_rejects_required_scenarios_without_any_dispatch(
 
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
     summary = controller.turn_state_summary()
     confirmed_state = summary.confirmed_state
     current_identity = summary.identity

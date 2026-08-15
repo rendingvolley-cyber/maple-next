@@ -43,6 +43,27 @@ from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceA
 from maple_next.ui.gemini_turn_advice import FAKE_TURN_MODEL
 from maple_next.ui.turn_state_flow import GeminiRichTurnAdviceAdapter, TurnStateFlowController
 
+
+def _confirm_legal_switches_honestly(window) -> None:
+    """Bundle 2 R1-F: an honest fixture default for tests that do not
+    themselves exercise legal-switch behavior. Reviews the *real* derived
+    candidates for the current binding and confirms exactly that set --
+    never a fabricated CONFIRMED_NONE used only to clear the gate. When the
+    team fixture genuinely has no legal switch candidates, this still
+    produces CONFIRMED_NONE, but because it is actually empty."""
+
+    controller = window._bundle_c_controller  # noqa: SLF001
+    candidates = controller.derive_legal_switch_candidates()
+    status = (
+        _B2_LegalSwitchStatus.CONFIRMED_NONEMPTY
+        if candidates
+        else _B2_LegalSwitchStatus.CONFIRMED_NONE
+    )
+    controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=candidates, status=status, human_confirmed=True
+    )
+
+
 SELF_TEAM = ("Meowscarada", "Gholdengo", "Dragonite", "Dondozo", "Flutter Mane", "Urshifu")
 OPPONENT_TEAM = ("Garchomp", "Gholdengo", "Dragonite", "Flutter Mane", "Garganacl", "Iron Bundle")
 SELECTED_THREE = (SELF_TEAM[0], SELF_TEAM[1], SELF_TEAM[2])
@@ -253,6 +274,16 @@ def test_window_constructs_with_fixed_header_body_and_bottom_bar(tmp_path: Path)
 def test_visible_v5_send_dispatches_production_compatible_transport_once(
     tmp_path: Path,
 ) -> None:
+    """Bundle 2 (Gemini V2) R1: the v5 "confirm facts" click no longer
+    dispatches by itself while this exact binding's legal-switch truth is
+    unresolved -- it must retain the confirmed factual state and surface the
+    derived candidates instead. Only after the operator explicitly confirms
+    the legal-switch truth does the existing production-compatible transport
+    wiring this test exists to prove get exercised -- confirming the switches
+    is itself only a factual persistence operation (proven separately below:
+    it makes zero transport calls on its own), and completing it is what
+    lets the *already pending* trusted send proceed, exactly once."""
+
     repository, controller, window, transport, adapter = (
         build_production_compatible_window(tmp_path)
     )
@@ -264,8 +295,31 @@ def test_visible_v5_send_dispatches_production_compatible_transport_once(
     assert window.confirm_turn_facts_button.isEnabled()
     window.confirm_turn_facts_button.click()
 
+    # -- Confirming facts alone must not dispatch: legal switches for this
+    # exact binding are still NOT_CAPTURED_OR_UNRESOLVED. --
+    assert transport.call_count == 0
+    assert adapter.dispatch_count == 0
+    summary = controller.turn_state_summary()
+    assert summary.confirmed_state is not None
+    assert summary.legal_switch_confirmation is None
+    assert summary.legal_switch_candidates == ("Gholdengo", "Dragonite")
+    assert summary.provider_ready is False
+    assert "LEGAL_SWITCHES_UNRESOLVED" in summary.provider_ready_denial_reasons
+
+    # -- Explicit human confirmation of both real candidates -- never an
+    # automatic promotion of the derived list. The confirmation call itself
+    # makes no transport call; only the already-pending send it unblocks
+    # does, exactly once. --
+    for index in range(window.legal_switch_list.count()):
+        window.legal_switch_list.item(index).setSelected(True)
+    window._on_confirm_legal_switches_selected()  # noqa: SLF001
+
     assert transport.call_count == 1
     assert adapter.dispatch_count == 1
+
+    # -- Re-clicking confirm-facts re-confirms (bumping the binding) and
+    # again requires a fresh legal-switch confirmation before it can send
+    # again -- never a second dispatch as a side effect of the same click. --
     window.confirm_turn_facts_button.click()
     assert transport.call_count == 1
     assert adapter.dispatch_count == 1
@@ -389,9 +443,7 @@ def test_provider_ready_only_after_confirmation(tmp_path: Path) -> None:
 
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
 
     assert controller.turn_state_summary().provider_ready is True
     repository.close()
@@ -406,9 +458,7 @@ def test_rich_gemini_send_requires_confirmed_legal_action_not_prefill(tmp_path: 
     window.render_view()
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
 
     transport.responses.append(
         SanitizedProviderResult(
@@ -450,9 +500,7 @@ def test_rich_gemini_send_applies_and_populates_turn_advice(tmp_path: Path) -> N
     window.render_view()
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
 
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
@@ -475,9 +523,7 @@ def test_duplicate_gemini_activation_while_in_flight_is_blocked(tmp_path: Path) 
     window.render_view()
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
 
     rich_adapter = controller._rich_turn_gemini_adapter  # noqa: SLF001
     assert rich_adapter is not None
@@ -514,9 +560,7 @@ def test_record_action_persists_delta_and_next_turn_derives_durable_draft(
     window.render_view()
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
     confirmed_before = controller.turn_state_summary().confirmed_state
     assert confirmed_before is not None
 
@@ -574,9 +618,7 @@ def test_current_state_editor_shows_draft_carry_forward_after_next_turn(
     window.render_view()
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
     window.mock_turn_prediction_input.setText("pred")
@@ -630,9 +672,7 @@ def test_restart_hydration_reloads_confirmed_state_and_legal_actions(tmp_path: P
     window.render_view()
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
     before = controller.turn_state_summary()
     assert before.confirmed_state is not None
     repository.close()
@@ -683,9 +723,7 @@ def test_restart_hydration_reloads_the_same_next_turn_state_draft(tmp_path: Path
     window.render_view()
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
     window.mock_turn_prediction_input.setText("pred")
@@ -743,9 +781,7 @@ def test_stale_confirmed_state_is_not_provider_ready(tmp_path: Path) -> None:
     window.render_view()
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
     first_summary = controller.turn_state_summary()
     assert first_summary.provider_ready is True
 

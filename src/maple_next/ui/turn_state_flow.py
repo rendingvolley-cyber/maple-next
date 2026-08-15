@@ -46,7 +46,11 @@ from maple_next.domain.battle_events import (
     apply_stage_event,
 )
 from maple_next.domain.enums import ActionType, ResultDisposition
-from maple_next.domain.legal_switches import LegalSwitchConfirmation, LegalSwitchStatus
+from maple_next.domain.legal_switches import (
+    LegalSwitchConfirmation,
+    LegalSwitchStatus,
+    derive_legal_switch_candidates,
+)
 from maple_next.domain.opponent_intel import (
     MatchOpponentFacts,
     possible_abilities_for_species,
@@ -156,6 +160,12 @@ class TurnStateSummaryView:
     pending_opponent_entry_event: OpponentEntryEvent | None
     provider_ready: bool
     provider_ready_denial_reasons: tuple[str, ...]
+    #: Bundle 2 (Gemini V2). ``None`` means NOT_CAPTURED_OR_UNRESOLVED for the
+    #: current binding -- never inferred from an empty candidate list.
+    legal_switch_confirmation: LegalSwitchConfirmation | None = None
+    #: Operator-facing prefill aid derived from the current binding. Never
+    #: itself a confirmation.
+    legal_switch_candidates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -679,8 +689,9 @@ class TurnStateFlowController(MatchFlowController):
         )
         provider_ready = False
         denial_reasons: tuple[str, ...] = ()
+        legal_switch_confirmation: LegalSwitchConfirmation | None = None
+        legal_switch_candidates: tuple[str, ...] = ()
         if confirmed_state is not None:
-            legal_switch_confirmation: LegalSwitchConfirmation | None = None
             session = self._repository.load_active_session()
             if session is not None and session.current_applied_selection_id is not None:
                 applied = self._repository.get_applied_selection(
@@ -691,6 +702,27 @@ class TurnStateFlowController(MatchFlowController):
                     based_on_confirmed_state_id=confirmed_state.confirmed_state_id,
                     applied_selection_id=applied.applied_selection_id,
                 )
+                self_active = confirmed_state.self_side.active
+                if self_active.is_confirmed and self_active.value:
+                    memory_by_name = {
+                        name: memory
+                        for name in applied.selected_three
+                        if (
+                            memory := self._repository.get_pokemon_local_state(
+                                session_id=identity.session_id,
+                                match_id=identity.match_id,
+                                generation=identity.generation,
+                                side="SELF",
+                                pokemon_name=name,
+                            )
+                        )
+                        is not None
+                    }
+                    legal_switch_candidates = derive_legal_switch_candidates(
+                        applied=applied,
+                        current_active_name=self_active.value,
+                        local_memory_by_name=memory_by_name,
+                    )
             gate: ProviderReadyGateResult = evaluate_provider_ready_gate(
                 confirmed_state=confirmed_state,
                 confirmed_legal_actions=confirmed_legal_actions,
@@ -715,6 +747,8 @@ class TurnStateFlowController(MatchFlowController):
             pending_opponent_entry_event=pending_opponent_entry_event,
             provider_ready=provider_ready,
             provider_ready_denial_reasons=denial_reasons,
+            legal_switch_confirmation=legal_switch_confirmation,
+            legal_switch_candidates=legal_switch_candidates,
         )
 
     @staticmethod
@@ -1017,13 +1051,22 @@ class TurnStateFlowController(MatchFlowController):
 
     def confirm_legal_switches(
         self, *, legal_switches: tuple[str, ...], status: LegalSwitchStatus
-    ) -> None:
+    ) -> OperatorView:
         """Persist the operator's explicit legal-switch confirmation for the
-        current Turn binding. Fails closed on any hard-invalidity violation."""
+        current Turn binding. Fails closed on any hard-invalidity violation,
+        surfaced the same way every other operator command here surfaces a
+        rejection -- via ``error_message`` on the refreshed view, never a
+        raw exception reaching the UI layer."""
 
-        self._application.confirm_legal_switches(
-            legal_switches=legal_switches, status=status, human_confirmed=True
-        )
+        try:
+            self._application.confirm_legal_switches(
+                legal_switches=legal_switches, status=status, human_confirmed=True
+            )
+        except DomainError as error:
+            self._error_message = f"legal switch confirmation を保存できません: {error}"
+        else:
+            self._error_message = None
+        return self.refresh()
 
     # -- confirm action-result delta -------------------------------------------
 

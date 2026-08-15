@@ -24,6 +24,26 @@ from maple_next.domain.opponent_intel import OpponentMetaSnapshot, RankedUsage
 from maple_next.ocr.contracts import OCR_CANDIDATE_SOURCE, OcrCandidate, OcrFieldKey
 
 
+def _confirm_legal_switches_honestly(window) -> None:
+    """Bundle 2 R1-F: an honest fixture default for tests that do not
+    themselves exercise legal-switch behavior. Reviews the *real* derived
+    candidates for the current binding and confirms exactly that set --
+    never a fabricated CONFIRMED_NONE used only to clear the gate. When the
+    team fixture genuinely has no legal switch candidates, this still
+    produces CONFIRMED_NONE, but because it is actually empty."""
+
+    controller = window._bundle_c_controller  # noqa: SLF001
+    candidates = controller.derive_legal_switch_candidates()
+    status = (
+        _B2_LegalSwitchStatus.CONFIRMED_NONEMPTY
+        if candidates
+        else _B2_LegalSwitchStatus.CONFIRMED_NONE
+    )
+    controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=candidates, status=status, human_confirmed=True
+    )
+
+
 class _StaticMetaProvider:
     def __init__(self, snapshot: OpponentMetaSnapshot | None) -> None:
         self.snapshot = snapshot
@@ -37,9 +57,7 @@ class _StaticMetaProvider:
 def _reach_action_with_advice(window, *, warnings: str = "") -> None:
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
     window.mock_turn_prediction_input.setText("相手は交代を選ぶ可能性が高い")
@@ -125,9 +143,7 @@ def test_fresh_ocr_identity_immediately_projects_human_only_ability_prompt(
     assert window.parity_ability_card.isHidden()
     assert controller.turn_state_summary().pending_opponent_entry_event is None
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
     summary = controller.turn_state_summary()
     assert summary.pending_opponent_entry_event is None
     assert summary.identity is not None
@@ -170,9 +186,7 @@ def test_consumed_entry_is_not_reprompted_by_later_same_turn_ocr(tmp_path: Path)
     )
     window._confirm_parity_ability("不明")  # noqa: SLF001
     window._on_confirm_turn_facts()  # noqa: SLF001
-    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
-        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
-    )
+    _confirm_legal_switches_honestly(window)
 
     window._turn_snapshot_field_locks[OcrFieldKey.OPPONENT_ACTIVE.value] = False  # noqa: SLF001
     window._turn_snapshot_origins[OcrFieldKey.OPPONENT_ACTIVE.value] = (  # noqa: SLF001

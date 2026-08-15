@@ -3703,7 +3703,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
 
         self.start_turn_button.setText("Turn撮影")
-        self.confirm_turn_facts_button.setText("SEND TURN TO GEMINI")
+        # Bundle 2 (Gemini V2) R3-A: this re-render every refresh -- must
+        # stay the stable factual label. Re-labeling it "SEND TURN TO
+        # GEMINI" here would be false: confirming facts never sends (see
+        # R2). Only the distinct explicit-send control below may say that.
+        self.confirm_turn_facts_button.setText("CONFIRM TURN FACTS")
         self.record_action_button.setText("行動・結果記録")
         self.next_turn_button.setText("NEXT TURN")
 

@@ -295,6 +295,7 @@ def test_f_missing_confirmation_blocks_provider_ready() -> None:
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
         legal_switch_confirmation=None,
+        selected_three=("マスカーニャ", "ハッサム", "ガブリアス"),
     )
     assert not result.allowed
     assert GateDenialReason.LEGAL_SWITCHES_UNRESOLVED in result.denial_reasons
@@ -333,6 +334,7 @@ def test_l_wrong_turn_identity_blocks_provider_ready() -> None:
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
         legal_switch_confirmation=confirmation,
+        selected_three=("マスカーニャ", "ハッサム", "ガブリアス"),
     )
     assert not result.allowed
     assert GateDenialReason.LEGAL_SWITCHES_IDENTITY_MISMATCH in result.denial_reasons
@@ -367,6 +369,7 @@ def test_m_stale_confirmed_state_binding_blocks_provider_ready() -> None:
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
         legal_switch_confirmation=stale_confirmation,
+        selected_three=("マスカーニャ", "ハッサム", "ガブリアス"),
     )
     assert not result.allowed
     assert GateDenialReason.LEGAL_SWITCHES_STALE_BINDING in result.denial_reasons
@@ -591,3 +594,186 @@ def test_q_no_applied_selection_blocks_candidate_derivation(tmp_path: Path) -> N
     with pytest.raises(DomainError, match="APPLIED_SELECTION_REQUIRED"):
         application.derive_legal_switch_candidates_for_current_turn()
     repository.close()
+
+
+# --- R3-C: provider-boundary defense-in-depth (forged/corrupted confirmations) -
+
+
+def _r3c_state(*, active: str = "A") -> ConfirmedTurnState:
+    return ConfirmedTurnState(
+        confirmed_state_id="state-r3c",
+        identity=_identity(),
+        previous_confirmed_state_id=None,
+        self_side=_confirmed_side(active),
+        opponent_side=_confirmed_side("Garchomp"),
+        weather=Known.confirmed("NONE", provenance_chain=_HUMAN),
+        terrain=Known.confirmed("NONE", provenance_chain=_HUMAN),
+        confirmation=_confirmation(),
+    )
+
+
+def _r3c_confirmation(
+    *, legal_switches: tuple[str, ...], status: LegalSwitchStatus
+) -> LegalSwitchConfirmation:
+    """Constructed directly -- bypasses confirm_legal_switches()'s own
+    contextual validation, simulating a forged/corrupted-but-correctly-
+    bound row for R3-C defense-in-depth."""
+
+    return LegalSwitchConfirmation(
+        confirmation_id="c-r3c",
+        identity=_identity(),
+        based_on_confirmed_state_id="state-r3c",
+        applied_selection_id="applied-r3c",
+        legal_switches=legal_switches,
+        status=status,
+        confirmation=_confirmation(),
+    )
+
+
+def _r3c_gate(
+    *,
+    state: ConfirmedTurnState,
+    confirmation: LegalSwitchConfirmation | None,
+    selected_three: tuple[str, str, str] | None = ("A", "B", "C"),
+    confirmed_fainted_members: frozenset[str] = frozenset(),
+):
+    return evaluate_provider_ready_gate(
+        confirmed_state=state,
+        confirmed_legal_actions=(_legal_action(state.identity),),
+        current_identity=state.identity,
+        latest_confirmed_state_id=state.confirmed_state_id,
+        latest_open_draft_turn_number=None,
+        latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=confirmation,
+        selected_three=selected_three,
+        confirmed_fainted_members=confirmed_fainted_members,
+    )
+
+
+def test_r3c_a_confirmation_includes_current_active_blocks_ready() -> None:
+    state = _r3c_state(active="A")
+    confirmation = _r3c_confirmation(
+        legal_switches=("A", "B"), status=LegalSwitchStatus.CONFIRMED_NONEMPTY
+    )
+    result = _r3c_gate(state=state, confirmation=confirmation)
+    assert result.allowed is False
+    assert GateDenialReason.LEGAL_SWITCHES_MEMBER_IS_ACTIVE in result.denial_reasons
+
+
+def test_r3c_b_confirmation_includes_member_outside_selected_three_blocks_ready() -> None:
+    state = _r3c_state(active="A")
+    confirmation = _r3c_confirmation(
+        legal_switches=("B", "X"), status=LegalSwitchStatus.CONFIRMED_NONEMPTY
+    )
+    result = _r3c_gate(state=state, confirmation=confirmation)
+    assert result.allowed is False
+    assert GateDenialReason.LEGAL_SWITCHES_MEMBER_OUTSIDE_SELECTED_THREE in result.denial_reasons
+
+
+def test_r3c_c_confirmation_includes_confirmed_fainted_member_blocks_ready() -> None:
+    state = _r3c_state(active="A")
+    confirmation = _r3c_confirmation(
+        legal_switches=("B", "C"), status=LegalSwitchStatus.CONFIRMED_NONEMPTY
+    )
+    result = _r3c_gate(
+        state=state, confirmation=confirmation, confirmed_fainted_members=frozenset({"B"})
+    )
+    assert result.allowed is False
+    assert GateDenialReason.LEGAL_SWITCHES_MEMBER_CONFIRMED_FAINTED in result.denial_reasons
+
+
+def test_r3c_d_active_outside_selected_three_blocks_ready_even_if_confirmation_well_formed() -> (
+    None
+):
+    state = _r3c_state(active="X")
+    confirmation = _r3c_confirmation(
+        legal_switches=(), status=LegalSwitchStatus.CONFIRMED_NONE
+    )
+    result = _r3c_gate(state=state, confirmation=confirmation)
+    assert result.allowed is False
+    assert GateDenialReason.LEGAL_SWITCHES_ACTIVE_OUTSIDE_SELECTED_THREE in result.denial_reasons
+
+
+def test_r3c_e_valid_nonempty_confirmation_reaches_ready() -> None:
+    state = _r3c_state(active="A")
+    confirmation = _r3c_confirmation(
+        legal_switches=("B", "C"), status=LegalSwitchStatus.CONFIRMED_NONEMPTY
+    )
+    result = _r3c_gate(state=state, confirmation=confirmation)
+    assert result.allowed is True
+    assert result.denial_reasons == ()
+
+
+def test_r3c_f_valid_confirmed_none_reaches_ready() -> None:
+    state = _r3c_state(active="A")
+    confirmation = _r3c_confirmation(legal_switches=(), status=LegalSwitchStatus.CONFIRMED_NONE)
+    result = _r3c_gate(state=state, confirmation=confirmation)
+    assert result.allowed is True
+    assert result.denial_reasons == ()
+
+
+def test_r3c_missing_selected_three_blocks_ready() -> None:
+    state = _r3c_state(active="A")
+    confirmation = _r3c_confirmation(legal_switches=(), status=LegalSwitchStatus.CONFIRMED_NONE)
+    result = _r3c_gate(state=state, confirmation=confirmation, selected_three=None)
+    assert result.allowed is False
+    assert GateDenialReason.LEGAL_SWITCHES_APPLIED_SELECTION_MISSING in result.denial_reasons
+
+
+# --- R3-F: faint-state change invalidates a previously-confirmed set -----------
+
+
+def test_r3f_faint_state_change_after_confirmation_blocks_ready_at_provider_boundary() -> None:
+    """A legal-switch set confirmed while B was healthy/unknown must fail
+    closed at the provider boundary once B is later confirmed fainted --
+    even though the confirmation's own binding (identity/confirmed-state
+    id) is still exactly current. Defense-in-depth, not merely staleness."""
+
+    state = _r3c_state(active="A")
+    confirmation = _r3c_confirmation(
+        legal_switches=("B", "C"), status=LegalSwitchStatus.CONFIRMED_NONEMPTY
+    )
+    before = _r3c_gate(state=state, confirmation=confirmation)
+    assert before.allowed is True
+
+    after = _r3c_gate(
+        state=state, confirmation=confirmation, confirmed_fainted_members=frozenset({"B"})
+    )
+    assert after.allowed is False
+    assert GateDenialReason.LEGAL_SWITCHES_MEMBER_CONFIRMED_FAINTED in after.denial_reasons
+
+
+def test_r3f_faint_state_change_invalidates_at_hydration_layer_too(tmp_path: Path) -> None:
+    """Same fact, proven at the application/hydration layer: re-deriving
+    candidates after B becomes confirmed-fainted must exclude B, exactly
+    like a fresh (never-confirmed) derivation would."""
+
+    fixture = _AppFixture(tmp_path)
+    fixture.repository.upsert_pokemon_local_state(
+        session_id=fixture.session_id,
+        match_id=fixture.match_id,
+        generation=fixture.generation,
+        side="SELF",
+        memory=PokemonLocalMemory(
+            pokemon_name="ハッサム", hp_bucket=Known.unknown(), status=Known.unknown()
+        ),
+    )
+    fixture.repository.connection.commit()
+    candidates_before = fixture.application.derive_legal_switch_candidates_for_current_turn()
+    assert candidates_before == ("ハッサム", "ガブリアス")
+
+    fixture.repository.upsert_pokemon_local_state(
+        session_id=fixture.session_id,
+        match_id=fixture.match_id,
+        generation=fixture.generation,
+        side="SELF",
+        memory=PokemonLocalMemory(
+            pokemon_name="ハッサム",
+            hp_bucket=Known.confirmed(HpBucket.ZERO, provenance_chain=_HUMAN),
+            status=Known.unknown(),
+        ),
+    )
+    fixture.repository.connection.commit()
+    candidates_after = fixture.application.derive_legal_switch_candidates_for_current_turn()
+    assert candidates_after == ("ガブリアス",)
+    fixture.close()

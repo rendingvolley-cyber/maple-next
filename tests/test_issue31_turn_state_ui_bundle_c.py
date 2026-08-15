@@ -263,7 +263,7 @@ def test_window_constructs_with_fixed_header_body_and_bottom_bar(tmp_path: Path)
     assert window.header_tabs.count() == 2
     assert window.header_tabs.tabText(1) == "バトルレコード"
     assert window.start_turn_button.text() == "Turn撮影"
-    assert window.confirm_turn_facts_button.text() == "SEND TURN TO GEMINI"
+    assert window.confirm_turn_facts_button.text() == "CONFIRM TURN FACTS"
     assert window.record_action_button.text() == "行動・結果記録"
     assert window.next_turn_button.text() == "NEXT TURN"
     assert window.diagnostics_drawer is not None

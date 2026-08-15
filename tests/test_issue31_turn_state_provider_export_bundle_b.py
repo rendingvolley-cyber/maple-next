@@ -299,6 +299,7 @@ def test_gate_denies_self_active_unknown() -> None:
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
         legal_switch_confirmation=None,
+        selected_three=("Dondozo", "Gholdengo", "Urshifu"),
     )
     assert not result.allowed
     assert GateDenialReason.SELF_ACTIVE_UNKNOWN in result.denial_reasons
@@ -314,6 +315,7 @@ def test_gate_denies_opponent_active_unknown() -> None:
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
         legal_switch_confirmation=None,
+        selected_three=("Dondozo", "Gholdengo", "Urshifu"),
     )
     assert not result.allowed
     assert GateDenialReason.OPPONENT_ACTIVE_UNKNOWN in result.denial_reasons
@@ -329,6 +331,7 @@ def test_gate_denies_newer_open_draft() -> None:
         latest_open_draft_turn_number=state.identity.turn_number + 1,
         latest_open_draft_battle_revision=state.identity.battle_revision + 1,
         legal_switch_confirmation=None,
+        selected_three=("Dondozo", "Gholdengo", "Urshifu"),
     )
     assert not result.allowed
     assert GateDenialReason.NEWER_OPEN_DRAFT_EXISTS in result.denial_reasons
@@ -346,6 +349,7 @@ def test_gate_allows_open_draft_that_is_not_newer() -> None:
         legal_switch_confirmation=_legal_switch_confirmation(
             identity=state.identity, based_on_confirmed_state_id=state.confirmed_state_id
         ),
+        selected_three=("Dondozo", "Gholdengo", "Urshifu"),
     )
     assert result.allowed
 
@@ -361,6 +365,7 @@ def test_gate_denies_identity_revision_mismatch() -> None:
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
         legal_switch_confirmation=None,
+        selected_three=("Dondozo", "Gholdengo", "Urshifu"),
     )
     assert not result.allowed
     assert GateDenialReason.IDENTITY_MISMATCH in result.denial_reasons
@@ -376,6 +381,7 @@ def test_gate_denies_stale_snapshot() -> None:
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
         legal_switch_confirmation=None,
+        selected_three=("Dondozo", "Gholdengo", "Urshifu"),
     )
     assert not result.allowed
     assert GateDenialReason.STALE_CONFIRMED_STATE in result.denial_reasons
@@ -391,6 +397,7 @@ def test_gate_denies_unconfirmed_final_legal_actions() -> None:
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
         legal_switch_confirmation=None,
+        selected_three=("Dondozo", "Gholdengo", "Urshifu"),
     )
     assert not result.allowed
     assert GateDenialReason.LEGAL_ACTIONS_EMPTY in result.denial_reasons
@@ -421,6 +428,7 @@ def test_gate_allows_explicit_confirmed_unknown_hp_status_stages_weather_terrain
         legal_switch_confirmation=_legal_switch_confirmation(
             identity=state.identity, based_on_confirmed_state_id=state.confirmed_state_id
         ),
+        selected_three=("Dondozo", "Gholdengo", "Urshifu"),
     )
     assert result.allowed
 

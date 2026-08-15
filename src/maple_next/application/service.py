@@ -24,6 +24,7 @@ from maple_next.domain.legal_switches import (
     LegalSwitchError,
     LegalSwitchStatus,
     derive_legal_switch_candidates,
+    is_confirmed_fainted,
 )
 from maple_next.domain.legal_switches import (
     confirm_legal_switches as build_legal_switch_confirmation,
@@ -915,6 +916,9 @@ class BattleApplication:
                     self_active=self_active_known.value,
                     evidence=evidence,
                     self_team_build_sha256=self_team_build_sha256,
+                    confirmed_fainted_members=self._confirmed_fainted_members(
+                        current_identity, applied
+                    ),
                 )
             except ProviderReadyGateError as exc:
                 raise DomainError("PROVIDER_READY_GATE_DENIED") from exc
@@ -1157,6 +1161,9 @@ class BattleApplication:
                 self_active=self_active_known.value,
                 evidence=evidence,
                 self_team_build_sha256=self_team_build_sha256,
+                confirmed_fainted_members=self._confirmed_fainted_members(
+                    current_identity, applied
+                ),
             )
         except ProviderReadyGateError as exc:
             raise DomainError("REBUILD_STATE_NO_LONGER_PROVIDER_READY") from exc
@@ -1875,6 +1882,19 @@ class BattleApplication:
                 memory_by_name[name] = memory
         return memory_by_name
 
+    def _confirmed_fainted_members(
+        self, identity: TurnIdentity, applied: AppliedSelectionSnapshot
+    ) -> frozenset[str]:
+        """R3-C: the same match-local HP=0 facts used to build/validate a
+        confirmation, recomputed fresh so the provider-ready gate can
+        independently re-derive contextual legality rather than trusting a
+        stored confirmation's contents."""
+
+        memory_by_name = self._self_local_memory_by_name(identity, applied)
+        return frozenset(
+            name for name, memory in memory_by_name.items() if is_confirmed_fainted(memory)
+        )
+
     def derive_legal_switch_candidates_for_current_turn(self) -> tuple[str, ...]:
         """Operator-facing prefill aid for the current Turn. Read-only, never
         itself a confirmation -- see :func:`maple_next.domain.legal_switches.
@@ -1885,11 +1905,14 @@ class BattleApplication:
         if not self_active.is_confirmed or not self_active.value:
             raise DomainError("SELF_ACTIVE_UNKNOWN")
         memory_by_name = self._self_local_memory_by_name(identity, applied)
-        return derive_legal_switch_candidates(
-            applied=applied,
-            current_active_name=self_active.value,
-            local_memory_by_name=memory_by_name,
-        )
+        try:
+            return derive_legal_switch_candidates(
+                applied=applied,
+                current_active_name=self_active.value,
+                local_memory_by_name=memory_by_name,
+            )
+        except LegalSwitchError as exc:
+            raise DomainError(f"LEGAL_SWITCH_CANDIDATES_UNAVAILABLE:{exc}") from exc
 
     def confirm_legal_switches(
         self,

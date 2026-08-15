@@ -162,12 +162,15 @@ def test_fixed_geometry_exact_four_lifecycle_buttons_and_no_legacy_phase(
     assert window.minimumSize().height() == window.maximumSize().height() == 1080
     assert tuple(button.text() for button in window.lifecycle_buttons) == (
         "Turn撮影",
-        "SEND TURN TO GEMINI",
+        "CONFIRM TURN FACTS",
         "行動・結果記録",
         "NEXT TURN",
     )
     assert "facts/state確定" not in {button.text() for button in window.lifecycle_buttons}
-    assert window._bundle_c_gemini_send_button.isHidden()
+    # Bundle 2 (Gemini V2) R2/R3: the explicit send control is the distinct,
+    # separate action -- visible only once provider-ready (REQUEST_TURN_
+    # ADVICE phase), never at this initial construction-time state.
+    assert window._bundle_c_gemini_send_button.isHidden()  # noqa: SLF001
     repository.close()
 
 

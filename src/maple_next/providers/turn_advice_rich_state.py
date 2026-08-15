@@ -306,6 +306,7 @@ def build_rich_state_turn_advice_request(
     self_active: str,
     evidence: FixedEvidenceMetadata | None = None,
     self_team_build_sha256: str | None = None,
+    confirmed_fainted_members: frozenset[str] = frozenset(),
 ) -> RichStateTurnAdviceRequest:
     """Build a complete, provider-ready rich-state request, or fail closed.
 
@@ -328,6 +329,8 @@ def build_rich_state_turn_advice_request(
         latest_open_draft_turn_number=latest_open_draft_turn_number,
         latest_open_draft_battle_revision=latest_open_draft_battle_revision,
         legal_switch_confirmation=legal_switch_confirmation,
+        selected_three=selected_three,
+        confirmed_fainted_members=confirmed_fainted_members,
     )
     if not gate.allowed:
         reason_text = ",".join(reason.value for reason in gate.denial_reasons)

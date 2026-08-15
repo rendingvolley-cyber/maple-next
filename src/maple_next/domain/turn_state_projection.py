@@ -182,6 +182,18 @@ class GateDenialReason(StrEnum):
     LEGAL_SWITCHES_UNRESOLVED = "LEGAL_SWITCHES_UNRESOLVED"
     LEGAL_SWITCHES_IDENTITY_MISMATCH = "LEGAL_SWITCHES_IDENTITY_MISMATCH"
     LEGAL_SWITCHES_STALE_BINDING = "LEGAL_SWITCHES_STALE_BINDING"
+    #: R3-C defense-in-depth: the gate never trusts a bound-and-current
+    #: LegalSwitchConfirmation's *contents* just because its binding
+    #: checked out -- it independently re-derives contextual legality from
+    #: ``selected_three``/current active/``confirmed_fainted_members`` on
+    #: every evaluation, exactly like it already does for the confirmed
+    #: state itself. This defends against a forged/corrupted row that
+    #: happens to carry a correct binding.
+    LEGAL_SWITCHES_APPLIED_SELECTION_MISSING = "LEGAL_SWITCHES_APPLIED_SELECTION_MISSING"
+    LEGAL_SWITCHES_ACTIVE_OUTSIDE_SELECTED_THREE = "LEGAL_SWITCHES_ACTIVE_OUTSIDE_SELECTED_THREE"
+    LEGAL_SWITCHES_MEMBER_OUTSIDE_SELECTED_THREE = "LEGAL_SWITCHES_MEMBER_OUTSIDE_SELECTED_THREE"
+    LEGAL_SWITCHES_MEMBER_IS_ACTIVE = "LEGAL_SWITCHES_MEMBER_IS_ACTIVE"
+    LEGAL_SWITCHES_MEMBER_CONFIRMED_FAINTED = "LEGAL_SWITCHES_MEMBER_CONFIRMED_FAINTED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +213,8 @@ def evaluate_provider_ready_gate(
     latest_open_draft_turn_number: int | None,
     latest_open_draft_battle_revision: int | None,
     legal_switch_confirmation: LegalSwitchConfirmation | None,
+    selected_three: tuple[str, str, str] | None,
+    confirmed_fainted_members: frozenset[str] = frozenset(),
 ) -> ProviderReadyGateResult:
     """Evaluate the minimum provider-ready gate. Deny-by-default, pure, no I/O.
 
@@ -230,7 +244,18 @@ def evaluate_provider_ready_gate(
       this gate; only an explicit ``CONFIRMED_NONE`` status does (the
       dataclass itself already refuses to construct any other empty-tuple/
       status combination, so this function only needs to check identity
-      binding here).
+      binding here);
+    - (R3-C defense-in-depth) when a ``legal_switch_confirmation`` is
+      otherwise valid, its *contents* are independently re-derived against
+      ``selected_three``/the confirmed self active/``confirmed_fainted_
+      members`` -- never trusted merely because the binding matched. A
+      confirmation whose stored ``legal_switches`` includes the current
+      active, a name outside ``selected_three``, or a confirmed-fainted
+      member fails closed even if it was somehow persisted (corruption, a
+      bypassed application layer, a stale faint state since revalidated).
+      ``selected_three`` itself must be supplied and must contain the
+      confirmed self active, or the gate fails closed regardless of
+      whether a ``legal_switch_confirmation`` exists at all.
 
     The caller is responsible for supplying ``current_identity``,
     ``latest_confirmed_state_id``, and the latest-open-draft identity
@@ -299,6 +324,23 @@ def evaluate_provider_ready_gate(
             reasons.append(GateDenialReason.LEGAL_SWITCHES_IDENTITY_MISMATCH)
         if legal_switch_confirmation.based_on_confirmed_state_id != latest_confirmed_state_id:
             reasons.append(GateDenialReason.LEGAL_SWITCHES_STALE_BINDING)
+
+    # R3-C defense-in-depth: independently re-derive contextual legality --
+    # never trust a bound-and-current confirmation's stored contents alone.
+    if selected_three is None:
+        reasons.append(GateDenialReason.LEGAL_SWITCHES_APPLIED_SELECTION_MISSING)
+    else:
+        active_name = self_active.value if self_active.is_confirmed else None
+        if active_name is None or active_name not in selected_three:
+            reasons.append(GateDenialReason.LEGAL_SWITCHES_ACTIVE_OUTSIDE_SELECTED_THREE)
+        if legal_switch_confirmation is not None:
+            members = legal_switch_confirmation.legal_switches
+            if any(name not in selected_three for name in members):
+                reasons.append(GateDenialReason.LEGAL_SWITCHES_MEMBER_OUTSIDE_SELECTED_THREE)
+            if active_name is not None and active_name in members:
+                reasons.append(GateDenialReason.LEGAL_SWITCHES_MEMBER_IS_ACTIVE)
+            if any(name in confirmed_fainted_members for name in members):
+                reasons.append(GateDenialReason.LEGAL_SWITCHES_MEMBER_CONFIRMED_FAINTED)
 
     return ProviderReadyGateResult(allowed=not reasons, denial_reasons=tuple(reasons))
 

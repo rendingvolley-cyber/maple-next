@@ -95,7 +95,7 @@ class LegalSwitchConfirmation:
             raise LegalSwitchError("CONFIRMED_NONE_REQUIRES_EMPTY_SWITCH_SET")
 
 
-def _is_confirmed_fainted(memory: PokemonLocalMemory | None) -> bool:
+def is_confirmed_fainted(memory: PokemonLocalMemory | None) -> bool:
     """Only an explicit confirmed HP=0 counts. Unknown health is never
     silently treated as fainted, and "never appeared this match" (no memory
     row at all) is unknown health, not fainted."""
@@ -122,13 +122,21 @@ def derive_legal_switch_candidates(
     is unknown -- unknown health is never silently promoted to a confirmed
     legal switch either. Population INTEL, Gemini, and OCR have zero
     influence here; only ``applied`` and ``local_memory_by_name`` are read.
+
+    Fails closed if ``current_active_name`` is not itself a member of
+    ``applied.selected_three`` -- an inconsistent/stale active can never
+    fall through the ``name == current_active_name`` exclusion and cause
+    every selected member (including the actual active) to be silently
+    promoted as a switch candidate.
     """
 
+    if current_active_name not in applied.selected_three:
+        raise LegalSwitchError("CURRENT_ACTIVE_OUTSIDE_SELECTED_THREE")
     candidates: list[str] = []
     for name in applied.selected_three:
         if name == current_active_name:
             continue
-        if _is_confirmed_fainted(local_memory_by_name.get(name)):
+        if is_confirmed_fainted(local_memory_by_name.get(name)):
             continue
         candidates.append(name)
     return tuple(candidates)
@@ -154,8 +162,13 @@ def confirm_legal_switches(
     confirmed HP = 0. Human confirmation (``confirmation``) is the final
     authority -- the derived candidate list is only ever a prefill aid and
     is not consulted here.
+
+    Also fails closed if ``current_active_name`` is not itself a member of
+    ``applied.selected_three`` -- see :func:`derive_legal_switch_candidates`.
     """
 
+    if current_active_name not in applied.selected_three:
+        raise LegalSwitchError("CURRENT_ACTIVE_OUTSIDE_SELECTED_THREE")
     seen: set[str] = set()
     for raw_name in legal_switches:
         name = raw_name.strip()
@@ -168,7 +181,7 @@ def confirm_legal_switches(
             raise LegalSwitchError("LEGAL_SWITCH_OUTSIDE_SELECTED_THREE")
         if name == current_active_name:
             raise LegalSwitchError("LEGAL_SWITCH_INCLUDES_CURRENT_ACTIVE")
-        if _is_confirmed_fainted(local_memory_by_name.get(name)):
+        if is_confirmed_fainted(local_memory_by_name.get(name)):
             raise LegalSwitchError("LEGAL_SWITCH_INCLUDES_CONFIRMED_FAINTED")
 
     return LegalSwitchConfirmation(

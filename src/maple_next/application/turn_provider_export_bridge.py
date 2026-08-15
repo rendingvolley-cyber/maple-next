@@ -58,6 +58,7 @@ def build_pure_rich_state_request_from_loaded_state(
     self_active: str,
     evidence: FixedEvidenceMetadata | None = None,
     self_team_build_sha256: str | None = None,
+    confirmed_fainted_members: frozenset[str] = frozenset(),
 ) -> RichStateTurnAdviceRequest:
     """Build one provider-ready rich-state Turn Advice request, or fail closed.
 
@@ -92,4 +93,5 @@ def build_pure_rich_state_request_from_loaded_state(
         self_active=self_active,
         evidence=evidence,
         self_team_build_sha256=self_team_build_sha256,
+        confirmed_fainted_members=confirmed_fainted_members,
     )

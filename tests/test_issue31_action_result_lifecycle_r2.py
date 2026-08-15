@@ -607,6 +607,7 @@ def test_provider_ready_gate_rejects_required_scenarios_without_any_dispatch(
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
         legal_switch_confirmation=None,
+        selected_three=SELECTED_THREE,
     )
     assert stale_result.allowed is False
     assert GateDenialReason.STALE_CONFIRMED_STATE in stale_result.denial_reasons
@@ -621,6 +622,7 @@ def test_provider_ready_gate_rejects_required_scenarios_without_any_dispatch(
         latest_open_draft_turn_number=current_identity.turn_number + 1,
         latest_open_draft_battle_revision=current_identity.battle_revision + 1,
         legal_switch_confirmation=None,
+        selected_three=SELECTED_THREE,
     )
     assert unconfirmed_result.allowed is False
     assert GateDenialReason.NEWER_OPEN_DRAFT_EXISTS in unconfirmed_result.denial_reasons
@@ -638,6 +640,7 @@ def test_provider_ready_gate_rejects_required_scenarios_without_any_dispatch(
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
         legal_switch_confirmation=None,
+        selected_three=SELECTED_THREE,
     )
     assert wrong_identity_result.allowed is False
     assert GateDenialReason.IDENTITY_MISMATCH in wrong_identity_result.denial_reasons

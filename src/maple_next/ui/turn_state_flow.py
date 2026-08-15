@@ -48,8 +48,10 @@ from maple_next.domain.battle_events import (
 from maple_next.domain.enums import ActionType, ResultDisposition
 from maple_next.domain.legal_switches import (
     LegalSwitchConfirmation,
+    LegalSwitchError,
     LegalSwitchStatus,
     derive_legal_switch_candidates,
+    is_confirmed_fainted,
 )
 from maple_next.domain.opponent_intel import (
     MatchOpponentFacts,
@@ -691,38 +693,50 @@ class TurnStateFlowController(MatchFlowController):
         denial_reasons: tuple[str, ...] = ()
         legal_switch_confirmation: LegalSwitchConfirmation | None = None
         legal_switch_candidates: tuple[str, ...] = ()
+        selected_three: tuple[str, str, str] | None = None
+        confirmed_fainted_members: frozenset[str] = frozenset()
         if confirmed_state is not None:
             session = self._repository.load_active_session()
             if session is not None and session.current_applied_selection_id is not None:
                 applied = self._repository.get_applied_selection(
                     session.current_applied_selection_id
                 )
+                selected_three = applied.selected_three
                 legal_switch_confirmation = self._repository.get_legal_switch_confirmation(
                     identity=identity,
                     based_on_confirmed_state_id=confirmed_state.confirmed_state_id,
                     applied_selection_id=applied.applied_selection_id,
                 )
+                memory_by_name = {
+                    name: memory
+                    for name in applied.selected_three
+                    if (
+                        memory := self._repository.get_pokemon_local_state(
+                            session_id=identity.session_id,
+                            match_id=identity.match_id,
+                            generation=identity.generation,
+                            side="SELF",
+                            pokemon_name=name,
+                        )
+                    )
+                    is not None
+                }
+                confirmed_fainted_members = frozenset(
+                    name for name, memory in memory_by_name.items() if is_confirmed_fainted(memory)
+                )
                 self_active = confirmed_state.self_side.active
                 if self_active.is_confirmed and self_active.value:
-                    memory_by_name = {
-                        name: memory
-                        for name in applied.selected_three
-                        if (
-                            memory := self._repository.get_pokemon_local_state(
-                                session_id=identity.session_id,
-                                match_id=identity.match_id,
-                                generation=identity.generation,
-                                side="SELF",
-                                pokemon_name=name,
-                            )
+                    try:
+                        legal_switch_candidates = derive_legal_switch_candidates(
+                            applied=applied,
+                            current_active_name=self_active.value,
+                            local_memory_by_name=memory_by_name,
                         )
-                        is not None
-                    }
-                    legal_switch_candidates = derive_legal_switch_candidates(
-                        applied=applied,
-                        current_active_name=self_active.value,
-                        local_memory_by_name=memory_by_name,
-                    )
+                    except LegalSwitchError:
+                        # R3-B: active is confirmed but not a member of
+                        # selected_three -- fail closed to no candidates
+                        # rather than crash this read-only summary.
+                        legal_switch_candidates = ()
             gate: ProviderReadyGateResult = evaluate_provider_ready_gate(
                 confirmed_state=confirmed_state,
                 confirmed_legal_actions=confirmed_legal_actions,
@@ -735,6 +749,8 @@ class TurnStateFlowController(MatchFlowController):
                     open_draft.identity.battle_revision if open_draft is not None else None
                 ),
                 legal_switch_confirmation=legal_switch_confirmation,
+                selected_three=selected_three,
+                confirmed_fainted_members=confirmed_fainted_members,
             )
             provider_ready = gate.allowed
             denial_reasons = tuple(reason.value for reason in gate.denial_reasons)

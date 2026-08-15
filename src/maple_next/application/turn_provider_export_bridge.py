@@ -33,6 +33,7 @@ Callers of this module remain responsible for:
 
 from __future__ import annotations
 
+from maple_next.domain.legal_switches import LegalSwitchConfirmation
 from maple_next.domain.turn_state import (
     ConfirmedLegalActionSelection,
     ConfirmedTurnState,
@@ -52,6 +53,7 @@ def build_pure_rich_state_request_from_loaded_state(
     latest_confirmed_state: ConfirmedTurnState,
     confirmed_legal_actions: tuple[ConfirmedLegalActionSelection, ...],
     latest_open_draft: NextTurnStateDraft | None,
+    legal_switch_confirmation: LegalSwitchConfirmation | None,
     selected_three: tuple[str, str, str],
     self_active: str,
     evidence: FixedEvidenceMetadata | None = None,
@@ -85,6 +87,7 @@ def build_pure_rich_state_request_from_loaded_state(
         latest_confirmed_state_id=latest_confirmed_state.confirmed_state_id,
         latest_open_draft_turn_number=latest_open_draft_turn_number,
         latest_open_draft_battle_revision=latest_open_draft_battle_revision,
+        legal_switch_confirmation=legal_switch_confirmation,
         selected_three=selected_three,
         self_active=self_active,
         evidence=evidence,

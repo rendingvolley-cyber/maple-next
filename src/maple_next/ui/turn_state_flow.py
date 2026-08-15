@@ -46,6 +46,7 @@ from maple_next.domain.battle_events import (
     apply_stage_event,
 )
 from maple_next.domain.enums import ActionType, ResultDisposition
+from maple_next.domain.legal_switches import LegalSwitchConfirmation, LegalSwitchStatus
 from maple_next.domain.opponent_intel import (
     MatchOpponentFacts,
     possible_abilities_for_species,
@@ -679,6 +680,17 @@ class TurnStateFlowController(MatchFlowController):
         provider_ready = False
         denial_reasons: tuple[str, ...] = ()
         if confirmed_state is not None:
+            legal_switch_confirmation: LegalSwitchConfirmation | None = None
+            session = self._repository.load_active_session()
+            if session is not None and session.current_applied_selection_id is not None:
+                applied = self._repository.get_applied_selection(
+                    session.current_applied_selection_id
+                )
+                legal_switch_confirmation = self._repository.get_legal_switch_confirmation(
+                    identity=identity,
+                    based_on_confirmed_state_id=confirmed_state.confirmed_state_id,
+                    applied_selection_id=applied.applied_selection_id,
+                )
             gate: ProviderReadyGateResult = evaluate_provider_ready_gate(
                 confirmed_state=confirmed_state,
                 confirmed_legal_actions=confirmed_legal_actions,
@@ -690,6 +702,7 @@ class TurnStateFlowController(MatchFlowController):
                 latest_open_draft_battle_revision=(
                     open_draft.identity.battle_revision if open_draft is not None else None
                 ),
+                legal_switch_confirmation=legal_switch_confirmation,
             )
             provider_ready = gate.allowed
             denial_reasons = tuple(reason.value for reason in gate.denial_reasons)
@@ -992,6 +1005,24 @@ class TurnStateFlowController(MatchFlowController):
             status=status_delta,
             side_effects=FieldDelta.unchanged(),
             **stage_deltas,
+        )
+
+    # -- Bundle 2 (Gemini V2): explicit legal-switch confirmation --------------
+
+    def derive_legal_switch_candidates(self) -> tuple[str, ...]:
+        """Operator-facing prefill aid for the current Turn's factual
+        workbench. Read-only; never itself a confirmation."""
+
+        return self._application.derive_legal_switch_candidates_for_current_turn()
+
+    def confirm_legal_switches(
+        self, *, legal_switches: tuple[str, ...], status: LegalSwitchStatus
+    ) -> None:
+        """Persist the operator's explicit legal-switch confirmation for the
+        current Turn binding. Fails closed on any hard-invalidity violation."""
+
+        self._application.confirm_legal_switches(
+            legal_switches=legal_switches, status=status, human_confirmed=True
         )
 
     # -- confirm action-result delta -------------------------------------------

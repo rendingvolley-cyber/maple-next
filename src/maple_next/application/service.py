@@ -19,6 +19,15 @@ from maple_next.domain.enums import (
     JobType,
     ResultDisposition,
 )
+from maple_next.domain.legal_switches import (
+    LegalSwitchConfirmation,
+    LegalSwitchError,
+    LegalSwitchStatus,
+    derive_legal_switch_candidates,
+)
+from maple_next.domain.legal_switches import (
+    confirm_legal_switches as build_legal_switch_confirmation,
+)
 from maple_next.domain.models import (
     AppliedSelectionSnapshot,
     BattleSession,
@@ -32,8 +41,10 @@ from maple_next.domain.models import (
 from maple_next.domain.team_build import ChampionsTeamBuild
 from maple_next.domain.turn_state import (
     ActionResultDelta,
+    ConfirmationMeta,
     ConfirmedTurnState,
     NextTurnStateDraft,
+    PokemonLocalMemory,
     TurnIdentity,
     TurnStateIdentityError,
     TurnStateStaleError,
@@ -885,6 +896,12 @@ class BattleApplication:
             ):
                 raise DomainError("SELF_ACTIVE_UNKNOWN")
 
+            legal_switch_confirmation = self.repository.get_legal_switch_confirmation(
+                identity=current_identity,
+                based_on_confirmed_state_id=latest_state.confirmed_state_id,
+                applied_selection_id=applied.applied_selection_id,
+            )
+
             try:
                 request = build_rich_state_turn_advice_request(
                     confirmed_state=latest_state,
@@ -893,6 +910,7 @@ class BattleApplication:
                     latest_confirmed_state_id=latest_state.confirmed_state_id,
                     latest_open_draft_turn_number=latest_open_draft_turn_number,
                     latest_open_draft_battle_revision=latest_open_draft_battle_revision,
+                    legal_switch_confirmation=legal_switch_confirmation,
                     selected_three=applied.selected_three,
                     self_active=self_active_known.value,
                     evidence=evidence,
@@ -1120,6 +1138,12 @@ class BattleApplication:
         ):
             raise DomainError("SELF_ACTIVE_UNKNOWN")
 
+        legal_switch_confirmation = self.repository.get_legal_switch_confirmation(
+            identity=current_identity,
+            based_on_confirmed_state_id=confirmed_state.confirmed_state_id,
+            applied_selection_id=applied.applied_selection_id,
+        )
+
         try:
             request = build_rich_state_turn_advice_request(
                 confirmed_state=confirmed_state,
@@ -1128,6 +1152,7 @@ class BattleApplication:
                 latest_confirmed_state_id=confirmed_state.confirmed_state_id,
                 latest_open_draft_turn_number=latest_open_draft_turn_number,
                 latest_open_draft_battle_revision=latest_open_draft_battle_revision,
+                legal_switch_confirmation=legal_switch_confirmation,
                 selected_three=applied.selected_three,
                 self_active=self_active_known.value,
                 evidence=evidence,
@@ -1800,6 +1825,122 @@ class BattleApplication:
         session.current_turn_advice_id = None
         session.state = BattleState.TURN_CAPTURE_PENDING
         session.bump_battle()
+
+    # -- Bundle 2 (Gemini V2): explicit legal-switch confirmation ------------
+
+    def _current_legal_switch_binding(
+        self,
+    ) -> tuple[TurnIdentity, AppliedSelectionSnapshot, ConfirmedTurnState]:
+        """Shared read-only load of the identity/selection/state a legal-switch
+        candidate derivation or confirmation must bind to. Fails closed if
+        the current Turn has no matching binding for any of the three."""
+
+        session = self._require_session(BattleState.TURN_REVIEWED)
+        if session.current_turn_id is None:
+            raise DomainError("CURRENT_TURN_REQUIRED")
+        if session.current_applied_selection_id is None:
+            raise DomainError("APPLIED_SELECTION_REQUIRED")
+        turn = self.repository.get_turn(session.current_turn_id)
+        identity = TurnIdentity(
+            session_id=session.session_id,
+            match_id=session.match_id,
+            generation=session.generation,
+            turn_id=turn.turn_id,
+            turn_number=turn.turn_number,
+            battle_revision=session.battle_revision,
+        )
+        latest_state = self.repository.get_latest_confirmed_turn_state_for_identity(
+            session_id=session.session_id,
+            match_id=session.match_id,
+            generation=session.generation,
+        )
+        if latest_state is None or latest_state.identity != identity:
+            raise DomainError("CONFIRMED_STATE_NOT_CURRENT_BINDING")
+        applied = self.repository.get_applied_selection(session.current_applied_selection_id)
+        return identity, applied, latest_state
+
+    def _self_local_memory_by_name(
+        self, identity: TurnIdentity, applied: AppliedSelectionSnapshot
+    ) -> dict[str, PokemonLocalMemory]:
+        memory_by_name: dict[str, PokemonLocalMemory] = {}
+        for name in applied.selected_three:
+            memory = self.repository.get_pokemon_local_state(
+                session_id=identity.session_id,
+                match_id=identity.match_id,
+                generation=identity.generation,
+                side="SELF",
+                pokemon_name=name,
+            )
+            if memory is not None:
+                memory_by_name[name] = memory
+        return memory_by_name
+
+    def derive_legal_switch_candidates_for_current_turn(self) -> tuple[str, ...]:
+        """Operator-facing prefill aid for the current Turn. Read-only, never
+        itself a confirmation -- see :func:`maple_next.domain.legal_switches.
+        derive_legal_switch_candidates`."""
+
+        identity, applied, latest_state = self._current_legal_switch_binding()
+        self_active = latest_state.self_side.active
+        if not self_active.is_confirmed or not self_active.value:
+            raise DomainError("SELF_ACTIVE_UNKNOWN")
+        memory_by_name = self._self_local_memory_by_name(identity, applied)
+        return derive_legal_switch_candidates(
+            applied=applied,
+            current_active_name=self_active.value,
+            local_memory_by_name=memory_by_name,
+        )
+
+    def confirm_legal_switches(
+        self,
+        *,
+        legal_switches: tuple[str, ...],
+        status: LegalSwitchStatus,
+        human_confirmed: bool,
+    ) -> LegalSwitchConfirmation:
+        """Final, human-confirmed legal-switch set for the current Turn binding.
+
+        The derived candidate list is only ever a prefill aid -- it is not
+        consulted here. Explicit human confirmation is required and
+        sufficient on its own, exactly like every other Bundle A/1
+        confirmation. Fails closed (``DomainError``) on any hard-invalidity
+        violation (current active included, a member outside the applied
+        ``selected_three``, or a member with match-local confirmed HP = 0)
+        without persisting anything.
+        """
+
+        if not human_confirmed:
+            raise DomainError("HUMAN_ACTION_CONFIRMATION_REQUIRED")
+        with self.repository.transaction():
+            identity, applied, latest_state = self._current_legal_switch_binding()
+            self_active = latest_state.self_side.active
+            if (
+                not self_active.is_confirmed
+                or not self_active.value
+                or self_active.value == "UNKNOWN"
+            ):
+                raise DomainError("SELF_ACTIVE_UNKNOWN")
+            memory_by_name = self._self_local_memory_by_name(identity, applied)
+            try:
+                confirmation = build_legal_switch_confirmation(
+                    confirmation_id=str(uuid4()),
+                    identity=identity,
+                    based_on_confirmed_state_id=latest_state.confirmed_state_id,
+                    applied=applied,
+                    current_active_name=self_active.value,
+                    local_memory_by_name=memory_by_name,
+                    legal_switches=legal_switches,
+                    status=status,
+                    confirmation=ConfirmationMeta(
+                        confirmed_by_human=True,
+                        confirmed_at_utc=datetime.now(UTC).isoformat(),
+                        provenance="HUMAN_INPUT",
+                    ),
+                )
+            except (LegalSwitchError, ValueError) as exc:
+                raise DomainError(f"LEGAL_SWITCH_CONFIRMATION_REJECTED:{exc}") from exc
+            self.repository.upsert_legal_switch_confirmation(confirmation)
+            return confirmation
 
     def _load_result_job_or_audit(self, result: ResultEnvelope) -> JobEnvelope | None:
         try:

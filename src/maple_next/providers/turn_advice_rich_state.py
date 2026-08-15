@@ -40,6 +40,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Final
 
 from maple_next.domain.enums import ActionType
+from maple_next.domain.legal_switches import LegalSwitchConfirmation
 from maple_next.domain.turn_state import (
     ConfirmationMeta,
     ConfirmedLegalActionSelection,
@@ -174,6 +175,15 @@ class RichStateTurnAdviceRequest:
     selected_three: tuple[str, str, str]
     self_active: str
     legal_actions: tuple[RichLegalAction, ...]
+    #: Bundle 2 (Gemini V2). Always the exact confirmed
+    #: ``legal_switch_confirmation.legal_switches`` -- never re-derived from
+    #: ``legal_actions`` here, so the request can never silently diverge from
+    #: what was actually confirmed.
+    legal_switches: tuple[str, ...]
+    #: ``CONFIRMED_NONEMPTY`` or ``CONFIRMED_NONE`` only. A provider-ready
+    #: request can never carry ``NOT_CAPTURED_OR_UNRESOLVED`` -- the gate
+    #: above blocks construction before this field could ever be set to it.
+    legal_switches_status: str
     requested_output_schema: dict[str, Any]
     state_confirmation: ConfirmationMeta
     evidence: FixedEvidenceMetadata | None
@@ -230,6 +240,8 @@ def canonical_rich_request_dict(request: RichStateTurnAdviceRequest) -> dict[str
         "selected_three": list(request.selected_three),
         "self_active": request.self_active,
         "legal_actions": [_canonical_legal_action_dict(a) for a in sorted_actions],
+        "legal_switches": sorted(request.legal_switches),
+        "legal_switches_status": request.legal_switches_status,
         "requested_output_schema": request.requested_output_schema,
         "state_confirmation": {
             "confirmed_by_human": request.state_confirmation.confirmed_by_human,
@@ -289,6 +301,7 @@ def build_rich_state_turn_advice_request(
     latest_confirmed_state_id: str,
     latest_open_draft_turn_number: int | None,
     latest_open_draft_battle_revision: int | None,
+    legal_switch_confirmation: LegalSwitchConfirmation | None,
     selected_three: tuple[str, str, str],
     self_active: str,
     evidence: FixedEvidenceMetadata | None = None,
@@ -314,6 +327,7 @@ def build_rich_state_turn_advice_request(
         latest_confirmed_state_id=latest_confirmed_state_id,
         latest_open_draft_turn_number=latest_open_draft_turn_number,
         latest_open_draft_battle_revision=latest_open_draft_battle_revision,
+        legal_switch_confirmation=legal_switch_confirmation,
     )
     if not gate.allowed:
         reason_text = ",".join(reason.value for reason in gate.denial_reasons)
@@ -323,6 +337,9 @@ def build_rich_state_turn_advice_request(
         raise RichStateRequestError("SELF_ACTIVE_NOT_IN_SELECTED_THREE")
     if len(set(selected_three)) != 3:
         raise RichStateRequestError("SELECTED_THREE_MUST_BE_DISTINCT")
+    # The gate above already required a non-None, current-binding
+    # confirmation to reach this point.
+    assert legal_switch_confirmation is not None
 
     projection = build_rich_state_projection(
         confirmed_state, confirmed_legal_actions, evidence=evidence
@@ -353,6 +370,8 @@ def build_rich_state_turn_advice_request(
         selected_three=selected_three,
         self_active=self_active,
         legal_actions=legal_actions,
+        legal_switches=legal_switch_confirmation.legal_switches,
+        legal_switches_status=legal_switch_confirmation.status.value,
         requested_output_schema=REQUESTED_OUTPUT_SCHEMA,
         state_confirmation=confirmed_state.confirmation,
         evidence=evidence,

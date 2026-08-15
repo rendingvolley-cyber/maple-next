@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from maple_next.domain.legal_switches import LegalSwitchStatus as _B2_LegalSwitchStatus
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from test_issue31_turn_state_ui_bundle_c import (
@@ -71,7 +73,10 @@ def test_reset_preset_zeroes_every_stage_regardless_of_current_value() -> None:
 
 def _confirm_full_turn_facts(controller: TurnStateFlowController, window) -> None:
     _fill_minimal_current_state(window)
-    window._on_confirm_turn_facts()
+    window._on_confirm_turn_facts()  # noqa: SLF001
+    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
+    )
 
 
 def _advance_through_mock_turn_advice(window) -> None:

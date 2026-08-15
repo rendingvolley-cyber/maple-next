@@ -24,6 +24,7 @@ from maple_next.application.match_export_v3 import MatchExportV3Error, parse_mat
 from maple_next.application.match_service import MatchApplication
 from maple_next.application.service import DomainError
 from maple_next.domain.enums import ActionType, BattleState, HpBucket, MatchOutcome
+from maple_next.domain.legal_switches import LegalSwitchConfirmation, LegalSwitchStatus
 from maple_next.domain.models import (
     AppliedSelectionSnapshot,
     BattleTurn,
@@ -200,12 +201,40 @@ class RichSessionFixture:
         self.repository.connection.commit()
         return (move, switch)
 
+    def legal_switch_confirmation(
+        self,
+        *,
+        legal_switches: tuple[str, ...] = ("Gholdengo",),
+        status: LegalSwitchStatus | None = None,
+        based_on_confirmed_state_id: str | None = None,
+    ) -> LegalSwitchConfirmation:
+        resolved_status = (
+            status
+            if status is not None
+            else (
+                LegalSwitchStatus.CONFIRMED_NONEMPTY
+                if legal_switches
+                else LegalSwitchStatus.CONFIRMED_NONE
+            )
+        )
+        return LegalSwitchConfirmation(
+            confirmation_id="switch-confirm-1",
+            identity=self.identity(),
+            based_on_confirmed_state_id=based_on_confirmed_state_id or self.confirmed_state_id,
+            applied_selection_id="applied-1",
+            legal_switches=legal_switches,
+            status=resolved_status,
+            confirmation=_confirmation(),
+        )
+
 
 @pytest.fixture
 def rich_fixture(tmp_path) -> RichSessionFixture:
     fixture = RichSessionFixture(tmp_path)
     fixture.append_confirmed_state()
     fixture.append_legal_actions()
+    fixture.repository.upsert_legal_switch_confirmation(fixture.legal_switch_confirmation())
+    fixture.repository.connection.commit()
     return fixture
 
 
@@ -375,6 +404,9 @@ def test_rich_request_contains_required_fields(rich_fixture: RichSessionFixture)
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=rich_fixture.legal_switch_confirmation(
+            based_on_confirmed_state_id=state.confirmed_state_id
+        ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
     )
@@ -425,6 +457,9 @@ def test_rich_prompt_requires_japanese_only_for_human_facing_text(
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=rich_fixture.legal_switch_confirmation(
+            based_on_confirmed_state_id=state.confirmed_state_id
+        ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
     )
@@ -461,6 +496,9 @@ def test_rich_japanese_instruction_preserves_strict_response_schema(
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=rich_fixture.legal_switch_confirmation(
+            based_on_confirmed_state_id=state.confirmed_state_id
+        ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
     )
@@ -748,6 +786,9 @@ def _build_request_for_state(
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=fixture.legal_switch_confirmation(
+            based_on_confirmed_state_id=state.confirmed_state_id
+        ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
     )
@@ -801,6 +842,9 @@ def test_hash_changes_with_evidence(tmp_path) -> None:
         latest_confirmed_state_id=state_a.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=fixture_a.legal_switch_confirmation(
+            based_on_confirmed_state_id=state_a.confirmed_state_id
+        ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
         evidence=evidence_a,
@@ -816,6 +860,9 @@ def test_hash_changes_with_evidence(tmp_path) -> None:
         latest_confirmed_state_id=state_b.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=fixture_b.legal_switch_confirmation(
+            based_on_confirmed_state_id=state_b.confirmed_state_id
+        ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
         evidence=None,
@@ -834,6 +881,9 @@ def test_hash_changes_with_selected_three(tmp_path) -> None:
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=fixture.legal_switch_confirmation(
+            based_on_confirmed_state_id=state.confirmed_state_id
+        ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
     )
@@ -844,6 +894,9 @@ def test_hash_changes_with_selected_three(tmp_path) -> None:
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=fixture.legal_switch_confirmation(
+            based_on_confirmed_state_id=state.confirmed_state_id
+        ),
         selected_three=("Dondozo", "Gholdengo", "Hatterene"),
         self_active="Dondozo",
     )
@@ -861,6 +914,9 @@ def test_hash_changes_with_self_team_build_sha256(tmp_path) -> None:
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=fixture.legal_switch_confirmation(
+            based_on_confirmed_state_id=state.confirmed_state_id
+        ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
         self_team_build_sha256="b" * 64,
@@ -872,6 +928,9 @@ def test_hash_changes_with_self_team_build_sha256(tmp_path) -> None:
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=fixture.legal_switch_confirmation(
+            based_on_confirmed_state_id=state.confirmed_state_id
+        ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
         self_team_build_sha256=None,

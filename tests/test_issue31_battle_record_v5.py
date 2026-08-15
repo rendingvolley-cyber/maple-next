@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from maple_next.domain.legal_switches import LegalSwitchStatus as _B2_LegalSwitchStatus
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QGroupBox, QLabel
@@ -162,7 +164,10 @@ def test_visual_remediation_uses_one_four_phase_workbench_surface(tmp_path: Path
     assert window.turn_facts_confirm_checkbox.isHidden()
 
     _fill_minimal_current_state(window)
-    window._on_confirm_turn_facts()
+    window._on_confirm_turn_facts()  # noqa: SLF001
+    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
+    )
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
     window.mock_turn_prediction_input.setText("opponent move")
@@ -373,7 +378,10 @@ def _confirm_initial_entry(window, species: str) -> None:
     _fill_minimal_current_state(window)
     window.opponent_active_input.setText(species)
     assert window.parity_ability_card.isHidden()
-    window._on_confirm_turn_facts()
+    window._on_confirm_turn_facts()  # noqa: SLF001
+    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
+    )
 
 
 def _advance_with_confirmed_opponent_switch(window, controller, species: str) -> None:
@@ -398,7 +406,10 @@ def _advance_with_confirmed_opponent_switch(window, controller, species: str) ->
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
     window.mock_turn_prediction_input.setText("opponent move")
     window.mock_turn_rationale_input.setText("canonical transition fixture")
-    window._on_confirm_turn_facts()
+    window._on_confirm_turn_facts()  # noqa: SLF001
+    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
+    )
     assert controller.refresh().projection.session_state == "TURN_REVIEWED"
 
 
@@ -561,7 +572,10 @@ def test_action_result_progressive_disclosure_and_catalog_apply(tmp_path: Path) 
     _advance_to_turn_capture_pending(controller)
     window.render_view()
     _fill_minimal_current_state(window)
-    window._on_confirm_turn_facts()
+    window._on_confirm_turn_facts()  # noqa: SLF001
+    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
+    )
     window.actual_action_type_box.setCurrentText("SWITCH")
     window._update_v5_action_disclosure()
     assert not window.actual_action_name_box.isHidden()
@@ -581,7 +595,10 @@ def test_action_result_progressive_disclosure_and_catalog_apply(tmp_path: Path) 
 
 def _advance_to_action_result(window: BattleRecordUiWindow) -> None:
     _fill_minimal_current_state(window)
-    window._on_confirm_turn_facts()
+    window._on_confirm_turn_facts()  # noqa: SLF001
+    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
+    )
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
     window.mock_turn_prediction_input.setText("manual test prediction")
@@ -628,7 +645,10 @@ def test_self_move_chip_selection_tracks_authoritative_draft_and_persists(
     legal_moves = ("トリックフラワー", "はたきおとす")
     for field, move in zip(window.move_inputs, legal_moves, strict=False):
         field.setText(move)
-    window._on_confirm_turn_facts()
+    window._on_confirm_turn_facts()  # noqa: SLF001
+    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
+    )
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText(legal_moves[0])
     window.mock_turn_prediction_input.setText("offline prediction")
@@ -740,7 +760,10 @@ def test_self_switch_selector_explicitly_reports_empty_legal_targets(
     _fill_minimal_current_state(window)
     for checkbox in window.switch_checkboxes:
         checkbox.setChecked(False)
-    window._on_confirm_turn_facts()
+    window._on_confirm_turn_facts()  # noqa: SLF001
+    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
+    )
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
     window.mock_turn_prediction_input.setText("manual test prediction")

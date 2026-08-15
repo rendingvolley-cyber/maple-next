@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -449,6 +449,42 @@ def migrate(connection: sqlite3.Connection) -> None:
         );
 
         UPDATE schema_meta SET schema_version = 17 WHERE singleton_id = 1;
+
+        -- Bundle 2 (Gemini V2): explicit legal-switch confirmation status.
+        -- Additive only. One row per exact binding (identity + the
+        -- confirmed-state/applied-selection facts the confirmed set is
+        -- bound to); a re-confirmation within the same binding updates that
+        -- row in place rather than accumulating history noise. Absence of a
+        -- matching row is the durable representation of
+        -- NOT_CAPTURED_OR_UNRESOLVED -- that status value is never itself
+        -- written to the ``status`` column.
+        CREATE TABLE IF NOT EXISTS legal_switch_confirmations (
+            confirmation_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            match_id TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            turn_id TEXT NOT NULL,
+            turn_number INTEGER NOT NULL CHECK (turn_number >= 1),
+            battle_revision INTEGER NOT NULL CHECK (battle_revision >= 0),
+            based_on_confirmed_state_id TEXT NOT NULL,
+            applied_selection_id TEXT NOT NULL,
+            legal_switches_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('CONFIRMED_NONEMPTY', 'CONFIRMED_NONE')),
+            confirmed_by_human INTEGER NOT NULL CHECK (confirmed_by_human IN (0, 1)),
+            confirmed_at_utc TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(
+                session_id, match_id, generation, turn_id, turn_number,
+                battle_revision, based_on_confirmed_state_id, applied_selection_id
+            ),
+            FOREIGN KEY(based_on_confirmed_state_id)
+                REFERENCES confirmed_turn_states(confirmed_state_id),
+            FOREIGN KEY(applied_selection_id)
+                REFERENCES applied_selections(applied_selection_id)
+        );
+
+        UPDATE schema_meta SET schema_version = 18 WHERE singleton_id = 1;
         """
     )
     _ensure_column(

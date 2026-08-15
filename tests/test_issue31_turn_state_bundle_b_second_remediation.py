@@ -209,12 +209,33 @@ class RichSessionFixture:
         self.repository.connection.commit()
         return (move,)
 
+    def confirm_legal_switches(
+        self, *, based_on_confirmed_state_id: str | None = None
+    ) -> None:
+        from maple_next.domain.legal_switches import LegalSwitchConfirmation, LegalSwitchStatus
+
+        self.repository.upsert_legal_switch_confirmation(
+            LegalSwitchConfirmation(
+                confirmation_id="switch-confirm-1",
+                identity=self.identity(),
+                based_on_confirmed_state_id=(
+                    based_on_confirmed_state_id or self.confirmed_state_id
+                ),
+                applied_selection_id="applied-1",
+                legal_switches=("Gholdengo",),
+                status=LegalSwitchStatus.CONFIRMED_NONEMPTY,
+                confirmation=_confirmation(),
+            )
+        )
+        self.repository.connection.commit()
+
 
 @pytest.fixture
 def rich_fixture(tmp_path) -> RichSessionFixture:
     fixture = RichSessionFixture(tmp_path)
     fixture.append_confirmed_state()
     fixture.append_legal_actions()
+    fixture.confirm_legal_switches()
     return fixture
 
 
@@ -292,6 +313,7 @@ def test_rich_result_stale_superseded_confirmed_state_rejected(tmp_path) -> None
     fixture = RichSessionFixture(tmp_path)
     fixture.append_confirmed_state()
     fixture.append_legal_actions()
+    fixture.confirm_legal_switches()
     job = fixture.application.request_rich_turn_advice("command-1")
     # Supersede with a newer confirmed state at a later revision.
     fixture.repository.connection.execute(

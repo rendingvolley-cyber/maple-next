@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from maple_next.domain.legal_switches import LegalSwitchConfirmation
 from maple_next.domain.turn_state import (
     ConfirmationMeta,
     ConfirmedLegalActionSelection,
@@ -174,6 +175,13 @@ class GateDenialReason(StrEnum):
     LEGAL_ACTIONS_EMPTY = "LEGAL_ACTIONS_EMPTY"
     LEGAL_ACTIONS_NOT_CONFIRMED = "LEGAL_ACTIONS_NOT_CONFIRMED"
     LEGAL_ACTIONS_IDENTITY_MISMATCH = "LEGAL_ACTIONS_IDENTITY_MISMATCH"
+    #: Bundle 2 (Gemini V2): no matching LegalSwitchConfirmation exists for
+    #: this exact binding -- the historical ``legal_switches = []`` defect's
+    #: fix. Fires for a genuinely never-addressed switch state just as much
+    #: as for a stale confirmation from a superseded Turn/revision/roster.
+    LEGAL_SWITCHES_UNRESOLVED = "LEGAL_SWITCHES_UNRESOLVED"
+    LEGAL_SWITCHES_IDENTITY_MISMATCH = "LEGAL_SWITCHES_IDENTITY_MISMATCH"
+    LEGAL_SWITCHES_STALE_BINDING = "LEGAL_SWITCHES_STALE_BINDING"
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +200,7 @@ def evaluate_provider_ready_gate(
     latest_confirmed_state_id: str,
     latest_open_draft_turn_number: int | None,
     latest_open_draft_battle_revision: int | None,
+    legal_switch_confirmation: LegalSwitchConfirmation | None,
 ) -> ProviderReadyGateResult:
     """Evaluate the minimum provider-ready gate. Deny-by-default, pure, no I/O.
 
@@ -210,7 +219,18 @@ def evaluate_provider_ready_gate(
       terrain, and side effects may legitimately be an explicit confirmed
       UNKNOWN -- active alone may never be sent unknown);
     - ``confirmed_legal_actions`` is non-empty and every entry is a
-      ``ConfirmedLegalActionSelection`` bound to ``current_identity``.
+      ``ConfirmedLegalActionSelection`` bound to ``current_identity``;
+    - ``legal_switch_confirmation`` (Bundle 2) is not ``None`` and is bound
+      to ``current_identity``. ``None`` means no matching
+      :class:`~maple_next.domain.legal_switches.LegalSwitchConfirmation`
+      was found for the caller's exact binding -- durably
+      NOT_CAPTURED_OR_UNRESOLVED -- and blocks the gate exactly like an
+      empty ``confirmed_legal_actions`` does. An empty
+      ``legal_switch_confirmation.legal_switches`` alone never satisfies
+      this gate; only an explicit ``CONFIRMED_NONE`` status does (the
+      dataclass itself already refuses to construct any other empty-tuple/
+      status combination, so this function only needs to check identity
+      binding here).
 
     The caller is responsible for supplying ``current_identity``,
     ``latest_confirmed_state_id``, and the latest-open-draft identity
@@ -271,6 +291,14 @@ def evaluate_provider_ready_gate(
             ):
                 reasons.append(GateDenialReason.LEGAL_ACTIONS_IDENTITY_MISMATCH)
                 break
+
+    if legal_switch_confirmation is None:
+        reasons.append(GateDenialReason.LEGAL_SWITCHES_UNRESOLVED)
+    else:
+        if legal_switch_confirmation.identity != current_identity:
+            reasons.append(GateDenialReason.LEGAL_SWITCHES_IDENTITY_MISMATCH)
+        if legal_switch_confirmation.based_on_confirmed_state_id != latest_confirmed_state_id:
+            reasons.append(GateDenialReason.LEGAL_SWITCHES_STALE_BINDING)
 
     return ProviderReadyGateResult(allowed=not reasons, denial_reasons=tuple(reasons))
 

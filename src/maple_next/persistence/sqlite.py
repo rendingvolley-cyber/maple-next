@@ -11,6 +11,7 @@ from maple_next.domain.enums import ActionOrder, ActionType
 from maple_next.domain.turn_state import ActionResultDelta, TurnIdentity
 from maple_next.persistence.attempt_ledger_store import AttemptLedgerStoreMixin
 from maple_next.persistence.job_store import JobStoreMixin
+from maple_next.persistence.legal_switch_store import LegalSwitchStoreMixin
 from maple_next.persistence.match_store import MatchStoreMixin
 from maple_next.persistence.schema import migrate
 from maple_next.persistence.selection_store import SelectionStoreMixin
@@ -29,6 +30,7 @@ class SQLiteRepository(
     AttemptLedgerStoreMixin,
     TeamPresetStoreMixin,
     TurnStateStoreMixin,
+    LegalSwitchStoreMixin,
 ):
     """The only component allowed to hold a writable SQLite connection."""
 

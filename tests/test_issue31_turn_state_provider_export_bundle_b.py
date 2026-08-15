@@ -28,6 +28,7 @@ from maple_next.application.turn_provider_export_bridge import (
     build_pure_rich_state_request_from_loaded_state,
 )
 from maple_next.domain.enums import ActionType, HpBucket, MatchOutcome
+from maple_next.domain.legal_switches import LegalSwitchConfirmation, LegalSwitchStatus
 from maple_next.domain.match_models import MatchOutcomeRecord
 from maple_next.domain.turn_state import (
     ActionResultDelta,
@@ -166,6 +167,25 @@ def _legal_action(
     )
 
 
+def _legal_switch_confirmation(
+    *,
+    identity: TurnIdentity | None = None,
+    based_on_confirmed_state_id: str = "confirmed-1",
+    applied_selection_id: str = "applied-1",
+    legal_switches: tuple[str, ...] = (),
+    status: LegalSwitchStatus = LegalSwitchStatus.CONFIRMED_NONE,
+) -> LegalSwitchConfirmation:
+    return LegalSwitchConfirmation(
+        confirmation_id="switch-confirm-1",
+        identity=identity or _identity(),
+        based_on_confirmed_state_id=based_on_confirmed_state_id,
+        applied_selection_id=applied_selection_id,
+        legal_switches=legal_switches,
+        status=status,
+        confirmation=_confirmation(),
+    )
+
+
 def _allowed_dispatch_decision() -> DispatchDecision:
     return decide_turn_advice_dispatch(
         trigger=DispatchTrigger.TRUSTED_HUMAN_ACTIVATION,
@@ -278,6 +298,7 @@ def test_gate_denies_self_active_unknown() -> None:
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=None,
     )
     assert not result.allowed
     assert GateDenialReason.SELF_ACTIVE_UNKNOWN in result.denial_reasons
@@ -292,6 +313,7 @@ def test_gate_denies_opponent_active_unknown() -> None:
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=None,
     )
     assert not result.allowed
     assert GateDenialReason.OPPONENT_ACTIVE_UNKNOWN in result.denial_reasons
@@ -306,6 +328,7 @@ def test_gate_denies_newer_open_draft() -> None:
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=state.identity.turn_number + 1,
         latest_open_draft_battle_revision=state.identity.battle_revision + 1,
+        legal_switch_confirmation=None,
     )
     assert not result.allowed
     assert GateDenialReason.NEWER_OPEN_DRAFT_EXISTS in result.denial_reasons
@@ -320,6 +343,9 @@ def test_gate_allows_open_draft_that_is_not_newer() -> None:
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=state.identity.turn_number,
         latest_open_draft_battle_revision=state.identity.battle_revision,
+        legal_switch_confirmation=_legal_switch_confirmation(
+            identity=state.identity, based_on_confirmed_state_id=state.confirmed_state_id
+        ),
     )
     assert result.allowed
 
@@ -334,6 +360,7 @@ def test_gate_denies_identity_revision_mismatch() -> None:
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=None,
     )
     assert not result.allowed
     assert GateDenialReason.IDENTITY_MISMATCH in result.denial_reasons
@@ -348,6 +375,7 @@ def test_gate_denies_stale_snapshot() -> None:
         latest_confirmed_state_id="a-newer-state-id",
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=None,
     )
     assert not result.allowed
     assert GateDenialReason.STALE_CONFIRMED_STATE in result.denial_reasons
@@ -362,6 +390,7 @@ def test_gate_denies_unconfirmed_final_legal_actions() -> None:
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=None,
     )
     assert not result.allowed
     assert GateDenialReason.LEGAL_ACTIONS_EMPTY in result.denial_reasons
@@ -389,6 +418,9 @@ def test_gate_allows_explicit_confirmed_unknown_hp_status_stages_weather_terrain
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=_legal_switch_confirmation(
+            identity=state.identity, based_on_confirmed_state_id=state.confirmed_state_id
+        ),
     )
     assert result.allowed
 
@@ -403,6 +435,9 @@ def test_bridge_builds_request_from_loaded_state() -> None:
         latest_confirmed_state=state,
         confirmed_legal_actions=(_legal_action(),),
         latest_open_draft=None,
+        legal_switch_confirmation=_legal_switch_confirmation(
+            identity=state.identity, based_on_confirmed_state_id=state.confirmed_state_id
+        ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
     )
@@ -489,6 +524,9 @@ def test_bridge_fails_closed_on_newer_open_draft() -> None:
             latest_confirmed_state=state,
             confirmed_legal_actions=(_legal_action(),),
             latest_open_draft=newer_draft,
+            legal_switch_confirmation=_legal_switch_confirmation(
+                identity=state.identity, based_on_confirmed_state_id=state.confirmed_state_id
+            ),
             selected_three=("Dondozo", "Gholdengo", "Urshifu"),
             self_active="Dondozo",
         )

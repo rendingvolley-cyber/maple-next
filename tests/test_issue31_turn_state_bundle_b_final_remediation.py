@@ -147,6 +147,7 @@ def test_unrelated_draft_from_another_chain_does_not_block(tmp_path) -> None:
     fixture = RichSessionFixture(tmp_path)
     fixture.append_confirmed_state()
     fixture.append_legal_actions()
+    fixture.confirm_legal_switches()
 
     # No delta/draft exists at all for this chain -- both discovery paths
     # must independently confirm "no candidate", and the request must

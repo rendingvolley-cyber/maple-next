@@ -6,6 +6,8 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
+from maple_next.domain.legal_switches import LegalSwitchStatus as _B2_LegalSwitchStatus
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtGui import QImage
@@ -61,7 +63,10 @@ def _advance_to_second_turn(window, controller) -> None:
     _advance_to_turn_capture_pending(controller)
     window.render_view()
     _fill_minimal_current_state(window)
-    window._on_confirm_turn_facts()  # noqa: SLF001 - trusted offline UI seam
+    window._on_confirm_turn_facts()  # noqa: SLF001
+    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=(), status=_B2_LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
+    )
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
     window.mock_turn_prediction_input.setText("offline prediction")

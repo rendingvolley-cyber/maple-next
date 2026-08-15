@@ -45,6 +45,7 @@ import maple_next.application.service as application_service
 from maple_next.application.match_service import MatchApplication
 from maple_next.application.service import DomainError
 from maple_next.domain.enums import ActionOrder, ActionType, BattleState, HpBucket
+from maple_next.domain.legal_switches import LegalSwitchStatus
 from maple_next.domain.models import RecordedAction
 from maple_next.domain.turn_state import (
     ActionResultDelta,
@@ -172,6 +173,14 @@ def _confirm_and_send(window: BattleRecordUiWindow) -> None:
     switch/status/weather -- those were already re-filled by the caller."""
 
     window._on_confirm_turn_facts()  # noqa: SLF001
+    # Bundle 2 (Gemini V2): none of this file's fixtures exercise the
+    # switch-legality dimension, so an explicit human "no legal switches"
+    # confirmation for the current binding is the correct default here --
+    # never a silent/implicit one. Every scenario below keeps asserting
+    # zero provider dispatch on top of this.
+    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=(), status=LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
+    )
     _submit_turn_advice(window)
 
 
@@ -289,6 +298,9 @@ def test_historical_swords_dance_turn3_attack_plus2_projects_to_turn4_and_editor
 
         _fill_minimal_current_state(window)
         window._on_confirm_turn_facts()  # noqa: SLF001
+        window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
+            legal_switches=(), status=LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
+        )
         confirmed = controller.turn_state_summary().confirmed_state
         assert confirmed is not None
         assert confirmed.identity.turn_number == expected_turn_number
@@ -564,6 +576,9 @@ def test_provider_ready_gate_rejects_required_scenarios_without_any_dispatch(
 
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
+    window._bundle_c_controller._application.confirm_legal_switches(  # noqa: SLF001
+        legal_switches=(), status=LegalSwitchStatus.CONFIRMED_NONE, human_confirmed=True
+    )
     summary = controller.turn_state_summary()
     confirmed_state = summary.confirmed_state
     current_identity = summary.identity
@@ -584,6 +599,7 @@ def test_provider_ready_gate_rejects_required_scenarios_without_any_dispatch(
         latest_confirmed_state_id="some-other-confirmed-state-id",
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=None,
     )
     assert stale_result.allowed is False
     assert GateDenialReason.STALE_CONFIRMED_STATE in stale_result.denial_reasons
@@ -597,6 +613,7 @@ def test_provider_ready_gate_rejects_required_scenarios_without_any_dispatch(
         latest_confirmed_state_id=confirmed_state.confirmed_state_id,
         latest_open_draft_turn_number=current_identity.turn_number + 1,
         latest_open_draft_battle_revision=current_identity.battle_revision + 1,
+        legal_switch_confirmation=None,
     )
     assert unconfirmed_result.allowed is False
     assert GateDenialReason.NEWER_OPEN_DRAFT_EXISTS in unconfirmed_result.denial_reasons
@@ -613,6 +630,7 @@ def test_provider_ready_gate_rejects_required_scenarios_without_any_dispatch(
         latest_confirmed_state_id=confirmed_state.confirmed_state_id,
         latest_open_draft_turn_number=None,
         latest_open_draft_battle_revision=None,
+        legal_switch_confirmation=None,
     )
     assert wrong_identity_result.allowed is False
     assert GateDenialReason.IDENTITY_MISMATCH in wrong_identity_result.denial_reasons

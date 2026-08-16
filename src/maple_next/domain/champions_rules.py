@@ -50,7 +50,6 @@ SUPPORTED_SCOPE = "ranked_single"
 _MANDATORY_FACT_CATEGORIES: frozenset[str] = frozenset(
     {
         "battle_format",
-        "pokemon_selected_to_battle",
         "mega_evolution_availability",
         "mega_evolution_use_limit",
         "duplicate_held_items",
@@ -61,7 +60,6 @@ _MANDATORY_FACT_CATEGORIES: frozenset[str] = frozenset(
 _ALLOWED_TOP_LEVEL_FACT_KEYS: frozenset[str] = frozenset(
     {
         "battle_format",
-        "pokemon_selected_to_battle",
         "mega_evolution",
         "duplicate_held_items_allowed",
         "timers",
@@ -164,7 +162,6 @@ class TimersRule:
 @dataclass(frozen=True, slots=True)
 class ChampionsRulesFacts:
     battle_format: str
-    pokemon_selected_to_battle: int
     mega_evolution: MegaEvolutionRule
     duplicate_held_items_allowed: bool
     timers: TimersRule
@@ -172,7 +169,6 @@ class ChampionsRulesFacts:
     def to_canonical_dict(self) -> dict[str, Any]:
         return {
             "battle_format": self.battle_format,
-            "pokemon_selected_to_battle": self.pokemon_selected_to_battle,
             "mega_evolution": self.mega_evolution.to_canonical_dict(),
             "duplicate_held_items_allowed": self.duplicate_held_items_allowed,
             "timers": self.timers.to_canonical_dict(),
@@ -289,12 +285,6 @@ def _parse_facts(raw: dict[str, Any]) -> ChampionsRulesFacts:
     if battle_format not in _ALLOWED_BATTLE_FORMATS:
         raise ChampionsRulesIntegrityError("RULES_SNAPSHOT_INVALID:facts.battle_format")
 
-    selected_to_battle = _require_int(raw, "pokemon_selected_to_battle", container="facts")
-    if selected_to_battle <= 0:
-        raise ChampionsRulesIntegrityError(
-            "RULES_SNAPSHOT_INVALID:facts.pokemon_selected_to_battle"
-        )
-
     mega_raw = _require_dict(raw, "mega_evolution", container="facts")
     mega_extra = set(mega_raw.keys()) - _ALLOWED_MEGA_EVOLUTION_KEYS
     if mega_extra:
@@ -334,7 +324,6 @@ def _parse_facts(raw: dict[str, Any]) -> ChampionsRulesFacts:
 
     return ChampionsRulesFacts(
         battle_format=battle_format,
-        pokemon_selected_to_battle=selected_to_battle,
         mega_evolution=MegaEvolutionRule(
             allowed=mega_allowed,
             max_uses_per_battle=mega_max_uses,

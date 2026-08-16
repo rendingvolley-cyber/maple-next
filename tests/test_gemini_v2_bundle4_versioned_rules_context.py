@@ -101,7 +101,7 @@ def test_facts_digest_is_deterministic_across_reloads() -> None:
 
 def test_tampered_fact_value_fails_facts_hash_check() -> None:
     raw = _fresh_raw_snapshot()
-    raw["facts"]["pokemon_selected_to_battle"] = 4
+    raw["facts"]["duplicate_held_items_allowed"] = True
     with pytest.raises(ChampionsRulesIntegrityError, match="RULES_SNAPSHOT_FACTS_HASH_MISMATCH"):
         parse_and_validate_snapshot(raw, evidence_root=BUNDLED_RULESET_ROOT)
 
@@ -188,6 +188,44 @@ def test_unsupported_fact_key_is_rejected_not_silently_ignored() -> None:
         parse_and_validate_snapshot(raw, evidence_root=BUNDLED_RULESET_ROOT)
 
 
+def test_pokemon_selected_to_battle_is_not_an_authoritative_fact() -> None:
+    """R1 remediation: no first-party evidence directly binds a Pokemon-count
+
+    to Ranked Single Regulation M-B specifically (the only page that states
+    "3 Pokemon" is a different competition, "Monthly Challenge Series July
+    2026", and neither Source A nor Source B state a selection *count* for
+    M-B -- only a selection *time*). Bundle 4 must not assert an unproven
+    Champions rules-authority claim, so this key must be entirely absent
+    from the facts contract, not merely unused.
+    """
+
+    snapshot = load_bundled_snapshot()
+    facts_dict = snapshot.facts.to_canonical_dict()
+    assert "pokemon_selected_to_battle" not in facts_dict
+    assert "pokemon_selected_to_battle" not in snapshot.coverage.authoritative_categories
+    assert not hasattr(snapshot.facts, "pokemon_selected_to_battle")
+
+
+def test_reintroducing_pokemon_selected_to_battle_fact_key_fails_closed() -> None:
+    """The validator itself rejects the key, not just the checked-in file.
+
+    Defense in depth: even if a future edit reintroduced
+    ``pokemon_selected_to_battle`` into the on-disk snapshot, the parser
+    must fail closed rather than silently accepting an unsupported fact
+    key -- the same protection already proven for a fabricated mechanic in
+    ``test_unsupported_fact_key_is_rejected_not_silently_ignored``.
+    """
+
+    raw = _fresh_raw_snapshot()
+    raw["facts"]["pokemon_selected_to_battle"] = 3
+    facts_bytes = _canonical_bytes(raw["facts"])
+    raw["facts_content_sha256"] = hashlib.sha256(facts_bytes).hexdigest()
+    with pytest.raises(
+        ChampionsRulesIntegrityError, match="RULES_SNAPSHOT_UNSUPPORTED_FACT_KEYS"
+    ):
+        parse_and_validate_snapshot(raw, evidence_root=BUNDLED_RULESET_ROOT)
+
+
 def test_coverage_authoritative_categories_must_match_mandatory_set() -> None:
     raw = _fresh_raw_snapshot()
     raw["coverage"]["authoritative_categories"] = ["battle_format"]
@@ -236,7 +274,6 @@ def test_unsupported_mechanics_are_declared_absent_not_guessed() -> None:
 def test_official_fact_values_match_the_regulation_m_b_sources() -> None:
     facts = load_bundled_snapshot().facts
     assert facts.battle_format == "SINGLE"
-    assert facts.pokemon_selected_to_battle == 3
     assert facts.mega_evolution.allowed is True
     assert facts.mega_evolution.max_uses_per_battle == 1
     assert facts.mega_evolution.requires_mega_stone_for_eligible_pokemon is True
@@ -650,7 +687,6 @@ def test_historical_match_serializes_no_unsupported_mechanic(tmp_path: Path) -> 
         facts = canonical["rules_context"]["facts"]
         assert set(facts.keys()) == {
             "battle_format",
-            "pokemon_selected_to_battle",
             "mega_evolution",
             "duplicate_held_items_allowed",
             "timers",

@@ -3,7 +3,7 @@
   "ruleset_id": "pokemon-champions-ranked-single",
   "ruleset_version": "M-B",
   "scope": "ranked_single",
-  "snapshot_id": "54a5d56bf28f6c6aa5aea7094aff93c62823b30967331fa5896e3a5f36ea176b",
+  "snapshot_id": "c85e0563e5b2110d510fd6dbb1b9052a5263226a3d1ffe619d63540231e111f0",
   "effective_period": {
     "season_id": "M-5",
     "season_period": {
@@ -43,7 +43,6 @@
   ],
   "facts": {
     "battle_format": "SINGLE",
-    "pokemon_selected_to_battle": 3,
     "mega_evolution": {
       "allowed": true,
       "max_uses_per_battle": 1,
@@ -60,7 +59,6 @@
   "coverage": {
     "authoritative_categories": [
       "battle_format",
-      "pokemon_selected_to_battle",
       "mega_evolution_availability",
       "mega_evolution_use_limit",
       "duplicate_held_items",
@@ -79,5 +77,5 @@
       "damage_formula"
     ]
   },
-  "facts_content_sha256": "04ea467eeea9357a0f09db3bd58a5e5630ea43939dbee9ed3acc5ecd398d7d37"
+  "facts_content_sha256": "975a3773d724edc0d3ec10f0f7dcd10b58895d62847945db31b682e81b561bf7"
 }

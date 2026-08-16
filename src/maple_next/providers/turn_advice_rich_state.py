@@ -39,6 +39,13 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
+from maple_next.domain.battle_memory import (
+    BattleMemory,
+    Bundle3TurnContext,
+    SelectedBuildMember,
+    battle_memory_to_canonical_list,
+    selected_build_member_to_canonical_dict,
+)
 from maple_next.domain.enums import ActionType
 from maple_next.domain.legal_switches import LegalSwitchConfirmation
 from maple_next.domain.turn_state import (
@@ -68,7 +75,14 @@ from maple_next.providers.turn_request import (
 #: from the projection contract version
 #: (``RICH_STATE_PROJECTION_CONTRACT_VERSION``, ``maple-turn-advice-rich-
 #: state.v1``) that it embeds.
-RICH_STATE_REQUEST_CONTRACT_VERSION = "maple-turn-advice.v3"
+#:
+#: Bundle 3 (Gemini V2) raised this from ``.v3`` to ``.v4``: every ``.v3``
+#: field is preserved verbatim, and ``applied_selection_id``,
+#: ``reviewed_selection_id``, ``selected_three_builds``, and
+#: ``battle_memory`` were added. All four participate in canonical
+#: serialization, request bytes, ``request_hash``, and deterministic
+#: rebuild.
+RICH_STATE_REQUEST_CONTRACT_VERSION = "maple-turn-advice.v4"
 
 #: Fixed job type, matching the legacy Turn Advice job lane exactly. Rich
 #: requests are dispatched through the same ``TURN_ADVICE`` job type as the
@@ -188,6 +202,16 @@ class RichStateTurnAdviceRequest:
     state_confirmation: ConfirmationMeta
     evidence: FixedEvidenceMetadata | None
     self_team_build_sha256: str | None
+    #: Bundle 3 (Gemini V2). The exact applied bring and the exact reviewed
+    #: SelectionFacts the build context below was proven against, so a
+    #: request can never be silently re-bound to a different selection.
+    applied_selection_id: str
+    reviewed_selection_id: str
+    #: Exactly three entries, in applied ``selected_three`` order. Never the
+    #: party six, never a recommendation, never Opponent INTEL.
+    selected_three_builds: tuple[SelectedBuildMember, ...]
+    #: Completed prior Turns 1..N-1 only -- human-confirmed/reviewed facts.
+    battle_memory: BattleMemory
     request_hash: str
 
 
@@ -259,6 +283,18 @@ def canonical_rich_request_dict(request: RichStateTurnAdviceRequest) -> dict[str
             else None
         ),
         "self_team_build_sha256": request.self_team_build_sha256,
+        # Bundle 3. ``selected_three_builds`` keeps applied ``selected_three``
+        # order (deterministic, and the order the operator actually brought);
+        # ``battle_memory`` keeps strict chronological Turn order. Neither is
+        # re-sorted here, so both are stable across restarts and independent
+        # of database insertion order.
+        "applied_selection_id": request.applied_selection_id,
+        "reviewed_selection_id": request.reviewed_selection_id,
+        "selected_three_builds": [
+            selected_build_member_to_canonical_dict(member)
+            for member in request.selected_three_builds
+        ],
+        "battle_memory": battle_memory_to_canonical_list(request.battle_memory),
     }
     return payload
 
@@ -304,6 +340,7 @@ def build_rich_state_turn_advice_request(
     legal_switch_confirmation: LegalSwitchConfirmation | None,
     selected_three: tuple[str, str, str],
     self_active: str,
+    bundle3_context: Bundle3TurnContext,
     evidence: FixedEvidenceMetadata | None = None,
     self_team_build_sha256: str | None = None,
     confirmed_fainted_members: frozenset[str] = frozenset(),
@@ -319,6 +356,15 @@ def build_rich_state_turn_advice_request(
     ``application.service.BattleApplication.request_rich_turn_advice``'s
     responsibility. Calling this function alone never creates a job and
     never reserves an attempt.
+
+    ``bundle3_context`` is required, never defaulted: it is produced by the
+    one shared application helper
+    (``application.turn_provider_export_bridge.load_bundle3_turn_context``),
+    which has already proven the applied -> advice -> job -> reviewed
+    ``SelectionFacts`` binding and the completed-prior-Turn memory against
+    durable state. The Bundle 3 checks below run *after* the existing
+    Bundle 1/2 provider-ready gate, as part of rich request construction --
+    the older gate is left exactly as it is.
     """
 
     gate = evaluate_provider_ready_gate(
@@ -343,6 +389,26 @@ def build_rich_state_turn_advice_request(
     # The gate above already required a non-None, current-binding
     # confirmation to reach this point.
     assert legal_switch_confirmation is not None
+
+    # --- Bundle 3 context validation, after the existing gate --------------
+    # Provider-boundary defense in depth: the shared application helper has
+    # already proven this context against durable state, but a request must
+    # never be assembled from a context bound to a different bring, a
+    # different match, or a not-yet-completed Turn.
+    context_names = tuple(
+        member.pokemon_name for member in bundle3_context.selected_three_builds
+    )
+    if context_names != selected_three:
+        raise RichStateRequestError("SELECTED_THREE_BUILDS_NOT_BOUND_TO_APPLIED_SELECTION")
+    for memory_turn in bundle3_context.battle_memory.turns:
+        if (
+            memory_turn.identity.session_id != current_identity.session_id
+            or memory_turn.identity.match_id != current_identity.match_id
+            or memory_turn.identity.generation != current_identity.generation
+        ):
+            raise RichStateRequestError("BATTLE_MEMORY_FOREIGN_IDENTITY")
+        if memory_turn.identity.turn_number >= current_identity.turn_number:
+            raise RichStateRequestError("BATTLE_MEMORY_CURRENT_OR_FUTURE_TURN")
 
     projection = build_rich_state_projection(
         confirmed_state, confirmed_legal_actions, evidence=evidence
@@ -379,6 +445,10 @@ def build_rich_state_turn_advice_request(
         state_confirmation=confirmed_state.confirmation,
         evidence=evidence,
         self_team_build_sha256=self_team_build_sha256,
+        applied_selection_id=bundle3_context.applied_selection_id,
+        reviewed_selection_id=bundle3_context.reviewed_selection_id,
+        selected_three_builds=bundle3_context.selected_three_builds,
+        battle_memory=bundle3_context.battle_memory,
         request_hash="",
     )
     return replace(request, request_hash=rich_request_payload_hash(request))

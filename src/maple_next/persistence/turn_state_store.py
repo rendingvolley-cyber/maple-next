@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from maple_next.domain.battle_memory import RichActionCompletionFacts
 from maple_next.domain.enums import ActionOrder, ActionType, HpBucket
 from maple_next.domain.turn_state import (
     ActionResultDelta,
@@ -831,6 +832,64 @@ class TurnStateStoreMixin(StoreBase):
             "action_order": ActionOrder(str(row["action_order"])),
             "delta_id": str(row["delta_id"]),
         }
+
+    def list_rich_action_completion_candidates_for_confirmed_states(
+        self, confirmed_state_ids: tuple[str, ...]
+    ) -> tuple[RichActionCompletionFacts, ...]:
+        """Every completion claiming to be based on any of ``confirmed_state_ids``.
+
+        Bundle 3 read model, mirroring
+        :meth:`list_action_result_delta_candidates_for_confirmed_states`
+        exactly: keyed *only* on ``based_on_confirmed_state_id``, never
+        pre-filtered by the row's own ``session_id``/``match_id``/
+        ``generation``/``turn_id``/``turn_number``/``battle_revision``,
+        because those columns are themselves what
+        :func:`maple_next.domain.battle_memory.build_battle_memory`
+        validates. Silently dropping a corrupt or foreign row here would
+        hide the exact integrity problem that gate exists to catch.
+
+        The existing untyped :meth:`get_rich_action_completion_by_turn`
+        getter is left unchanged; this method is additive.
+        """
+
+        if not confirmed_state_ids:
+            return ()
+        placeholders = ",".join("?" for _ in confirmed_state_ids)
+        rows = self.connection.execute(
+            f"""
+            SELECT * FROM rich_action_completions
+            WHERE based_on_confirmed_state_id IN ({placeholders})
+            ORDER BY turn_number ASC, battle_revision ASC, rowid ASC
+            """,
+            confirmed_state_ids,
+        ).fetchall()
+        return tuple(self._rich_action_completion_facts_from_row(row) for row in rows)
+
+    @classmethod
+    def _rich_action_completion_facts_from_row(
+        cls, row: sqlite3.Row
+    ) -> RichActionCompletionFacts:
+        opponent_action_type, opponent_action_name = cls._decode_opponent_action(
+            row["opponent_action_type"], row["opponent_action_name"]
+        )
+        return RichActionCompletionFacts(
+            transaction_id=str(row["transaction_id"]),
+            identity=TurnIdentity(
+                session_id=str(row["session_id"]),
+                match_id=str(row["match_id"]),
+                generation=int(row["generation"]),
+                turn_id=str(row["turn_id"]),
+                turn_number=int(row["turn_number"]),
+                battle_revision=int(row["battle_revision"]),
+            ),
+            based_on_confirmed_state_id=str(row["based_on_confirmed_state_id"]),
+            own_action_type=ActionType(str(row["own_action_type"])),
+            own_action_name=str(row["own_action_name"]),
+            opponent_action_type=opponent_action_type,
+            opponent_action_name=opponent_action_name,
+            action_order=ActionOrder(str(row["action_order"])),
+            delta_id=str(row["delta_id"]),
+        )
 
     # --- Pokemon-local match memory (event-entry UI v3, upsert) -------------
 

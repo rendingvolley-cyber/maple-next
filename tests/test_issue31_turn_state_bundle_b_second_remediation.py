@@ -57,6 +57,7 @@ from maple_next.domain.turn_state import (
 )
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.workers.contracts.models import ResultEnvelope
+from tests.fixtures.bundle3 import seed_selection_advice_binding
 
 _HUMAN = (ProvenanceStep.HUMAN_INPUT,)
 CONFIRMED_AT = "2026-08-06T00:00:00+00:00"
@@ -164,6 +165,21 @@ class RichSessionFixture:
                 backline=("Gholdengo", "Urshifu"),
                 source_advice_id="advice-1",
             ),
+        )
+        # Bundle 3: the durable Selection Advice job + advice rows the real
+        # apply-selection flow always produces, so the applied -> advice ->
+        # job -> reviewed-selection chain is complete. (Added with LF line
+        # endings, matching the repository convention; this file is one of
+        # only two historically committed with CRLF.)
+        seed_selection_advice_binding(
+            self.repository,
+            session_id=self.session_id,
+            match_id=self.match_id,
+            generation=self.generation,
+            reviewed_selection_id="selection-1",
+            advice_id="advice-1",
+            selected_three=("Dondozo", "Gholdengo", "Urshifu"),
+            lead="Dondozo",
         )
         self.repository.connection.commit()
 

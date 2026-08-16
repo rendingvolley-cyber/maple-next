@@ -66,6 +66,10 @@ from maple_next.providers.turn_advice_rich_state import (
 )
 from maple_next.providers.turn_response import TurnAdviceSchemaError, turn_advice_body_from_dict
 from maple_next.workers.contracts.models import JobEnvelope, JobType
+from tests.fixtures.bundle3 import (
+    names_only_bundle3_context,
+    seed_selection_advice_binding,
+)
 from tests.fixtures.turn_advice import build_sample_request
 
 _HUMAN = (ProvenanceStep.HUMAN_INPUT,)
@@ -148,6 +152,19 @@ class RichSessionFixture:
                 backline=("Gholdengo", "Urshifu"),
                 source_advice_id="advice-1",
             ),
+        )
+        # Bundle 3: the durable Selection Advice job + advice rows the real
+        # apply-selection flow always produces, so the applied -> advice ->
+        # job -> reviewed-selection chain is complete.
+        seed_selection_advice_binding(
+            self.repository,
+            session_id=self.session_id,
+            match_id=self.match_id,
+            generation=self.generation,
+            reviewed_selection_id="selection-1",
+            advice_id="advice-1",
+            selected_three=("Dondozo", "Gholdengo", "Urshifu"),
+            lead="Dondozo",
         )
         self.repository.connection.commit()
 
@@ -409,6 +426,9 @@ def test_rich_request_contains_required_fields(rich_fixture: RichSessionFixture)
         ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
+        bundle3_context=names_only_bundle3_context(
+            selected_three=("Dondozo", "Gholdengo", "Urshifu")
+        ),
     )
     assert request.contract_version == RICH_STATE_REQUEST_CONTRACT_VERSION
     assert request.prompt_version == legacy_turn_request.TURN_PROMPT_VERSION
@@ -462,6 +482,9 @@ def test_rich_prompt_requires_japanese_only_for_human_facing_text(
         ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
+        bundle3_context=names_only_bundle3_context(
+            selected_three=("Dondozo", "Gholdengo", "Urshifu")
+        ),
     )
     canonical_before = canonical_rich_request_dict(request)
     request_hash_before = request.request_hash
@@ -501,6 +524,9 @@ def test_rich_japanese_instruction_preserves_strict_response_schema(
         ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
+        bundle3_context=names_only_bundle3_context(
+            selected_three=("Dondozo", "Gholdengo", "Urshifu")
+        ),
     )
 
     body = build_rich_provider_request_body(request)
@@ -791,6 +817,9 @@ def _build_request_for_state(
         ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
+        bundle3_context=names_only_bundle3_context(
+            selected_three=("Dondozo", "Gholdengo", "Urshifu")
+        ),
     )
     return request.request_hash
 
@@ -847,6 +876,9 @@ def test_hash_changes_with_evidence(tmp_path) -> None:
         ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
+        bundle3_context=names_only_bundle3_context(
+            selected_three=("Dondozo", "Gholdengo", "Urshifu")
+        ),
         evidence=evidence_a,
     )
 
@@ -865,6 +897,9 @@ def test_hash_changes_with_evidence(tmp_path) -> None:
         ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
+        bundle3_context=names_only_bundle3_context(
+            selected_three=("Dondozo", "Gholdengo", "Urshifu")
+        ),
         evidence=None,
     )
     assert request_a.request_hash != request_b.request_hash
@@ -886,6 +921,9 @@ def test_hash_changes_with_selected_three(tmp_path) -> None:
         ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
+        bundle3_context=names_only_bundle3_context(
+            selected_three=("Dondozo", "Gholdengo", "Urshifu")
+        ),
     )
     request_b = build_rich_state_turn_advice_request(
         confirmed_state=state,
@@ -899,6 +937,9 @@ def test_hash_changes_with_selected_three(tmp_path) -> None:
         ),
         selected_three=("Dondozo", "Gholdengo", "Hatterene"),
         self_active="Dondozo",
+        bundle3_context=names_only_bundle3_context(
+            selected_three=("Dondozo", "Gholdengo", "Hatterene")
+        ),
     )
     assert request_a.request_hash != request_b.request_hash
 
@@ -919,6 +960,9 @@ def test_hash_changes_with_self_team_build_sha256(tmp_path) -> None:
         ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
+        bundle3_context=names_only_bundle3_context(
+            selected_three=("Dondozo", "Gholdengo", "Urshifu")
+        ),
         self_team_build_sha256="b" * 64,
     )
     request_b = build_rich_state_turn_advice_request(
@@ -933,6 +977,9 @@ def test_hash_changes_with_self_team_build_sha256(tmp_path) -> None:
         ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
         self_active="Dondozo",
+        bundle3_context=names_only_bundle3_context(
+            selected_three=("Dondozo", "Gholdengo", "Urshifu")
+        ),
         self_team_build_sha256=None,
     )
     assert request_a.request_hash != request_b.request_hash

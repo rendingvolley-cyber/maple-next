@@ -10,6 +10,8 @@ from uuid import uuid4
 
 from maple_next.application.projection import DomainProjection, project
 from maple_next.application.turn_legal_action_boundary import build_confirmed_legal_actions_input
+from maple_next.application.turn_provider_export_bridge import load_bundle3_turn_context
+from maple_next.domain.battle_memory import Bundle3ContextError
 from maple_next.domain.enums import (
     ActionOrder,
     ActionType,
@@ -903,6 +905,20 @@ class BattleApplication:
                 applied_selection_id=applied.applied_selection_id,
             )
 
+            # Bundle 3 (Gemini V2): confirmed prior battle memory + canonical
+            # selected-three build context, loaded and validated by the one
+            # shared helper that the offline rebuild path below also uses.
+            try:
+                bundle3_context = load_bundle3_turn_context(
+                    self.repository,
+                    session=session,
+                    current_identity=current_identity,
+                    current_confirmed_state=latest_state,
+                    applied=applied,
+                )
+            except Bundle3ContextError as exc:
+                raise DomainError(f"BUNDLE3_CONTEXT_INVALID:{exc}") from exc
+
             try:
                 request = build_rich_state_turn_advice_request(
                     confirmed_state=latest_state,
@@ -914,6 +930,7 @@ class BattleApplication:
                     legal_switch_confirmation=legal_switch_confirmation,
                     selected_three=applied.selected_three,
                     self_active=self_active_known.value,
+                    bundle3_context=bundle3_context,
                     evidence=evidence,
                     self_team_build_sha256=self_team_build_sha256,
                     confirmed_fainted_members=self._confirmed_fainted_members(
@@ -1148,6 +1165,22 @@ class BattleApplication:
             applied_selection_id=applied.applied_selection_id,
         )
 
+        # Bundle 3 (Gemini V2): rebuilt through the exact same shared helper
+        # the authorizing path used, so identical durable state always
+        # reproduces identical request bytes -- and a selection rebind or a
+        # changed/corrupt history fails closed here instead of silently
+        # rebuilding something else.
+        try:
+            bundle3_context = load_bundle3_turn_context(
+                self.repository,
+                session=session,
+                current_identity=current_identity,
+                current_confirmed_state=confirmed_state,
+                applied=applied,
+            )
+        except Bundle3ContextError as exc:
+            raise DomainError(f"REBUILD_BUNDLE3_CONTEXT_INVALID:{exc}") from exc
+
         try:
             request = build_rich_state_turn_advice_request(
                 confirmed_state=confirmed_state,
@@ -1159,6 +1192,7 @@ class BattleApplication:
                 legal_switch_confirmation=legal_switch_confirmation,
                 selected_three=applied.selected_three,
                 self_active=self_active_known.value,
+                bundle3_context=bundle3_context,
                 evidence=evidence,
                 self_team_build_sha256=self_team_build_sha256,
                 confirmed_fainted_members=self._confirmed_fainted_members(

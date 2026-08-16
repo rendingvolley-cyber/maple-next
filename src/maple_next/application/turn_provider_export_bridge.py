@@ -18,6 +18,16 @@ itself from the repository inside one transaction, then calling
 :func:`build_pure_rich_state_request_from_loaded_state` below with those
 loaded values.
 
+Bundle 3 (Gemini V2) adds one **read-only** loader to this module,
+:func:`load_bundle3_turn_context`. It is the single shared place where the
+confirmed prior battle memory and the canonical selected-three build
+context are loaded from durable state and validated, and it is called
+identically by initial rich request creation and by offline rebuild/export
+verification so those two paths cannot drift apart. It reads; it never
+writes, never sends, and never authorizes anything. The pure builder below
+remains pure -- it receives the already-validated
+:class:`~maple_next.domain.battle_memory.Bundle3TurnContext` as a value.
+
 Callers of this module remain responsible for:
 
 - loading the latest ``ConfirmedTurnState`` and latest ``NextTurnStateDraft``
@@ -33,7 +43,18 @@ Callers of this module remain responsible for:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+from maple_next.domain.battle_memory import (
+    Bundle3ContextError,
+    Bundle3TurnContext,
+    SelectedBuildContextError,
+    build_battle_memory,
+    project_selected_three_builds,
+)
+from maple_next.domain.enums import JobType
 from maple_next.domain.legal_switches import LegalSwitchConfirmation
+from maple_next.domain.models import AppliedSelectionSnapshot, BattleSession
 from maple_next.domain.turn_state import (
     ConfirmedLegalActionSelection,
     ConfirmedTurnState,
@@ -46,6 +67,117 @@ from maple_next.providers.turn_advice_rich_state import (
     build_rich_state_turn_advice_request,
 )
 
+if TYPE_CHECKING:  # pragma: no cover - import cycle / typing only
+    from maple_next.persistence.sqlite import SQLiteRepository
+
+
+def load_bundle3_turn_context(
+    repository: SQLiteRepository,
+    *,
+    session: BattleSession,
+    current_identity: TurnIdentity,
+    current_confirmed_state: ConfirmedTurnState,
+    applied: AppliedSelectionSnapshot,
+) -> Bundle3TurnContext:
+    """The one shared Bundle 3 loader/validator. Read-only, fails closed.
+
+    Used identically by (1) initial rich request creation
+    (``BattleApplication.request_rich_turn_advice``) and (2) offline rebuild
+    / export verification
+    (``BattleApplication.build_rich_turn_advice_transport_request``), so a
+    single set of business rules governs both and the rebuilt request bytes
+    can never diverge from the authorized ones.
+
+    Authoritative sources, all pre-existing -- no parallel store is
+    introduced and no schema migration is required:
+
+    - actual bring: ``BattleSession.current_applied_selection_id`` ->
+      ``applied_selections`` -> :class:`AppliedSelectionSnapshot`;
+    - applied/reviewed binding: that snapshot's ``source_advice_id`` ->
+      ``selection_advices`` -> its Selection Advice ``async_jobs`` row ->
+      ``job.input_snapshot_id`` -> ``BattleSession.
+      current_reviewed_selection_id`` -> the exact reviewed
+      :class:`~maple_next.domain.models.SelectionFacts`;
+    - canonical build: ``SelectionFacts.self_team_build`` plus its existing
+      SHA-256;
+    - completed-turn truth: ``rich_action_completions`` plus each row's
+      linked reviewed ``action_result_deltas`` row, anchored on the
+      ``confirmed_turn_states`` chain.
+
+    Raises :class:`Bundle3ContextError` (or one of its subclasses) on any
+    broken link. It never writes, never sends, and never reserves anything.
+    """
+
+    reviewed_selection_id = session.current_reviewed_selection_id
+    if reviewed_selection_id is None:
+        raise Bundle3ContextError("REVIEWED_SELECTION_REQUIRED")
+
+    try:
+        advice = repository.get_selection_advice(applied.source_advice_id)
+    except KeyError as exc:
+        raise Bundle3ContextError("APPLIED_SELECTION_SOURCE_ADVICE_NOT_FOUND") from exc
+    if str(advice["session_id"]) != session.session_id:
+        raise Bundle3ContextError("SOURCE_ADVICE_FOREIGN_SESSION")
+
+    try:
+        advice_job = repository.get_job(str(advice["job_id"]))
+    except KeyError as exc:
+        raise Bundle3ContextError("SOURCE_ADVICE_JOB_NOT_FOUND") from exc
+    if advice_job.job_type is not JobType.SELECTION_ADVICE:
+        raise Bundle3ContextError("SOURCE_ADVICE_JOB_TYPE_MISMATCH")
+    if (
+        advice_job.session_id != session.session_id
+        or advice_job.match_id != session.match_id
+        or advice_job.generation != session.generation
+    ):
+        raise Bundle3ContextError("SOURCE_ADVICE_JOB_FOREIGN_MATCH")
+    if advice_job.input_snapshot_id != reviewed_selection_id:
+        raise Bundle3ContextError("SOURCE_ADVICE_JOB_NOT_BOUND_TO_REVIEWED_SELECTION")
+
+    try:
+        facts = repository.get_selection_facts(reviewed_selection_id)
+    except KeyError as exc:
+        raise Bundle3ContextError("REVIEWED_SELECTION_FACTS_NOT_FOUND") from exc
+    if facts.reviewed_selection_id != reviewed_selection_id:
+        raise Bundle3ContextError("REVIEWED_SELECTION_FACTS_IDENTITY_MISMATCH")
+
+    if any(name not in facts.self_team for name in applied.selected_three):
+        raise SelectedBuildContextError("APPLIED_SELECTION_OUTSIDE_REVIEWED_SELF_TEAM")
+    selected_three_builds = project_selected_three_builds(
+        selected_three=applied.selected_three,
+        reviewed_self_team=facts.self_team,
+        reviewed_self_team_build=facts.self_team_build,
+        reviewed_self_team_build_sha256=facts.self_team_build_sha256,
+    )
+
+    match_states = repository.list_confirmed_turn_states_for_match(
+        session_id=current_identity.session_id,
+        match_id=current_identity.match_id,
+        generation=current_identity.generation,
+    )
+    confirmed_state_ids = tuple(state.confirmed_state_id for state in match_states)
+    completion_candidates = (
+        repository.list_rich_action_completion_candidates_for_confirmed_states(
+            confirmed_state_ids
+        )
+    )
+    delta_candidates = repository.list_action_result_delta_candidates_for_confirmed_states(
+        confirmed_state_ids
+    )
+    memory = build_battle_memory(
+        current_identity=current_identity,
+        current_confirmed_state=current_confirmed_state,
+        match_confirmed_states=match_states,
+        completion_candidates=completion_candidates,
+        delta_candidates=delta_candidates,
+    )
+    return Bundle3TurnContext(
+        applied_selection_id=applied.applied_selection_id,
+        reviewed_selection_id=reviewed_selection_id,
+        selected_three_builds=selected_three_builds,
+        battle_memory=memory,
+    )
+
 
 def build_pure_rich_state_request_from_loaded_state(
     *,
@@ -56,6 +188,7 @@ def build_pure_rich_state_request_from_loaded_state(
     legal_switch_confirmation: LegalSwitchConfirmation | None,
     selected_three: tuple[str, str, str],
     self_active: str,
+    bundle3_context: Bundle3TurnContext,
     evidence: FixedEvidenceMetadata | None = None,
     self_team_build_sha256: str | None = None,
     confirmed_fainted_members: frozenset[str] = frozenset(),
@@ -91,6 +224,7 @@ def build_pure_rich_state_request_from_loaded_state(
         legal_switch_confirmation=legal_switch_confirmation,
         selected_three=selected_three,
         self_active=self_active,
+        bundle3_context=bundle3_context,
         evidence=evidence,
         self_team_build_sha256=self_team_build_sha256,
         confirmed_fainted_members=confirmed_fainted_members,

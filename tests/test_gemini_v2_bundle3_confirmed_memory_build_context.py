@@ -30,6 +30,7 @@ from maple_next.application.service import DomainError
 from maple_next.application.turn_provider_export_bridge import (
     build_pure_rich_state_request_from_loaded_state,
     load_bundle3_turn_context,
+    load_champions_rules_context,
 )
 from maple_next.domain.battle_memory import (
     BattleMemory,
@@ -40,6 +41,9 @@ from maple_next.domain.battle_memory import (
     SelectedBuildStatus,
     build_battle_memory,
     project_selected_three_builds,
+)
+from maple_next.domain.champions_rules import (
+    current_rules_pin_for_new_match,
 )
 from maple_next.domain.enums import ActionOrder, ActionType, BattleState, HpBucket
 from maple_next.domain.legal_switches import LegalSwitchConfirmation, LegalSwitchStatus
@@ -267,6 +271,7 @@ class Bundle3Fixture:
         detailed_build: bool = True,
         completion_order: tuple[int, ...] = (1, 2, 3, 4, 5, 6),
         db_name: str = "bundle3.db",
+        pin_rules: bool = True,
     ) -> None:
         self.db_path = tmp_path / db_name
         self.repository = SQLiteRepository(self.db_path)
@@ -279,6 +284,14 @@ class Bundle3Fixture:
         self.advice_id = "advice-b3"
         self.advice_job_id = "job-advice-b3"
 
+        # Bundle 4 (Gemini V2): a real match pin, exactly what
+        # ``BattleApplication.new_match`` would have written -- this
+        # historical fixture predates Bundle 4, but its session must still
+        # be provider-ready under the Bundle 4 fail-closed gate. Some
+        # Bundle 4 tests deliberately pass ``pin_rules=False`` to prove an
+        # unpinned match fails closed instead of silently binding to the
+        # latest rules.
+        rules_pin = current_rules_pin_for_new_match() if pin_rules else None
         session = BattleSession(
             session_id=self.session_id,
             match_id=self.match_id,
@@ -288,6 +301,10 @@ class Bundle3Fixture:
             current_reviewed_selection_id=self.reviewed_selection_id,
             current_applied_selection_id=self.applied_selection_id,
             current_turn_id=self.turn_id(CURRENT_TURN_NUMBER),
+            rules_ruleset_id=rules_pin.ruleset_id if rules_pin else None,
+            rules_ruleset_version=rules_pin.ruleset_version if rules_pin else None,
+            rules_snapshot_id=rules_pin.rules_snapshot_id if rules_pin else None,
+            rules_facts_sha256=rules_pin.rules_facts_sha256 if rules_pin else None,
         )
         self.repository.insert_session(session)
 
@@ -463,6 +480,11 @@ class Bundle3Fixture:
             applied=applied,
         )
 
+    def rules_context(self) -> dict[str, object]:
+        session = self.repository.load_active_session()
+        assert session is not None
+        return load_champions_rules_context(session)
+
     def build_request(self) -> RichStateTurnAdviceRequest:
         identity = self.identity(CURRENT_TURN_NUMBER)
         state = self.repository.get_confirmed_turn_state(
@@ -484,6 +506,7 @@ class Bundle3Fixture:
             selected_three=SELECTED_THREE,
             self_active=SELF_ACTIVE_BY_TURN[CURRENT_TURN_NUMBER],
             bundle3_context=self.bundle3_context(),
+            rules_context=self.rules_context(),
             self_team_build_sha256=facts.self_team_build_sha256,
         )
 
@@ -505,9 +528,13 @@ def names_only_fixture(tmp_path: Path) -> Bundle3Fixture:
 
 
 def test_request_contract_is_v4_with_all_four_new_fields(fixture: Bundle3Fixture) -> None:
+    """The Bundle 3 fields below survive verbatim even though Bundle 4 has
+    since raised the contract to ``.v5`` (see
+    ``test_gemini_v2_bundle4_versioned_rules_context.py``)."""
+
     request = fixture.build_request()
-    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v4"
-    assert request.contract_version == "maple-turn-advice.v4"
+    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v5"
+    assert request.contract_version == "maple-turn-advice.v5"
     canonical = canonical_rich_request_dict(request)
     for field in (
         "applied_selection_id",

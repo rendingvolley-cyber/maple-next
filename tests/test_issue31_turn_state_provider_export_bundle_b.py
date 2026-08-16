@@ -62,7 +62,7 @@ from maple_next.providers.turn_boundary import (
     DispatchTrigger,
     decide_turn_advice_dispatch,
 )
-from tests.fixtures.bundle3 import names_only_bundle3_context
+from tests.fixtures.bundle3 import default_rules_context, names_only_bundle3_context
 
 _HUMAN = (ProvenanceStep.HUMAN_INPUT,)
 CONFIRMED_AT = "2026-08-06T00:00:00+00:00"
@@ -452,6 +452,7 @@ def test_bridge_builds_request_from_loaded_state() -> None:
         bundle3_context=names_only_bundle3_context(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
+        rules_context=default_rules_context(),
     )
     assert request.contract_version == RICH_STATE_REQUEST_CONTRACT_VERSION
     assert len(request.request_hash) == 64
@@ -544,6 +545,7 @@ def test_bridge_fails_closed_on_newer_open_draft() -> None:
             bundle3_context=names_only_bundle3_context(
                 selected_three=("Dondozo", "Gholdengo", "Urshifu")
             ),
+            rules_context=default_rules_context(),
         )
 
 

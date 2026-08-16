@@ -1,0 +1,83 @@
+{
+  "schema_version": "maple-champions-rules-snapshot.v1",
+  "ruleset_id": "pokemon-champions-ranked-single",
+  "ruleset_version": "M-B",
+  "scope": "ranked_single",
+  "snapshot_id": "54a5d56bf28f6c6aa5aea7094aff93c62823b30967331fa5896e3a5f36ea176b",
+  "effective_period": {
+    "season_id": "M-5",
+    "season_period": {
+      "start_date_jst": "2026-08-05",
+      "end_datetime_jst": "2026-09-09T10:59:00+09:00"
+    },
+    "regulation_usage_period": {
+      "start_date_jst": "2026-06-17",
+      "end_datetime_jst": "2026-09-09T10:59:00+09:00"
+    }
+  },
+  "sources": [
+    {
+      "publisher": "The Pokemon Company (news.pokemon-home.com)",
+      "url": "https://news.pokemon-home.com/ja/page/803.html",
+      "retrieved_at_utc": "2026-08-16T04:34:15Z",
+      "archived_content_sha256": "bac4f2e73b5d0ceb9d9e5fbe43368e5af8901aae30d75b4d5debd7cfa6439bb1",
+      "archived_evidence_relative_path": "evidence/source_a_ranked_season_m5.html",
+      "source_role": "ranked_season_announcement"
+    },
+    {
+      "publisher": "The Pokemon Company (news.pokemon-home.com)",
+      "url": "https://news.pokemon-home.com/ja/page/776.html",
+      "retrieved_at_utc": "2026-08-16T04:34:15Z",
+      "archived_content_sha256": "428e11b35e2bb0578f9f8d00f8ea1d7c0b72d297b508c45524c4ae631bb2e4dd",
+      "archived_evidence_relative_path": "evidence/source_b_regulation_m-b.html",
+      "source_role": "regulation_notice"
+    },
+    {
+      "publisher": "Pokemon Champions (web-view.app.pokemonchampions.jp)",
+      "url": "https://web-view.app.pokemonchampions.jp/battle/pages/events/ic178290276185tpuhen/en/event.html",
+      "retrieved_at_utc": "2026-08-16T04:34:15Z",
+      "archived_content_sha256": "c08f7c6c201e2e26994d6b23e56283dd42f30924afe497374d5f00183bdf9647",
+      "archived_evidence_relative_path": "evidence/source_c_champions_single_battle_event.html",
+      "source_role": "in_game_event_rules_corroboration"
+    }
+  ],
+  "facts": {
+    "battle_format": "SINGLE",
+    "pokemon_selected_to_battle": 3,
+    "mega_evolution": {
+      "allowed": true,
+      "max_uses_per_battle": 1,
+      "requires_mega_stone_for_eligible_pokemon": true
+    },
+    "duplicate_held_items_allowed": false,
+    "timers": {
+      "total_time_seconds": 1200,
+      "player_time_seconds": 420,
+      "turn_selection_seconds": 45,
+      "pokemon_selection_seconds": 90
+    }
+  },
+  "coverage": {
+    "authoritative_categories": [
+      "battle_format",
+      "pokemon_selected_to_battle",
+      "mega_evolution_availability",
+      "mega_evolution_use_limit",
+      "duplicate_held_items",
+      "timers"
+    ],
+    "intentionally_not_asserted": [
+      "switching_mechanics",
+      "faint_replacement_flow",
+      "stat_stage_mechanics",
+      "status_mechanics",
+      "weather_mechanics",
+      "terrain_mechanics",
+      "turn_order_mechanics",
+      "type_chart",
+      "move_effects",
+      "damage_formula"
+    ]
+  },
+  "facts_content_sha256": "04ea467eeea9357a0f09db3bd58a5e5630ea43939dbee9ed3acc5ecd398d7d37"
+}

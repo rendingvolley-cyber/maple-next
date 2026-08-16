@@ -351,6 +351,15 @@ class BattleSession:
     current_reviewed_board_id: str | None = None
     current_turn_advice_id: str | None = None
     active_slot: int | None = 1
+    #: Bundle 4 (Gemini V2): the immutable official Champions rules snapshot
+    #: pinned to this match at creation time. All four are set together (or
+    #: all left ``None`` for a legacy/pre-Bundle-4 match) -- never
+    #: individually, and never updated after ``insert_session``. See
+    #: ``domain/champions_rules.py`` for the pin/resolve contract.
+    rules_ruleset_id: str | None = None
+    rules_ruleset_version: str | None = None
+    rules_snapshot_id: str | None = None
+    rules_facts_sha256: str | None = None
 
     def bump_battle(self) -> None:
         self.battle_revision += 1

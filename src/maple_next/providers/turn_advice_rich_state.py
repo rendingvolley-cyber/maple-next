@@ -46,6 +46,7 @@ from maple_next.domain.battle_memory import (
     battle_memory_to_canonical_list,
     selected_build_member_to_canonical_dict,
 )
+from maple_next.domain.champions_rules import RULES_CONTEXT_SCHEMA_VERSION
 from maple_next.domain.enums import ActionType
 from maple_next.domain.legal_switches import LegalSwitchConfirmation
 from maple_next.domain.turn_state import (
@@ -82,7 +83,34 @@ from maple_next.providers.turn_request import (
 #: ``battle_memory`` were added. All four participate in canonical
 #: serialization, request bytes, ``request_hash``, and deterministic
 #: rebuild.
-RICH_STATE_REQUEST_CONTRACT_VERSION = "maple-turn-advice.v4"
+#:
+#: Bundle 4 (Gemini V2) raises this from ``.v4`` to ``.v5``: every ``.v4``
+#: field is preserved verbatim, and exactly one top-level field,
+#: ``rules_context``, is added -- the compact, immutable official Champions
+#: rules snapshot pinned to this match (see
+#: ``domain/champions_rules.py``). It participates in canonical
+#: serialization, request bytes, ``request_hash``, and deterministic
+#: rebuild exactly like every other field: a rules version/content/hash
+#: change changes the request hash.
+RICH_STATE_REQUEST_CONTRACT_VERSION = "maple-turn-advice.v5"
+
+#: Top-level keys ``rules_context`` must carry. Defence in depth: the value
+#: is always actually produced by
+#: ``domain.champions_rules.build_rules_context``, but this request
+#: contract fails closed on a malformed/incomplete dict rather than trusting
+#: any caller-supplied shape.
+_REQUIRED_RULES_CONTEXT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "context_schema_version",
+        "ruleset_id",
+        "ruleset_version",
+        "snapshot_id",
+        "facts_content_sha256",
+        "scope",
+        "facts",
+        "sources",
+    }
+)
 
 #: Fixed job type, matching the legacy Turn Advice job lane exactly. Rich
 #: requests are dispatched through the same ``TURN_ADVICE`` job type as the
@@ -212,7 +240,20 @@ class RichStateTurnAdviceRequest:
     selected_three_builds: tuple[SelectedBuildMember, ...]
     #: Completed prior Turns 1..N-1 only -- human-confirmed/reviewed facts.
     battle_memory: BattleMemory
+    #: Bundle 4 (Gemini V2). The compact, immutable official Champions rules
+    #: snapshot pinned to this match (``domain.champions_rules.
+    #: build_rules_context``). Authoritative for Pokemon Champions-specific
+    #: battle rules within its declared coverage; never raw HTML, never a
+    #: live network fetch. Validated in ``__post_init__`` below.
+    rules_context: dict[str, Any]
     request_hash: str
+
+    def __post_init__(self) -> None:
+        missing = _REQUIRED_RULES_CONTEXT_KEYS - self.rules_context.keys()
+        if missing:
+            raise RichStateRequestError(f"RULES_CONTEXT_MISSING_KEYS:{sorted(missing)}")
+        if self.rules_context["context_schema_version"] != RULES_CONTEXT_SCHEMA_VERSION:
+            raise RichStateRequestError("RULES_CONTEXT_UNSUPPORTED_SCHEMA_VERSION")
 
 
 def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
@@ -295,6 +336,11 @@ def canonical_rich_request_dict(request: RichStateTurnAdviceRequest) -> dict[str
             for member in request.selected_three_builds
         ],
         "battle_memory": battle_memory_to_canonical_list(request.battle_memory),
+        # Bundle 4. The pinned official Champions rules snapshot, embedded
+        # verbatim (already a plain, JSON-primitive-only dict from
+        # ``domain.champions_rules.build_rules_context``) -- never raw
+        # HTML/source documents, never re-derived or re-fetched here.
+        "rules_context": request.rules_context,
     }
     return payload
 
@@ -341,6 +387,7 @@ def build_rich_state_turn_advice_request(
     selected_three: tuple[str, str, str],
     self_active: str,
     bundle3_context: Bundle3TurnContext,
+    rules_context: dict[str, Any],
     evidence: FixedEvidenceMetadata | None = None,
     self_team_build_sha256: str | None = None,
     confirmed_fainted_members: frozenset[str] = frozenset(),
@@ -365,6 +412,15 @@ def build_rich_state_turn_advice_request(
     durable state. The Bundle 3 checks below run *after* the existing
     Bundle 1/2 provider-ready gate, as part of rich request construction --
     the older gate is left exactly as it is.
+
+    ``rules_context`` is likewise required, never defaulted: it is produced
+    by the one shared application helper
+    (``application.turn_provider_export_bridge.load_champions_rules_context``),
+    which resolves the match's persisted rules pin against the immutable
+    checked-in snapshot and fails closed on any mismatch/corruption before
+    this function is ever called. This builder only re-validates the
+    dict's shape (:class:`RichStateTurnAdviceRequest`'s ``__post_init__``)
+    as defense in depth -- it never re-derives or re-fetches rules content.
     """
 
     gate = evaluate_provider_ready_gate(
@@ -449,6 +505,7 @@ def build_rich_state_turn_advice_request(
         reviewed_selection_id=bundle3_context.reviewed_selection_id,
         selected_three_builds=bundle3_context.selected_three_builds,
         battle_memory=bundle3_context.battle_memory,
+        rules_context=rules_context,
         request_hash="",
     )
     return replace(request, request_hash=rich_request_payload_hash(request))

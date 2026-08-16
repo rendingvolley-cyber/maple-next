@@ -27,6 +27,7 @@ import pytest
 from maple_next.application.match_export_v3 import MatchExportV3Error, parse_match_export_v3
 from maple_next.application.match_service import MatchApplication
 from maple_next.application.service import DomainError
+from maple_next.domain.champions_rules import current_rules_pin_for_new_match
 from maple_next.domain.enums import (
     ActionType,
     BattleState,
@@ -115,6 +116,7 @@ class RichSessionFixture:
         self.battle_revision = 3
         self.confirmed_state_id = "state-1"
 
+        rules_pin = current_rules_pin_for_new_match()
         session = BattleSession(
             session_id=self.session_id,
             match_id=self.match_id,
@@ -125,6 +127,10 @@ class RichSessionFixture:
             current_applied_selection_id="applied-1",
             current_turn_id=self.turn_id,
             current_reviewed_board_id="facts-1",
+            rules_ruleset_id=rules_pin.ruleset_id,
+            rules_ruleset_version=rules_pin.ruleset_version,
+            rules_snapshot_id=rules_pin.rules_snapshot_id,
+            rules_facts_sha256=rules_pin.rules_facts_sha256,
         )
         self.repository.insert_session(session)
         self.repository.append_turn(

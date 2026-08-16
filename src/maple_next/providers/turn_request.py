@@ -96,8 +96,16 @@ The opponent's build and remaining selected Pokémon are not confirmed.
 Do not state opponent moves, item, ability, nature, stat allocation, speed relation,
 damage range, or remaining team members as confirmed facts.
 
-You may use general Pokémon Champions knowledge to interpret confirmed names,
-but uncertainty must not be presented as confirmed fact.
+When the canonical request includes rules_context, it is authoritative for Pokémon
+Champions-specific battle rules within its declared coverage; general Pokémon knowledge
+and model training data must never override it.
+You may use general Pokémon knowledge only as unconfirmed background to interpret
+confirmed Pokémon and move names -- uncertainty must not be presented as confirmed fact.
+Do not present a Pokémon Champions-specific rule or mechanic as confirmed fact unless it
+is present in rules_context. When a recommendation materially depends on a Champions-specific
+rule or mechanic that is absent from rules_context, surface that uncertainty as a warning
+instead of asserting it. Never fabricate a Champions-specific mechanic, timer, format
+detail, or restriction that is not present in rules_context.
 
 Before choosing, silently compare every legal_actions entry.
 For each action, consider:

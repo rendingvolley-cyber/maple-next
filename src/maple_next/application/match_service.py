@@ -22,7 +22,11 @@ from maple_next.application.match_export_v3 import (
     validate_legal_actions_for_export,
 )
 from maple_next.application.projection import DomainProjection
-from maple_next.application.service import BattleApplication, DomainError
+from maple_next.application.service import (
+    BattleApplication,
+    DomainError,
+    _resolve_new_match_rules_pin,
+)
 from maple_next.domain.enums import BattleState, MatchOutcome
 from maple_next.domain.match_models import MatchExportRecord, MatchOutcomeRecord
 from maple_next.domain.models import BattleSession
@@ -207,12 +211,17 @@ class MatchApplication(BattleApplication):
                 raise DomainError("MATCH_EXPORT_RECORD_MISSING")
             previous.active_slot = None
             self.repository.save_session(previous)
+            rules_pin = _resolve_new_match_rules_pin()
             session = BattleSession(
                 session_id=str(uuid4()),
                 match_id=str(uuid4()),
                 generation=self.repository.next_generation(),
                 state=BattleState.SELECTION_OPEN,
                 battle_revision=1,
+                rules_ruleset_id=rules_pin.ruleset_id,
+                rules_ruleset_version=rules_pin.ruleset_version,
+                rules_snapshot_id=rules_pin.rules_snapshot_id,
+                rules_facts_sha256=rules_pin.rules_facts_sha256,
             )
             self.repository.insert_session(session)
         return session
@@ -446,11 +455,32 @@ class MatchApplication(BattleApplication):
             )
 
         try:
-            return build_integrated_match_export_v3_payload(
+            payload = build_integrated_match_export_v3_payload(
                 legacy_payload=legacy_payload, rich_turns=rich_turns
             )
         except MatchExportV3Error as exc:
             raise DomainError(f"V3_EXPORT_BUILD_FAILED:{exc}") from exc
+
+        # Bundle 4 (Gemini V2): small additive audit field -- the exact
+        # rules identity this match was pinned to, so a later audit can
+        # answer "what exact rules snapshot did Gemini reason under?"
+        # without re-parsing every turn's request. Only the identity/hash
+        # values are recorded here (never the rules facts/sources
+        # themselves -- those live in the checked-in snapshot, addressable
+        # by this same identity). ``None`` for a legacy/pre-Bundle-4 match
+        # that was never pinned; this key is additive and optional, never
+        # required by ``parse_match_export_v3``.
+        payload["rules_pin"] = (
+            {
+                "ruleset_id": session.rules_ruleset_id,
+                "ruleset_version": session.rules_ruleset_version,
+                "rules_snapshot_id": session.rules_snapshot_id,
+                "rules_facts_sha256": session.rules_facts_sha256,
+            }
+            if session.rules_ruleset_id is not None
+            else None
+        )
+        return payload
 
     @staticmethod
     def _encode_payload(payload: dict[str, Any]) -> bytes:

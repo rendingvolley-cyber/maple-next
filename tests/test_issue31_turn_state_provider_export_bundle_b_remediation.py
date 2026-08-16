@@ -67,6 +67,7 @@ from maple_next.providers.turn_advice_rich_state import (
 from maple_next.providers.turn_response import TurnAdviceSchemaError, turn_advice_body_from_dict
 from maple_next.workers.contracts.models import JobEnvelope, JobType
 from tests.fixtures.bundle3 import (
+    default_rules_context,
     names_only_bundle3_context,
     seed_selection_advice_binding,
 )
@@ -115,8 +116,14 @@ class RichSessionFixture:
         self.battle_revision = 3
         self.confirmed_state_id = "state-1"
 
+        from maple_next.domain.champions_rules import current_rules_pin_for_new_match
         from maple_next.domain.models import BattleSession
 
+        # Bundle 4 (Gemini V2): pin the real bundled rules snapshot -- exactly
+        # what ``BattleApplication.new_match`` would have written -- so this
+        # pre-Bundle-4 fixture's session stays provider-ready under the
+        # Bundle 4 fail-closed gate.
+        rules_pin = current_rules_pin_for_new_match()
         session = BattleSession(
             session_id=self.session_id,
             match_id=self.match_id,
@@ -126,6 +133,10 @@ class RichSessionFixture:
             current_reviewed_selection_id="selection-1",
             current_applied_selection_id="applied-1",
             current_turn_id=self.turn_id,
+            rules_ruleset_id=rules_pin.ruleset_id,
+            rules_ruleset_version=rules_pin.ruleset_version,
+            rules_snapshot_id=rules_pin.rules_snapshot_id,
+            rules_facts_sha256=rules_pin.rules_facts_sha256,
         )
         self.repository.insert_session(session)
         self.repository.append_turn(
@@ -257,17 +268,30 @@ def rich_fixture(tmp_path) -> RichSessionFixture:
 
 # --- 1. Legacy byte-equality goldens ----------------------------------------
 #
-# All values below were captured by directly loading
+# All values below were originally captured by directly loading
 # ``src/maple_next/providers/turn_request.py`` as it existed at the accepted
 # Bundle A base commit ``4f428a3730631015aedbf981d89f6540d40475ac`` (via
 # ``git show <sha>:<path>`` and ``importlib``, never through the modified
 # implementation) and hashing its actual output. They are therefore golden
 # evidence of the accepted legacy behavior, not newly generated expected
 # output from this remediation's code.
-
+#
+# Bundle 4 (Gemini V2) deliberately rewrote the shared
+# ``_TURN_INITIAL_PROMPT`` "general Pokémon Champions knowledge" authority
+# sentence (the Bundle 4 PROMPT AUTHORITY FIX: rules_context, when present,
+# is now authoritative for Champions-specific battle rules, and general
+# knowledge is explicitly non-authoritative background only). That text is
+# shared by the legacy v1/v2 prompt and the rich v4->v5 prompt alike, so the
+# five hashes below that are derived from ``_TURN_INITIAL_PROMPT`` content
+# (``_TURN_INITIAL_PROMPT_sha256``, ``v1_prompt_sha256``, ``v1_body_sha256``,
+# ``v2_prompt_sha256``, ``v2_body_sha256``) were recomputed against the new
+# text via the actual (modified) implementation and are pinned here as the
+# new goldens. ``REQUESTED_OUTPUT_SCHEMA_sha256`` and the two
+# ``*_canonical_dict_bytes_sha256`` values are untouched by that prompt
+# text change and remain the original Bundle A goldens.
 _GOLDEN = {
     "_TURN_INITIAL_PROMPT_sha256": (
-        "e4b421401668a0da2f3dff91053473772227f44bce1856b40eb3935230ef330d"
+        "c9cca378178603aa7f08de3dd01a43a1d911e22a3fc8f8a300534e4b9408cb4a"
     ),
     "REQUESTED_OUTPUT_SCHEMA_sha256": (
         "2d7310f91b45e5a6997c516d344649927c5729df01023d9dcbdb52872a9bb32a"
@@ -275,13 +299,13 @@ _GOLDEN = {
     "v1_canonical_dict_bytes_sha256": (
         "ba25ea9416cef7aab9b7069ef5043a7d9252de20ccc0ae43edb4047103b463ae"
     ),
-    "v1_prompt_sha256": "09c6f0b79b5f22046a74c427544020ecd817dbaa95b649e1da00b274b942ca3e",
-    "v1_body_sha256": "7bfe2df4c80b1905697af71183fa4739290808b7798604ebb3f5091ef6c353b8",
+    "v1_prompt_sha256": "abc35a54473c491d9e3046d861c30ae4d5729bee26000352266012732e9f4bd5",
+    "v1_body_sha256": "380f4d7c3b697e17e78ee07ba6dd8ae140698d09c40e20b45b07a25fb7a332fb",
     "v2_canonical_dict_bytes_sha256": (
         "fa149601cd8b65256b821d54f65c871d3cd651c76e3089c28a28900e91f6099c"
     ),
-    "v2_prompt_sha256": "fb9f88b9b9cd7a5e5b186ef6382db2dba6010faff92a40c0ac87457b47096889",
-    "v2_body_sha256": "e22a2b004121a2a6d4e548eaf08cff5af14857c7254789808c5c33d10fec561b",
+    "v2_prompt_sha256": "61de56d0ee27aebf5581b4922772ef1647e902af4c105b59fe33d1d0df9c558f",
+    "v2_body_sha256": "04221393dc3b7dd022a14c10e0854d57515e1e627a3f1bfa39b5a234a18a14b4",
 }
 
 _V2_SELF_TEAM = ("Pikachu", "Gholdengo", "Dragonite", "Dondozo", "Hatterene", "Urshifu")
@@ -429,6 +453,7 @@ def test_rich_request_contains_required_fields(rich_fixture: RichSessionFixture)
         bundle3_context=names_only_bundle3_context(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
+        rules_context=default_rules_context(),
     )
     assert request.contract_version == RICH_STATE_REQUEST_CONTRACT_VERSION
     assert request.prompt_version == legacy_turn_request.TURN_PROMPT_VERSION
@@ -485,6 +510,7 @@ def test_rich_prompt_requires_japanese_only_for_human_facing_text(
         bundle3_context=names_only_bundle3_context(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
+        rules_context=default_rules_context(),
     )
     canonical_before = canonical_rich_request_dict(request)
     request_hash_before = request.request_hash
@@ -527,6 +553,7 @@ def test_rich_japanese_instruction_preserves_strict_response_schema(
         bundle3_context=names_only_bundle3_context(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
+        rules_context=default_rules_context(),
     )
 
     body = build_rich_provider_request_body(request)
@@ -820,6 +847,7 @@ def _build_request_for_state(
         bundle3_context=names_only_bundle3_context(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
+        rules_context=default_rules_context(),
     )
     return request.request_hash
 
@@ -879,6 +907,7 @@ def test_hash_changes_with_evidence(tmp_path) -> None:
         bundle3_context=names_only_bundle3_context(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
+        rules_context=default_rules_context(),
         evidence=evidence_a,
     )
 
@@ -900,6 +929,7 @@ def test_hash_changes_with_evidence(tmp_path) -> None:
         bundle3_context=names_only_bundle3_context(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
+        rules_context=default_rules_context(),
         evidence=None,
     )
     assert request_a.request_hash != request_b.request_hash
@@ -924,6 +954,7 @@ def test_hash_changes_with_selected_three(tmp_path) -> None:
         bundle3_context=names_only_bundle3_context(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
+        rules_context=default_rules_context(),
     )
     request_b = build_rich_state_turn_advice_request(
         confirmed_state=state,
@@ -940,6 +971,7 @@ def test_hash_changes_with_selected_three(tmp_path) -> None:
         bundle3_context=names_only_bundle3_context(
             selected_three=("Dondozo", "Gholdengo", "Hatterene")
         ),
+        rules_context=default_rules_context(),
     )
     assert request_a.request_hash != request_b.request_hash
 
@@ -963,6 +995,7 @@ def test_hash_changes_with_self_team_build_sha256(tmp_path) -> None:
         bundle3_context=names_only_bundle3_context(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
+        rules_context=default_rules_context(),
         self_team_build_sha256="b" * 64,
     )
     request_b = build_rich_state_turn_advice_request(
@@ -980,6 +1013,7 @@ def test_hash_changes_with_self_team_build_sha256(tmp_path) -> None:
         bundle3_context=names_only_bundle3_context(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
+        rules_context=default_rules_context(),
         self_team_build_sha256=None,
     )
     assert request_a.request_hash != request_b.request_hash

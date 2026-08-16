@@ -10,8 +10,16 @@ from uuid import uuid4
 
 from maple_next.application.projection import DomainProjection, project
 from maple_next.application.turn_legal_action_boundary import build_confirmed_legal_actions_input
-from maple_next.application.turn_provider_export_bridge import load_bundle3_turn_context
+from maple_next.application.turn_provider_export_bridge import (
+    load_bundle3_turn_context,
+    load_champions_rules_context,
+)
 from maple_next.domain.battle_memory import Bundle3ContextError
+from maple_next.domain.champions_rules import (
+    ChampionsRulesError,
+    RulesPin,
+    current_rules_pin_for_new_match,
+)
 from maple_next.domain.enums import (
     ActionOrder,
     ActionType,
@@ -95,6 +103,22 @@ class DomainError(RuntimeError):
     """Raised when a command violates the canonical transition contract."""
 
 
+def _resolve_new_match_rules_pin() -> RulesPin:
+    """Resolve the immutable Champions rules pin for a brand-new match.
+
+    Bundle 4 (Gemini V2): every new match is pinned to the one checked-in
+    official rules snapshot at creation time (never re-resolved from
+    "whatever is on disk now" later -- see ``domain/champions_rules.py``).
+    A malformed/tampered/unavailable snapshot fails match creation itself,
+    closed, rather than creating a session with an unverifiable pin.
+    """
+
+    try:
+        return current_rules_pin_for_new_match()
+    except ChampionsRulesError as exc:
+        raise DomainError(f"CHAMPIONS_RULES_SNAPSHOT_UNAVAILABLE:{exc}") from exc
+
+
 def _reviewed_board_snapshot_from_turn_facts(facts: TurnFactsSnapshot) -> ReviewedBoardSnapshot:
     """Adapt the flat, human-confirmed :class:`TurnFactsSnapshot` into the
     richer Lane C :class:`ReviewedBoardSnapshot` shape.
@@ -163,12 +187,17 @@ class BattleApplication:
         with self.repository.transaction():
             if self.repository.load_active_session() is not None:
                 raise DomainError("ACTIVE_MATCH_EXISTS")
+            rules_pin = _resolve_new_match_rules_pin()
             session = BattleSession(
                 session_id=str(uuid4()),
                 match_id=str(uuid4()),
                 generation=self.repository.next_generation(),
                 state=BattleState.SELECTION_OPEN,
                 battle_revision=1,
+                rules_ruleset_id=rules_pin.ruleset_id,
+                rules_ruleset_version=rules_pin.ruleset_version,
+                rules_snapshot_id=rules_pin.rules_snapshot_id,
+                rules_facts_sha256=rules_pin.rules_facts_sha256,
             )
             self.repository.insert_session(session)
         return session
@@ -919,6 +948,18 @@ class BattleApplication:
             except Bundle3ContextError as exc:
                 raise DomainError(f"BUNDLE3_CONTEXT_INVALID:{exc}") from exc
 
+            # Bundle 4 (Gemini V2): resolve the match's persisted rules pin
+            # against the immutable checked-in official Champions rules
+            # snapshot, through the one shared helper the offline rebuild
+            # path below also uses. Fails closed on an unpinned match, a
+            # pin that no longer matches the checked-in snapshot, or a
+            # corrupted/tampered snapshot -- never falls back to sending a
+            # request without a proven rules_context.
+            try:
+                rules_context = load_champions_rules_context(session)
+            except ChampionsRulesError as exc:
+                raise DomainError(f"CHAMPIONS_RULES_CONTEXT_INVALID:{exc}") from exc
+
             try:
                 request = build_rich_state_turn_advice_request(
                     confirmed_state=latest_state,
@@ -931,6 +972,7 @@ class BattleApplication:
                     selected_three=applied.selected_three,
                     self_active=self_active_known.value,
                     bundle3_context=bundle3_context,
+                    rules_context=rules_context,
                     evidence=evidence,
                     self_team_build_sha256=self_team_build_sha256,
                     confirmed_fainted_members=self._confirmed_fainted_members(
@@ -1181,6 +1223,16 @@ class BattleApplication:
         except Bundle3ContextError as exc:
             raise DomainError(f"REBUILD_BUNDLE3_CONTEXT_INVALID:{exc}") from exc
 
+        # Bundle 4 (Gemini V2): rebuilt through the exact same shared helper
+        # the authorizing path used -- identical persisted pin + identical
+        # (unchanged) checked-in snapshot always reproduces byte-identical
+        # ``rules_context``. A pin that no longer resolves fails closed here
+        # instead of silently rebuilding under different rules.
+        try:
+            rules_context = load_champions_rules_context(session)
+        except ChampionsRulesError as exc:
+            raise DomainError(f"REBUILD_CHAMPIONS_RULES_CONTEXT_INVALID:{exc}") from exc
+
         try:
             request = build_rich_state_turn_advice_request(
                 confirmed_state=confirmed_state,
@@ -1193,6 +1245,7 @@ class BattleApplication:
                 selected_three=applied.selected_three,
                 self_active=self_active_known.value,
                 bundle3_context=bundle3_context,
+                rules_context=rules_context,
                 evidence=evidence,
                 self_team_build_sha256=self_team_build_sha256,
                 confirmed_fainted_members=self._confirmed_fainted_members(

@@ -43,7 +43,7 @@ Callers of this module remain responsible for:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from maple_next.domain.battle_memory import (
     Bundle3ContextError,
@@ -51,6 +51,11 @@ from maple_next.domain.battle_memory import (
     SelectedBuildContextError,
     build_battle_memory,
     project_selected_three_builds,
+)
+from maple_next.domain.champions_rules import (
+    ChampionsRulesError,
+    RulesPin,
+    resolve_pinned_rules_context,
 )
 from maple_next.domain.enums import JobType
 from maple_next.domain.legal_switches import LegalSwitchConfirmation
@@ -179,6 +184,43 @@ def load_bundle3_turn_context(
     )
 
 
+def load_champions_rules_context(session: BattleSession) -> dict[str, Any]:
+    """The one shared Bundle 4 loader/resolver. Read-only, fails closed.
+
+    Resolves ``session``'s persisted rules pin (set once at match creation
+    -- see ``application.service._resolve_new_match_rules_pin``) against
+    the immutable checked-in official Champions rules snapshot, and returns
+    the compact ``rules_context`` dict a rich request embeds. Used
+    identically by initial rich request creation
+    (``BattleApplication.request_rich_turn_advice``) and by offline rebuild
+    / export verification
+    (``BattleApplication.build_rich_turn_advice_transport_request``), so
+    both paths can never resolve a different rules context for the same
+    match.
+
+    Raises :class:`~maple_next.domain.champions_rules.ChampionsRulesError`
+    (or one of its subclasses) when the match has no pin, the pin does not
+    match the currently checked-in snapshot, or the checked-in snapshot
+    itself fails validation. Never performs a network fetch -- the checked-
+    in snapshot is the only input.
+    """
+
+    if (
+        session.rules_ruleset_id is None
+        or session.rules_ruleset_version is None
+        or session.rules_snapshot_id is None
+        or session.rules_facts_sha256 is None
+    ):
+        raise ChampionsRulesError("MATCH_RULES_UNPINNED")
+    pin = RulesPin(
+        ruleset_id=session.rules_ruleset_id,
+        ruleset_version=session.rules_ruleset_version,
+        rules_snapshot_id=session.rules_snapshot_id,
+        rules_facts_sha256=session.rules_facts_sha256,
+    )
+    return resolve_pinned_rules_context(pin)
+
+
 def build_pure_rich_state_request_from_loaded_state(
     *,
     current_identity: TurnIdentity,
@@ -189,6 +231,7 @@ def build_pure_rich_state_request_from_loaded_state(
     selected_three: tuple[str, str, str],
     self_active: str,
     bundle3_context: Bundle3TurnContext,
+    rules_context: dict[str, Any],
     evidence: FixedEvidenceMetadata | None = None,
     self_team_build_sha256: str | None = None,
     confirmed_fainted_members: frozenset[str] = frozenset(),
@@ -225,6 +268,7 @@ def build_pure_rich_state_request_from_loaded_state(
         selected_three=selected_three,
         self_active=self_active,
         bundle3_context=bundle3_context,
+        rules_context=rules_context,
         evidence=evidence,
         self_team_build_sha256=self_team_build_sha256,
         confirmed_fainted_members=confirmed_fainted_members,

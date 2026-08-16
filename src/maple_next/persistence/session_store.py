@@ -32,8 +32,9 @@ class SessionStoreMixin(StoreBase):
                 session_id, match_id, generation, state, battle_revision, metadata_revision,
                 current_reviewed_selection_id, current_selection_advice_id,
                 current_applied_selection_id, current_turn_id, current_observation_id,
-                current_reviewed_board_id, current_turn_advice_id, active_slot
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                current_reviewed_board_id, current_turn_advice_id, active_slot,
+                rules_ruleset_id, rules_ruleset_version, rules_snapshot_id, rules_facts_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             self._session_values(session),
         )
@@ -82,6 +83,10 @@ class SessionStoreMixin(StoreBase):
             session.current_reviewed_board_id,
             session.current_turn_advice_id,
             session.active_slot,
+            session.rules_ruleset_id,
+            session.rules_ruleset_version,
+            session.rules_snapshot_id,
+            session.rules_facts_sha256,
         )
 
     def load_active_session(self) -> BattleSession | None:
@@ -107,6 +112,10 @@ class SessionStoreMixin(StoreBase):
             current_reviewed_board_id=row["current_reviewed_board_id"],
             current_turn_advice_id=row["current_turn_advice_id"],
             active_slot=row["active_slot"],
+            rules_ruleset_id=row["rules_ruleset_id"],
+            rules_ruleset_version=row["rules_ruleset_version"],
+            rules_snapshot_id=row["rules_snapshot_id"],
+            rules_facts_sha256=row["rules_facts_sha256"],
         )
 
     def append_selection_facts(self, session_id: str, facts: SelectionFacts) -> None:

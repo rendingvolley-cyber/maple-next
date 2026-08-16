@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -574,6 +574,16 @@ def migrate(connection: sqlite3.Connection) -> None:
     _ensure_column(
         connection, "rich_action_completions", "based_on_confirmed_state_id", "TEXT NULL"
     )
+    # Bundle 4 (Gemini V2): pin the immutable official Champions rules
+    # snapshot identity to the match at creation time. NULL on every
+    # existing/legacy row -- an unpinned match is never backfilled with a
+    # guessed pin; it simply stays unpinned and fails closed if a rich
+    # provider-ready request is attempted for it (see
+    # ``domain/champions_rules.py`` / ``application/service.py``).
+    _ensure_column(connection, "battle_sessions", "rules_ruleset_id", "TEXT NULL")
+    _ensure_column(connection, "battle_sessions", "rules_ruleset_version", "TEXT NULL")
+    _ensure_column(connection, "battle_sessions", "rules_snapshot_id", "TEXT NULL")
+    _ensure_column(connection, "battle_sessions", "rules_facts_sha256", "TEXT NULL")
     _sanitize_async_job_result_payloads(connection)
     connection.execute(
         "UPDATE schema_meta SET schema_version = ? WHERE singleton_id = 1",

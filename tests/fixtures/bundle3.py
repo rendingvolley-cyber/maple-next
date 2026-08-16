@@ -19,6 +19,7 @@ Nothing here sends anything or contacts a provider.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from maple_next.domain.battle_memory import (
     BattleMemory,
@@ -26,9 +27,22 @@ from maple_next.domain.battle_memory import (
     SelectedBuildMember,
     SelectedBuildStatus,
 )
+from maple_next.domain.champions_rules import build_rules_context, load_bundled_snapshot
 from maple_next.domain.enums import BattleState, JobStatus, JobType
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.workers.contracts.models import JobEnvelope
+
+
+def default_rules_context() -> dict[str, Any]:
+    """The real, checked-in M-B Single ``rules_context`` for request-assembly tests.
+
+    Bundle 4 (Gemini V2). Every rich-request-assembly test needs *some*
+    valid ``rules_context`` dict; this resolves the actual bundled snapshot
+    (the same one production code resolves) rather than a hand-rolled
+    fixture, so these tests exercise the real contract shape.
+    """
+
+    return build_rules_context(load_bundled_snapshot())
 
 
 def names_only_selected_builds(

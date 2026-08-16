@@ -25,11 +25,14 @@ from maple_next.application.projection import DomainProjection
 from maple_next.application.service import (
     BattleApplication,
     DomainError,
+    _resolve_new_match_opponent_intel_pin,
     _resolve_new_match_rules_pin,
 )
 from maple_next.domain.enums import BattleState, MatchOutcome
 from maple_next.domain.match_models import MatchExportRecord, MatchOutcomeRecord
 from maple_next.domain.models import BattleSession
+from maple_next.opponent_intel_db.generation_store import GenerationStoreError
+from maple_next.opponent_intel_db.runtime_intel import load_pinned_generation
 from maple_next.persistence.sqlite import SQLiteRepository
 
 MATCH_EXPORT_SCHEMA_VERSION = "maple-match.v2"
@@ -47,8 +50,9 @@ class MatchApplication(BattleApplication):
         export_directory: str | Path,
         *,
         repository_root: str | Path | None = None,
+        opponent_intel_directory: str | Path | None = None,
     ) -> None:
-        super().__init__(repository)
+        super().__init__(repository, opponent_intel_directory=opponent_intel_directory)
         self.export_directory = Path(export_directory).expanduser().resolve()
         self.repository_root = (
             Path(repository_root).expanduser().resolve()
@@ -212,6 +216,7 @@ class MatchApplication(BattleApplication):
             previous.active_slot = None
             self.repository.save_session(previous)
             rules_pin = _resolve_new_match_rules_pin()
+            intel_pin = _resolve_new_match_opponent_intel_pin(self.opponent_intel_directory)
             session = BattleSession(
                 session_id=str(uuid4()),
                 match_id=str(uuid4()),
@@ -222,6 +227,9 @@ class MatchApplication(BattleApplication):
                 rules_ruleset_version=rules_pin.ruleset_version,
                 rules_snapshot_id=rules_pin.rules_snapshot_id,
                 rules_facts_sha256=rules_pin.rules_facts_sha256,
+                opponent_intel_pin_status=intel_pin.status,
+                opponent_intel_generation_id=intel_pin.generation_id,
+                opponent_intel_snapshot_sha256=intel_pin.snapshot_sha256,
             )
             self.repository.insert_session(session)
         return session
@@ -480,7 +488,54 @@ class MatchApplication(BattleApplication):
             if session.rules_ruleset_id is not None
             else None
         )
+        # Bundle 5 (Gemini V2): the equally small additive audit field for
+        # population INTEL -- identity/provenance only, so a later audit can
+        # answer "what exact population snapshot was visible to Gemini, as a
+        # prior?". The population database itself and any raw source
+        # document are deliberately never exported. ``None`` for a
+        # legacy/pre-Bundle-5 match that was never pinned; additive and
+        # optional, never required by ``parse_match_export_v3``.
+        payload["opponent_intel_pin"] = self._opponent_intel_pin_export(session)
         return payload
+
+    def _opponent_intel_pin_export(self, session: BattleSession) -> dict[str, Any] | None:
+        """Identity/provenance of the match's INTEL pin, for audit only.
+
+        The four provenance values (``source``/``season``/``format``/
+        ``fetched_at``) plus ``snapshot_schema_version`` live inside the
+        archived generation, so they are read back from it. If that archive
+        is no longer resolvable, they are reported as ``null`` rather than
+        guessed -- the durable pin identity is still recorded exactly as
+        persisted. Export is an audit action, not a provider dispatch, so
+        an unresolvable archive does not block preserving the match record.
+        """
+
+        if session.opponent_intel_pin_status is None:
+            return None
+        record: dict[str, Any] = {
+            "status": session.opponent_intel_pin_status,
+            "generation_id": session.opponent_intel_generation_id,
+            "snapshot_schema_version": None,
+            "snapshot_sha256": session.opponent_intel_snapshot_sha256,
+            "source": None,
+            "season": None,
+            "format": None,
+            "fetched_at": None,
+        }
+        generation_id = session.opponent_intel_generation_id
+        if generation_id is None:
+            return record
+        try:
+            bundle = load_pinned_generation(self.opponent_intel_directory, generation_id)
+        except (GenerationStoreError, OSError):
+            return record
+        document = bundle.snapshot_document
+        record["snapshot_schema_version"] = document.schema_version
+        record["source"] = document.source
+        record["season"] = document.season
+        record["format"] = document.format
+        record["fetched_at"] = document.fetched_at
+        return record
 
     @staticmethod
     def _encode_payload(payload: dict[str, Any]) -> bytes:

@@ -43,6 +43,7 @@ Callers of this module remain responsible for:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from maple_next.domain.battle_memory import (
@@ -56,10 +57,16 @@ from maple_next.domain.champions_rules import (
     ChampionsRulesError,
     RulesPin,
     resolve_pinned_rules_context,
+    resolve_pinned_rules_snapshot,
 )
 from maple_next.domain.enums import JobType
 from maple_next.domain.legal_switches import LegalSwitchConfirmation
 from maple_next.domain.models import AppliedSelectionSnapshot, BattleSession
+from maple_next.domain.opponent_intel_context import (
+    OpponentIntelContextError,
+    OpponentIntelPin,
+    build_opponent_intel_context,
+)
 from maple_next.domain.turn_state import (
     ConfirmedLegalActionSelection,
     ConfirmedTurnState,
@@ -67,6 +74,8 @@ from maple_next.domain.turn_state import (
     NextTurnStateDraft,
     TurnIdentity,
 )
+from maple_next.opponent_intel_db.generation_store import GenerationStoreError
+from maple_next.opponent_intel_db.runtime_intel import load_pinned_generation
 from maple_next.providers.turn_advice_rich_state import (
     RichStateTurnAdviceRequest,
     build_rich_state_turn_advice_request,
@@ -184,6 +193,111 @@ def load_bundle3_turn_context(
     )
 
 
+def rules_pin_for_session(session: BattleSession) -> RulesPin:
+    """The match's persisted rules pin, or fail closed if it has none."""
+
+    if (
+        session.rules_ruleset_id is None
+        or session.rules_ruleset_version is None
+        or session.rules_snapshot_id is None
+        or session.rules_facts_sha256 is None
+    ):
+        raise ChampionsRulesError("MATCH_RULES_UNPINNED")
+    return RulesPin(
+        ruleset_id=session.rules_ruleset_id,
+        ruleset_version=session.rules_ruleset_version,
+        rules_snapshot_id=session.rules_snapshot_id,
+        rules_facts_sha256=session.rules_facts_sha256,
+    )
+
+
+def opponent_intel_pin_for_session(session: BattleSession) -> OpponentIntelPin:
+    """The match's persisted opponent-INTEL pin, fail-soft for legacy rows."""
+
+    return OpponentIntelPin.from_session_fields(
+        status=session.opponent_intel_pin_status,
+        generation_id=session.opponent_intel_generation_id,
+        snapshot_sha256=session.opponent_intel_snapshot_sha256,
+    )
+
+
+def load_opponent_intel_context(
+    session: BattleSession,
+    *,
+    confirmed_state: ConfirmedTurnState,
+    intel_directory: Path,
+) -> dict[str, Any]:
+    """The one shared Bundle 5 loader/resolver. Read-only, no network, fails closed.
+
+    Used identically by initial rich request creation
+    (``BattleApplication.request_rich_turn_advice``) and by offline rebuild
+    / export verification
+    (``BattleApplication.build_rich_turn_advice_transport_request``), so the
+    two paths cannot drift: the same confirmed state + the same INTEL pin +
+    the same rules pin always yields the same ``opponent_intel_context``,
+    and therefore the same canonical request bytes and hash.
+
+    Three properties this function exists to guarantee:
+
+    - **The pin decides, never "current".** The archived generation named by
+      ``session.opponent_intel_generation_id`` is resolved by id
+      (``runtime_intel.load_pinned_generation``); the
+      ``current_generation.json`` pointer is never consulted, so a newer
+      global generation can never retroactively change an existing match.
+    - **Confirmed active only.** The species queried is exclusively
+      ``confirmed_state.opponent_side.active`` *when confirmed*. An
+      OCR-only/unreviewed identity, a draft, a team-preview member, an
+      inferred backline, or a stale pre-switch active can never produce an
+      ``AVAILABLE`` context -- an unconfirmed active yields a deterministic
+      ``UNAVAILABLE``.
+    - **No legacy blending.** A species absent from the pinned snapshot
+      resolves ``UNAVAILABLE``; the legacy ``opponent_meta_cache.json``
+      provider chain is never consulted here.
+
+    Fails closed (:class:`OpponentIntelContextError`) when a match claims
+    ``PINNED`` but its generation is missing, corrupt, hash-mismatched, or
+    resolves to a different identity than was pinned. Fails *soft* -- a
+    deterministic ``UNAVAILABLE``/``MISMATCHED`` context, request still
+    provider-ready -- for an unpinned match, an unconfirmed opponent
+    active, an absent species, or an explicit season/format mismatch.
+    """
+
+    pin = opponent_intel_pin_for_session(session)
+    rules_snapshot = resolve_pinned_rules_snapshot(rules_pin_for_session(session))
+    season_id = str(rules_snapshot.effective_period.get("season_id", ""))
+    battle_format = rules_snapshot.facts.battle_format
+
+    active = confirmed_state.opponent_side.active
+    confirmed_active_species = active.value if active.is_confirmed else None
+
+    if not pin.is_pinned:
+        return build_opponent_intel_context(
+            confirmed_active_species=confirmed_active_species,
+            pin=pin,
+            document=None,
+            generation_id=None,
+            snapshot_sha256=None,
+            rules_season_id=season_id,
+            rules_battle_format=battle_format,
+        )
+
+    assert pin.generation_id is not None  # guaranteed by OpponentIntelPin
+    try:
+        bundle = load_pinned_generation(intel_directory, pin.generation_id)
+    except GenerationStoreError as exc:
+        raise OpponentIntelContextError(f"PINNED_GENERATION_UNRESOLVABLE:{exc}") from exc
+
+    return build_opponent_intel_context(
+        confirmed_active_species=confirmed_active_species,
+        pin=pin,
+        document=bundle.snapshot_document,
+        generation_id=bundle.generation_id,
+        snapshot_sha256=bundle.snapshot_sha256,
+        rules_season_id=season_id,
+        rules_battle_format=battle_format,
+    )
+
+
 def load_champions_rules_context(session: BattleSession) -> dict[str, Any]:
     """The one shared Bundle 4 loader/resolver. Read-only, fails closed.
 
@@ -205,20 +319,7 @@ def load_champions_rules_context(session: BattleSession) -> dict[str, Any]:
     in snapshot is the only input.
     """
 
-    if (
-        session.rules_ruleset_id is None
-        or session.rules_ruleset_version is None
-        or session.rules_snapshot_id is None
-        or session.rules_facts_sha256 is None
-    ):
-        raise ChampionsRulesError("MATCH_RULES_UNPINNED")
-    pin = RulesPin(
-        ruleset_id=session.rules_ruleset_id,
-        ruleset_version=session.rules_ruleset_version,
-        rules_snapshot_id=session.rules_snapshot_id,
-        rules_facts_sha256=session.rules_facts_sha256,
-    )
-    return resolve_pinned_rules_context(pin)
+    return resolve_pinned_rules_context(rules_pin_for_session(session))
 
 
 def build_pure_rich_state_request_from_loaded_state(
@@ -232,6 +333,7 @@ def build_pure_rich_state_request_from_loaded_state(
     self_active: str,
     bundle3_context: Bundle3TurnContext,
     rules_context: dict[str, Any],
+    opponent_intel_context: dict[str, Any],
     evidence: FixedEvidenceMetadata | None = None,
     self_team_build_sha256: str | None = None,
     confirmed_fainted_members: frozenset[str] = frozenset(),
@@ -269,6 +371,7 @@ def build_pure_rich_state_request_from_loaded_state(
         self_active=self_active,
         bundle3_context=bundle3_context,
         rules_context=rules_context,
+        opponent_intel_context=opponent_intel_context,
         evidence=evidence,
         self_team_build_sha256=self_team_build_sha256,
         confirmed_fainted_members=confirmed_fainted_members,

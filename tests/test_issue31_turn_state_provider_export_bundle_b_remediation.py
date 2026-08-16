@@ -71,6 +71,7 @@ from tests.fixtures.bundle3 import (
     names_only_bundle3_context,
     seed_selection_advice_binding,
 )
+from tests.fixtures.bundle5 import unavailable_intel_context_for
 from tests.fixtures.turn_advice import build_sample_request
 
 _HUMAN = (ProvenanceStep.HUMAN_INPUT,)
@@ -289,9 +290,20 @@ def rich_fixture(tmp_path) -> RichSessionFixture:
 # new goldens. ``REQUESTED_OUTPUT_SCHEMA_sha256`` and the two
 # ``*_canonical_dict_bytes_sha256`` values are untouched by that prompt
 # text change and remain the original Bundle A goldens.
+#
+# Bundle 5 (Gemini V2) appends one further paragraph to that same shared
+# ``_TURN_INITIAL_PROMPT`` (the Bundle 5 PROMPT AUTHORITY addition:
+# ``opponent_intel_context``, when present, is a population-level
+# statistical prior only, never the confirmed opponent build, and confirmed
+# match facts / battle_memory always override it). Bundle 4's rules_context
+# paragraph is left exactly as it was. For the same reason as above, the
+# same five prompt-derived hashes -- and only those five -- are recomputed
+# and re-pinned here; the schema and canonical-dict goldens are again
+# untouched, which is itself evidence that Bundle 5 changed prompt text
+# only and no legacy v1/v2 request field.
 _GOLDEN = {
     "_TURN_INITIAL_PROMPT_sha256": (
-        "c9cca378178603aa7f08de3dd01a43a1d911e22a3fc8f8a300534e4b9408cb4a"
+        "02c804619f0587d47696668f86be27e8cf90392b5344b889574cd59e1f3aa1dc"
     ),
     "REQUESTED_OUTPUT_SCHEMA_sha256": (
         "2d7310f91b45e5a6997c516d344649927c5729df01023d9dcbdb52872a9bb32a"
@@ -299,13 +311,13 @@ _GOLDEN = {
     "v1_canonical_dict_bytes_sha256": (
         "ba25ea9416cef7aab9b7069ef5043a7d9252de20ccc0ae43edb4047103b463ae"
     ),
-    "v1_prompt_sha256": "abc35a54473c491d9e3046d861c30ae4d5729bee26000352266012732e9f4bd5",
-    "v1_body_sha256": "380f4d7c3b697e17e78ee07ba6dd8ae140698d09c40e20b45b07a25fb7a332fb",
+    "v1_prompt_sha256": "4f47cd45a3ac0925562cef21e6de21d427c699f39d92515d978538e8312a8138",
+    "v1_body_sha256": "ba137e6aeb2dd315bb16bac4e4d831506065dea3aa7177efe6f49785990ba447",
     "v2_canonical_dict_bytes_sha256": (
         "fa149601cd8b65256b821d54f65c871d3cd651c76e3089c28a28900e91f6099c"
     ),
-    "v2_prompt_sha256": "61de56d0ee27aebf5581b4922772ef1647e902af4c105b59fe33d1d0df9c558f",
-    "v2_body_sha256": "04221393dc3b7dd022a14c10e0854d57515e1e627a3f1bfa39b5a234a18a14b4",
+    "v2_prompt_sha256": "f7ed0bf47bfc10a9891d6961778c46be48e4b0345284dd48c68d5fb58d07614d",
+    "v2_body_sha256": "01bac54c7d40bfc03dfcba49643fe48128ea7eafacddf651ca55a1f3d84ad70f",
 }
 
 _V2_SELF_TEAM = ("Pikachu", "Gholdengo", "Dragonite", "Dondozo", "Hatterene", "Urshifu")
@@ -454,6 +466,7 @@ def test_rich_request_contains_required_fields(rich_fixture: RichSessionFixture)
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
         rules_context=default_rules_context(),
+        opponent_intel_context=unavailable_intel_context_for(state),
     )
     assert request.contract_version == RICH_STATE_REQUEST_CONTRACT_VERSION
     assert request.prompt_version == legacy_turn_request.TURN_PROMPT_VERSION
@@ -511,6 +524,7 @@ def test_rich_prompt_requires_japanese_only_for_human_facing_text(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
         rules_context=default_rules_context(),
+        opponent_intel_context=unavailable_intel_context_for(state),
     )
     canonical_before = canonical_rich_request_dict(request)
     request_hash_before = request.request_hash
@@ -554,6 +568,7 @@ def test_rich_japanese_instruction_preserves_strict_response_schema(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
         rules_context=default_rules_context(),
+        opponent_intel_context=unavailable_intel_context_for(state),
     )
 
     body = build_rich_provider_request_body(request)
@@ -848,6 +863,7 @@ def _build_request_for_state(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
         rules_context=default_rules_context(),
+        opponent_intel_context=unavailable_intel_context_for(state),
     )
     return request.request_hash
 
@@ -908,6 +924,7 @@ def test_hash_changes_with_evidence(tmp_path) -> None:
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
         rules_context=default_rules_context(),
+        opponent_intel_context=unavailable_intel_context_for(state_a),
         evidence=evidence_a,
     )
 
@@ -930,6 +947,7 @@ def test_hash_changes_with_evidence(tmp_path) -> None:
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
         rules_context=default_rules_context(),
+        opponent_intel_context=unavailable_intel_context_for(state_b),
         evidence=None,
     )
     assert request_a.request_hash != request_b.request_hash
@@ -955,6 +973,7 @@ def test_hash_changes_with_selected_three(tmp_path) -> None:
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
         rules_context=default_rules_context(),
+        opponent_intel_context=unavailable_intel_context_for(state),
     )
     request_b = build_rich_state_turn_advice_request(
         confirmed_state=state,
@@ -972,6 +991,7 @@ def test_hash_changes_with_selected_three(tmp_path) -> None:
             selected_three=("Dondozo", "Gholdengo", "Hatterene")
         ),
         rules_context=default_rules_context(),
+        opponent_intel_context=unavailable_intel_context_for(state),
     )
     assert request_a.request_hash != request_b.request_hash
 
@@ -996,6 +1016,7 @@ def test_hash_changes_with_self_team_build_sha256(tmp_path) -> None:
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
         rules_context=default_rules_context(),
+        opponent_intel_context=unavailable_intel_context_for(state),
         self_team_build_sha256="b" * 64,
     )
     request_b = build_rich_state_turn_advice_request(
@@ -1014,6 +1035,7 @@ def test_hash_changes_with_self_team_build_sha256(tmp_path) -> None:
             selected_three=("Dondozo", "Gholdengo", "Urshifu")
         ),
         rules_context=default_rules_context(),
+        opponent_intel_context=unavailable_intel_context_for(state),
         self_team_build_sha256=None,
     )
     assert request_a.request_hash != request_b.request_hash

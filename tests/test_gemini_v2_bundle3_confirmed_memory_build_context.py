@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -31,6 +32,7 @@ from maple_next.application.turn_provider_export_bridge import (
     build_pure_rich_state_request_from_loaded_state,
     load_bundle3_turn_context,
     load_champions_rules_context,
+    load_opponent_intel_context,
 )
 from maple_next.domain.battle_memory import (
     BattleMemory,
@@ -81,6 +83,7 @@ from maple_next.providers.turn_advice_rich_state import (
     canonical_rich_request_dict,
     encode_canonical_rich_request,
 )
+from tests.fixtures.bundle5 import provision_fixture_generation
 
 _HUMAN = (ProvenanceStep.HUMAN_INPUT,)
 _CARRY = (ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD,)
@@ -272,10 +275,21 @@ class Bundle3Fixture:
         completion_order: tuple[int, ...] = (1, 2, 3, 4, 5, 6),
         db_name: str = "bundle3.db",
         pin_rules: bool = True,
+        intel_snapshot: dict[str, object] | None = None,
     ) -> None:
         self.db_path = tmp_path / db_name
         self.repository = SQLiteRepository(self.db_path)
-        self.application = MatchApplication(self.repository, tmp_path / "exports")
+        # Bundle 5 (Gemini V2): a per-fixture, throwaway opponent-INTEL
+        # directory. Never the operator's provisioned runtime artifact --
+        # ``intel_snapshot`` (when given) provisions hermetic fixture bytes
+        # into it and pins the resulting immutable generation to this
+        # match, exactly as ``new_match`` would.
+        self.intel_directory = tmp_path / f"{db_name}-intel-db"
+        self.application = MatchApplication(
+            self.repository,
+            tmp_path / "exports",
+            opponent_intel_directory=self.intel_directory,
+        )
         self.session_id = "session-b3"
         self.match_id = "match-b3"
         self.generation = 9
@@ -292,6 +306,11 @@ class Bundle3Fixture:
         # unpinned match fails closed instead of silently binding to the
         # latest rules.
         rules_pin = current_rules_pin_for_new_match() if pin_rules else None
+        intel_pin = (
+            provision_fixture_generation(self.intel_directory, intel_snapshot)
+            if intel_snapshot is not None
+            else None
+        )
         session = BattleSession(
             session_id=self.session_id,
             match_id=self.match_id,
@@ -305,6 +324,11 @@ class Bundle3Fixture:
             rules_ruleset_version=rules_pin.ruleset_version if rules_pin else None,
             rules_snapshot_id=rules_pin.rules_snapshot_id if rules_pin else None,
             rules_facts_sha256=rules_pin.rules_facts_sha256 if rules_pin else None,
+            opponent_intel_pin_status="PINNED" if intel_pin else None,
+            opponent_intel_generation_id=intel_pin.generation_id if intel_pin else None,
+            opponent_intel_snapshot_sha256=(
+                intel_pin.snapshot_sha256 if intel_pin else None
+            ),
         )
         self.repository.insert_session(session)
 
@@ -485,7 +509,32 @@ class Bundle3Fixture:
         assert session is not None
         return load_champions_rules_context(session)
 
-    def build_request(self) -> RichStateTurnAdviceRequest:
+    def opponent_intel_context(self, turn_number: int = CURRENT_TURN_NUMBER) -> dict[str, Any]:
+        session = self.repository.load_active_session()
+        assert session is not None
+        return load_opponent_intel_context(
+            session,
+            confirmed_state=self.repository.get_confirmed_turn_state(
+                self.confirmed_state_id(turn_number)
+            ),
+            intel_directory=self.intel_directory,
+        )
+
+    def build_request_with_intel_context(
+        self, opponent_intel_context: dict[str, Any]
+    ) -> RichStateTurnAdviceRequest:
+        """Bundle 5: assemble a request with a caller-supplied INTEL context.
+
+        Used by the Bundle 5 fail-closed tests to feed a deliberately
+        forged/stale/malformed context through the *real* request builder,
+        rather than asserting against a hand-rolled parallel code path.
+        """
+
+        return self.build_request(opponent_intel_context=opponent_intel_context)
+
+    def build_request(
+        self, opponent_intel_context: dict[str, Any] | None = None
+    ) -> RichStateTurnAdviceRequest:
         identity = self.identity(CURRENT_TURN_NUMBER)
         state = self.repository.get_confirmed_turn_state(
             self.confirmed_state_id(CURRENT_TURN_NUMBER)
@@ -507,6 +556,11 @@ class Bundle3Fixture:
             self_active=SELF_ACTIVE_BY_TURN[CURRENT_TURN_NUMBER],
             bundle3_context=self.bundle3_context(),
             rules_context=self.rules_context(),
+            opponent_intel_context=(
+                opponent_intel_context
+                if opponent_intel_context is not None
+                else self.opponent_intel_context()
+            ),
             self_team_build_sha256=facts.self_team_build_sha256,
         )
 
@@ -533,8 +587,8 @@ def test_request_contract_is_v4_with_all_four_new_fields(fixture: Bundle3Fixture
     ``test_gemini_v2_bundle4_versioned_rules_context.py``)."""
 
     request = fixture.build_request()
-    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v5"
-    assert request.contract_version == "maple-turn-advice.v5"
+    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v6"
+    assert request.contract_version == "maple-turn-advice.v6"
     canonical = canonical_rich_request_dict(request)
     for field in (
         "applied_selection_id",

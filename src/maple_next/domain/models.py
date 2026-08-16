@@ -360,6 +360,16 @@ class BattleSession:
     rules_ruleset_version: str | None = None
     rules_snapshot_id: str | None = None
     rules_facts_sha256: str | None = None
+    #: Bundle 5 (Gemini V2): the immutable opponent-INTEL population
+    #: generation pinned to this match at creation time. Set exactly once,
+    #: at ``insert_session``, and never updated afterwards (``save_session``
+    #: deliberately does not write these columns). ``PINNED`` carries both
+    #: identity values; ``UNAVAILABLE`` carries neither; all three ``None``
+    #: means the match predates Bundle 5 and deterministically resolves as
+    #: UNAVAILABLE. See ``domain/opponent_intel_context.py``.
+    opponent_intel_pin_status: str | None = None
+    opponent_intel_generation_id: str | None = None
+    opponent_intel_snapshot_sha256: str | None = None
 
     def bump_battle(self) -> None:
         self.battle_revision += 1

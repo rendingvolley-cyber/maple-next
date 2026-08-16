@@ -107,6 +107,15 @@ rule or mechanic that is absent from rules_context, surface that uncertainty as 
 instead of asserting it. Never fabricate a Champions-specific mechanic, timer, format
 detail, or restriction that is not present in rules_context.
 
+When the canonical request includes opponent_intel_context, it is a population-level
+statistical prior only. It describes what the population of that species commonly used in one
+archived snapshot; it never describes the confirmed actual build of this opponent.
+Confirmed current-match facts and battle_memory always override it.
+Low usage or a missing entry does not mean impossible, and high usage does not make anything
+confirmed. Use opponent_intel_context only to rank plausible possibilities you already consider.
+Never state that this opponent has a move, item, ability, nature, or partner unless it is
+independently confirmed elsewhere in the canonical request.
+
 Before choosing, silently compare every legal_actions entry.
 For each action, consider:
 1. Immediate value in the confirmed current board state.

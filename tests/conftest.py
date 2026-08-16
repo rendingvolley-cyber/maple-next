@@ -15,6 +15,31 @@ from maple_next.ui.match_window import MatchFlowWindow  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def isolated_runtime_root(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Path]:
+    """Point every test's runtime-root resolution at a throwaway directory.
+
+    Bundle 5 (Gemini V2) made match creation resolve the opponent-INTEL
+    runtime directory (``%LOCALAPPDATA%\\MapleNext\\Battle1\\
+    opponent_intel_db`` by default) so a new match can pin an immutable
+    population generation. Without this fixture, any test that creates a
+    match would read -- and, when only the flat pair is provisioned,
+    archive a generation into -- the operator's *real* runtime artifact.
+
+    Redirecting ``MAPLE_NEXT_RUNTIME_ROOT`` (the highest-priority source in
+    ``opponent_intel_db.runtime_paths.resolve_intel_runtime_root`` after an
+    explicit argument) for the whole suite keeps every test hermetic and
+    guarantees the real provisioned artifact is never read or mutated by a
+    test run. Tests that need INTEL content build their own fixture bytes.
+    """
+
+    root = tmp_path_factory.mktemp("maple-next-runtime-root")
+    monkeypatch.setenv("MAPLE_NEXT_RUNTIME_ROOT", str(root))
+    yield root
+
+
+@pytest.fixture(autouse=True)
 def show_match_flow_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[None]:

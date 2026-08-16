@@ -467,8 +467,17 @@ def test_provider_ready_request_fails_closed_for_unpinned_match(tmp_path: Path) 
 # =========================================================================
 
 
-def test_request_contract_is_v5_and_carries_rules_context() -> None:
-    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v5"
+def test_request_contract_still_carries_rules_context_after_v6() -> None:
+    """Bundle 5 advanced the contract to v6; Bundle 4's field is unchanged.
+
+    The version constant moved (``.v5`` -> ``.v6``) because Bundle 5 added
+    exactly one new top-level field. Bundle 4's ``rules_context`` -- its
+    presence, its schema version, and its content -- is untouched, which the
+    assertions below and ``test_canonical_request_carries_rules_context_and_
+    all_bundle_1_to_3_fields`` continue to prove.
+    """
+
+    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v6"
 
 
 def test_canonical_request_carries_rules_context_and_all_bundle_1_to_3_fields(
@@ -569,6 +578,7 @@ def test_rules_context_missing_keys_fail_closed_defense_in_depth(tmp_path: Path)
                 self_active=SELF_ACTIVE_BY_TURN[CURRENT_TURN_NUMBER],
                 bundle3_context=fixture.bundle3_context(),
                 rules_context={"context_schema_version": RULES_CONTEXT_SCHEMA_VERSION},
+                opponent_intel_context=fixture.opponent_intel_context(),
             )
     finally:
         fixture.close()

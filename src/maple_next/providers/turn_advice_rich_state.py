@@ -49,6 +49,11 @@ from maple_next.domain.battle_memory import (
 from maple_next.domain.champions_rules import RULES_CONTEXT_SCHEMA_VERSION
 from maple_next.domain.enums import ActionType
 from maple_next.domain.legal_switches import LegalSwitchConfirmation
+from maple_next.domain.opponent_intel_context import (
+    CONTEXT_STATUS_AVAILABLE,
+    OpponentIntelContextError,
+    validate_opponent_intel_context,
+)
 from maple_next.domain.turn_state import (
     ConfirmationMeta,
     ConfirmedLegalActionSelection,
@@ -92,7 +97,19 @@ from maple_next.providers.turn_request import (
 #: serialization, request bytes, ``request_hash``, and deterministic
 #: rebuild exactly like every other field: a rules version/content/hash
 #: change changes the request hash.
-RICH_STATE_REQUEST_CONTRACT_VERSION = "maple-turn-advice.v5"
+#:
+#: Bundle 5 (Gemini V2) raises this from ``.v5`` to ``.v6``: every ``.v5``
+#: field is preserved verbatim with unchanged semantics, and exactly one
+#: top-level field, ``opponent_intel_context``, is added -- the compact,
+#: non-authoritative opponent *population* prior resolved from the
+#: immutable INTEL generation pinned to this match (see
+#: ``domain/opponent_intel_context.py``). It participates in canonical
+#: serialization, request bytes, ``request_hash``, and deterministic
+#: rebuild exactly like every other field: a different pinned INTEL
+#: snapshot, or a different confirmed opponent active, changes the hash.
+#: Bundle 5 is input context only -- it does not touch the response/output
+#: contract, legal actions, confirmed state, or battle memory.
+RICH_STATE_REQUEST_CONTRACT_VERSION = "maple-turn-advice.v6"
 
 #: Top-level keys ``rules_context`` must carry. Defence in depth: the value
 #: is always actually produced by
@@ -246,6 +263,15 @@ class RichStateTurnAdviceRequest:
     #: battle rules within its declared coverage; never raw HTML, never a
     #: live network fetch. Validated in ``__post_init__`` below.
     rules_context: dict[str, Any]
+    #: Bundle 5 (Gemini V2). The compact opponent *population* prior
+    #: resolved from the immutable INTEL generation pinned to this match
+    #: (``domain.opponent_intel_context.build_opponent_intel_context``).
+    #: Explicitly non-authoritative (``authority = POPULATION_PRIOR``): it
+    #: never describes the confirmed opponent build, never overrides a
+    #: confirmed match fact or battle memory, and is ``UNAVAILABLE`` /
+    #: ``MISMATCHED`` with ``population = None`` whenever it cannot be
+    #: proven. Validated in ``__post_init__`` below.
+    opponent_intel_context: dict[str, Any]
     request_hash: str
 
     def __post_init__(self) -> None:
@@ -254,6 +280,22 @@ class RichStateTurnAdviceRequest:
             raise RichStateRequestError(f"RULES_CONTEXT_MISSING_KEYS:{sorted(missing)}")
         if self.rules_context["context_schema_version"] != RULES_CONTEXT_SCHEMA_VERSION:
             raise RichStateRequestError("RULES_CONTEXT_UNSUPPORTED_SCHEMA_VERSION")
+        # Bundle 5 defence in depth: a request must never be assembled from
+        # a population context that claims more than it can prove (an
+        # AVAILABLE status with malformed/over-length/out-of-range data, a
+        # population payload attached to an UNAVAILABLE/MISMATCHED status,
+        # or an authority claim other than POPULATION_PRIOR).
+        try:
+            validate_opponent_intel_context(self.opponent_intel_context)
+        except OpponentIntelContextError as exc:
+            raise RichStateRequestError(f"OPPONENT_INTEL_CONTEXT_INVALID:{exc}") from exc
+        if self.opponent_intel_context["status"] == CONTEXT_STATUS_AVAILABLE:
+            # A MATCHED compatibility claim must be consistent with the
+            # rules actually pinned to this match, not merely asserted.
+            snapshot_format = str(self.opponent_intel_context["snapshot"]["format"]).upper()
+            pinned_format = str(self.rules_context["facts"]["battle_format"]).upper()
+            if snapshot_format != pinned_format:
+                raise RichStateRequestError("OPPONENT_INTEL_COMPATIBILITY_CLAIM_INVALID")
 
 
 def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
@@ -341,6 +383,13 @@ def canonical_rich_request_dict(request: RichStateTurnAdviceRequest) -> dict[str
         # ``domain.champions_rules.build_rules_context``) -- never raw
         # HTML/source documents, never re-derived or re-fetched here.
         "rules_context": request.rules_context,
+        # Bundle 5. The pinned opponent population prior, embedded verbatim
+        # (already a plain, JSON-primitive-only dict from
+        # ``domain.opponent_intel_context.build_opponent_intel_context``,
+        # with deterministic top-8-in-snapshot-order categories) -- never
+        # the population database itself, never raw source documents,
+        # never re-derived or re-fetched here.
+        "opponent_intel_context": request.opponent_intel_context,
     }
     return payload
 
@@ -388,6 +437,7 @@ def build_rich_state_turn_advice_request(
     self_active: str,
     bundle3_context: Bundle3TurnContext,
     rules_context: dict[str, Any],
+    opponent_intel_context: dict[str, Any],
     evidence: FixedEvidenceMetadata | None = None,
     self_team_build_sha256: str | None = None,
     confirmed_fainted_members: frozenset[str] = frozenset(),
@@ -421,6 +471,16 @@ def build_rich_state_turn_advice_request(
     this function is ever called. This builder only re-validates the
     dict's shape (:class:`RichStateTurnAdviceRequest`'s ``__post_init__``)
     as defense in depth -- it never re-derives or re-fetches rules content.
+
+    ``opponent_intel_context`` is required in exactly the same way, and for
+    exactly the same reason: it is produced by the one shared application
+    helper
+    (``application.turn_provider_export_bridge.load_opponent_intel_context``),
+    which resolves the match's *persisted* INTEL generation pin against
+    immutable archived generation storage. This builder additionally proves
+    that the context is bound to the reviewed confirmed opponent active
+    (below) and re-validates its shape, but never resolves, re-reads, or
+    re-derives population data itself.
     """
 
     gate = evaluate_provider_ready_gate(
@@ -466,6 +526,18 @@ def build_rich_state_turn_advice_request(
         if memory_turn.identity.turn_number >= current_identity.turn_number:
             raise RichStateRequestError("BATTLE_MEMORY_CURRENT_OR_FUTURE_TURN")
 
+    # --- Bundle 5 context binding, after the Bundle 3 checks --------------
+    # The population prior may only ever be bound to the *reviewed
+    # confirmed* opponent active. Anything else -- an OCR-only identity, an
+    # unconfirmed draft, a team-preview member, an inferred backline, or
+    # the prior active after a confirmed switch -- must fail closed here,
+    # before any provider dispatch, rather than quietly advising against
+    # the wrong Pokemon.
+    opponent_active = confirmed_state.opponent_side.active
+    expected_active = opponent_active.value if opponent_active.is_confirmed else None
+    if opponent_intel_context["confirmed_active_species"] != expected_active:
+        raise RichStateRequestError("OPPONENT_INTEL_CONTEXT_SPECIES_MISMATCH")
+
     projection = build_rich_state_projection(
         confirmed_state, confirmed_legal_actions, evidence=evidence
     )
@@ -506,6 +578,7 @@ def build_rich_state_turn_advice_request(
         selected_three_builds=bundle3_context.selected_three_builds,
         battle_memory=bundle3_context.battle_memory,
         rules_context=rules_context,
+        opponent_intel_context=opponent_intel_context,
         request_hash="",
     )
     return replace(request, request_hash=rich_request_payload_hash(request))

@@ -19,7 +19,9 @@ from maple_next.opponent_intel_db.generation_store import (
     DEFAULT_SNAPSHOT_FILENAME,
     POINTER_FILENAME,
     GenerationStoreError,
+    materialize_generation,
     read_current_generation,
+    read_generation,
 )
 from maple_next.opponent_intel_db.move_catalog_builder import MOVE_CATALOG_SCHEMA_VERSION
 from maple_next.opponent_intel_db.snapshot_store import (
@@ -39,6 +41,10 @@ class RuntimeIntelBundle:
     snapshot_document: SnapshotDocument
     catalog_names: tuple[str, ...]
     is_legacy: bool
+    #: SHA-256 of the exact snapshot bytes this bundle was validated from.
+    #: Bundle 5 (Gemini V2) pins this value per match, so a later
+    #: substitution of different bytes under the same id fails closed.
+    snapshot_sha256: str
 
 
 def _decode_snapshot(content: bytes) -> SnapshotDocument:
@@ -88,6 +94,33 @@ def _expected_catalog_counts(document: SnapshotDocument) -> dict[str, int]:
     return counts
 
 
+def composite_pair_digest(snapshot_bytes: bytes, catalog_bytes: bytes) -> str:
+    """The one deterministic identity convention for a flat snapshot/catalog pair.
+
+    Factored out (behavior unchanged) so the legacy runtime identity
+    ``legacy:<digest>`` and the Bundle 5 archived generation id
+    :func:`materialized_generation_id` are provably derived from the exact
+    same bytes, in the exact same way -- rather than each inventing its own
+    convention.
+    """
+
+    return hashlib.sha256(snapshot_bytes + b"\0" + catalog_bytes).hexdigest()
+
+
+def materialized_generation_id(snapshot_bytes: bytes, catalog_bytes: bytes) -> str:
+    """The deterministic archived-generation id for one exact flat pair.
+
+    Reuses :func:`composite_pair_digest` verbatim, so the id is
+    reproducibly tied to the exact accepted snapshot + catalog bytes and
+    never random. The ``legacy:`` runtime-identity spelling cannot be
+    reused literally because a generation id is also a *directory name*
+    and ``:`` is not a legal path character on Windows; the prefix is
+    therefore ``materialized-``, over the identical digest.
+    """
+
+    return f"materialized-{composite_pair_digest(snapshot_bytes, catalog_bytes)}"
+
+
 def _validated_bundle(
     *,
     generation_id: str | None,
@@ -105,7 +138,7 @@ def _validated_bundle(
     if catalog_counts != _expected_catalog_counts(document):
         raise GenerationStoreError("SNAPSHOT_CATALOG_CONTENT_MISMATCH")
     resolved_generation_id = generation_id or (
-        "legacy:" + hashlib.sha256(snapshot_bytes + b"\0" + catalog_bytes).hexdigest()
+        "legacy:" + composite_pair_digest(snapshot_bytes, catalog_bytes)
     )
     return RuntimeIntelBundle(
         generation_id=resolved_generation_id,
@@ -114,6 +147,7 @@ def _validated_bundle(
         snapshot_document=document,
         catalog_names=catalog_names,
         is_legacy=is_legacy,
+        snapshot_sha256=hashlib.sha256(snapshot_bytes).hexdigest(),
     )
 
 
@@ -146,4 +180,114 @@ def resolve_runtime_intel_bundle(intel_directory: Path) -> RuntimeIntelBundle | 
         snapshot_path=snapshot_path,
         catalog_path=catalog_path,
         is_legacy=True,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PinnableGeneration:
+    """The immutable generation identity a brand-new match may pin.
+
+    ``generation_id`` always addresses an archived generation directory
+    that :func:`load_pinned_generation` can resolve *without* consulting
+    ``current_generation.json``, so a later pointer flip can never change
+    what an existing match resolves.
+    """
+
+    generation_id: str
+    snapshot_sha256: str
+    #: ``True`` when this identity was created by archiving the currently
+    #: provisioned flat pair (rather than already existing as a committed,
+    #: pointer-published generation).
+    materialized: bool
+
+
+def resolve_pinnable_generation(intel_directory: Path) -> PinnableGeneration | None:
+    """Resolve -- archiving first if required -- the generation a new match pins.
+
+    Bundle 5 (Gemini V2). Two accepted shapes, no others:
+
+    - a pointer-published generation already exists: its id is already
+      immutable and id-addressable, so it is pinned as-is and **nothing is
+      written**;
+    - only the flat ``species_stats_snapshot.json`` /``move_catalog.json``
+      pair exists (the currently provisioned runtime shape): its exact
+      bytes are validated and then archived verbatim under a deterministic,
+      content-derived generation id. No download, no source parsing, no
+      re-normalization, no mutation of the flat files, and no pointer flip.
+
+    Returns ``None`` when no opponent-INTEL artifact is provisioned at all.
+    Raises :class:`GenerationStoreError` when an artifact exists but cannot
+    be trusted (corrupt, incomplete pair, mismatched catalog) -- callers at
+    match-creation time treat that as "pin UNAVAILABLE", never as "pin
+    whatever parsed".
+    """
+
+    pointer_path = intel_directory / POINTER_FILENAME
+    if pointer_path.exists():
+        active = read_current_generation(intel_directory)
+        if active is None:  # pragma: no cover - pointer existence makes this impossible
+            raise GenerationStoreError("POINTER_EXISTS_BUT_NO_ACTIVE_GENERATION")
+        return PinnableGeneration(
+            generation_id=active.pointer.generation_id,
+            snapshot_sha256=active.pointer.snapshot_sha256,
+            materialized=False,
+        )
+
+    snapshot_path = intel_directory / DEFAULT_SNAPSHOT_FILENAME
+    catalog_path = intel_directory / DEFAULT_CATALOG_FILENAME
+    snapshot_exists = snapshot_path.is_file()
+    catalog_exists = catalog_path.is_file()
+    if not snapshot_exists and not catalog_exists:
+        return None
+    if not snapshot_exists or not catalog_exists:
+        raise GenerationStoreError("LEGACY_PAIR_INCOMPLETE")
+
+    # Validate exactly as the runtime resolver does before anything is
+    # archived: an unusable pair must never become an immutable generation.
+    bundle = _validated_bundle(
+        generation_id=None,
+        snapshot_path=snapshot_path,
+        catalog_path=catalog_path,
+        is_legacy=True,
+    )
+    snapshot_bytes = snapshot_path.read_bytes()
+    catalog_bytes = catalog_path.read_bytes()
+    generation_id = materialized_generation_id(snapshot_bytes, catalog_bytes)
+    manifest = materialize_generation(
+        intel_directory,
+        generation_id=generation_id,
+        snapshot_bytes=snapshot_bytes,
+        catalog_bytes=catalog_bytes,
+        snapshot_schema_version=bundle.snapshot_document.schema_version,
+        catalog_schema_version=MOVE_CATALOG_SCHEMA_VERSION,
+        source=bundle.snapshot_document.source,
+        # Deterministic on purpose: the archive records when the data was
+        # fetched, never when this process happened to run, so the same
+        # bytes always produce a byte-identical manifest.
+        created_at=bundle.snapshot_document.fetched_at,
+    )
+    return PinnableGeneration(
+        generation_id=manifest.generation_id,
+        snapshot_sha256=manifest.snapshot_sha256,
+        materialized=True,
+    )
+
+
+def load_pinned_generation(intel_directory: Path, generation_id: str) -> RuntimeIntelBundle:
+    """Load the exact archived generation named by a match's pin. Fails closed.
+
+    Never consults ``current_generation.json`` and never falls back to the
+    flat pair: a match resolves the generation it pinned, or nothing. The
+    archived bytes are hash-verified against the generation's own manifest
+    and then re-validated through the same strict decoder the runtime
+    resolver uses, so a corrupt or substituted archive raises
+    :class:`GenerationStoreError` instead of yielding degraded content.
+    """
+
+    archived = read_generation(intel_directory, generation_id)
+    return _validated_bundle(
+        generation_id=archived.pointer.generation_id,
+        snapshot_path=archived.snapshot_path,
+        catalog_path=archived.catalog_path,
+        is_legacy=False,
     )

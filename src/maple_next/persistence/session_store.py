@@ -33,8 +33,10 @@ class SessionStoreMixin(StoreBase):
                 current_reviewed_selection_id, current_selection_advice_id,
                 current_applied_selection_id, current_turn_id, current_observation_id,
                 current_reviewed_board_id, current_turn_advice_id, active_slot,
-                rules_ruleset_id, rules_ruleset_version, rules_snapshot_id, rules_facts_sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rules_ruleset_id, rules_ruleset_version, rules_snapshot_id, rules_facts_sha256,
+                opponent_intel_pin_status, opponent_intel_generation_id,
+                opponent_intel_snapshot_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             self._session_values(session),
         )
@@ -87,6 +89,12 @@ class SessionStoreMixin(StoreBase):
             session.rules_ruleset_version,
             session.rules_snapshot_id,
             session.rules_facts_sha256,
+            # Bundle 5 (Gemini V2): written only here, on insert. The
+            # UPDATE in ``save_session`` deliberately omits these columns
+            # so no later command can silently repin a match's INTEL.
+            session.opponent_intel_pin_status,
+            session.opponent_intel_generation_id,
+            session.opponent_intel_snapshot_sha256,
         )
 
     def load_active_session(self) -> BattleSession | None:
@@ -116,6 +124,9 @@ class SessionStoreMixin(StoreBase):
             rules_ruleset_version=row["rules_ruleset_version"],
             rules_snapshot_id=row["rules_snapshot_id"],
             rules_facts_sha256=row["rules_facts_sha256"],
+            opponent_intel_pin_status=row["opponent_intel_pin_status"],
+            opponent_intel_generation_id=row["opponent_intel_generation_id"],
+            opponent_intel_snapshot_sha256=row["opponent_intel_snapshot_sha256"],
         )
 
     def append_selection_facts(self, session_id: str, facts: SelectionFacts) -> None:

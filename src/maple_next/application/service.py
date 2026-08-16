@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from maple_next.application.turn_legal_action_boundary import build_confirmed_le
 from maple_next.application.turn_provider_export_bridge import (
     load_bundle3_turn_context,
     load_champions_rules_context,
+    load_opponent_intel_context,
 )
 from maple_next.domain.battle_memory import Bundle3ContextError
 from maple_next.domain.champions_rules import (
@@ -49,6 +51,10 @@ from maple_next.domain.models import (
     TurnAdviceSnapshot,
     TurnFactsSnapshot,
 )
+from maple_next.domain.opponent_intel_context import (
+    OpponentIntelContextError,
+    OpponentIntelPin,
+)
 from maple_next.domain.team_build import ChampionsTeamBuild
 from maple_next.domain.turn_state import (
     ActionResultDelta,
@@ -63,6 +69,12 @@ from maple_next.domain.turn_state import (
     validate_turn_state_full_chain,
 )
 from maple_next.domain.turn_state_projection import ProviderReadyGateError
+from maple_next.opponent_intel_db.generation_store import GenerationStoreError
+from maple_next.opponent_intel_db.runtime_intel import resolve_pinnable_generation
+from maple_next.opponent_intel_db.runtime_paths import (
+    intel_db_directory,
+    resolve_intel_runtime_root,
+)
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers.selection_request import (
     SelectionAdviceRequest,
@@ -119,6 +131,35 @@ def _resolve_new_match_rules_pin() -> RulesPin:
         raise DomainError(f"CHAMPIONS_RULES_SNAPSHOT_UNAVAILABLE:{exc}") from exc
 
 
+def _resolve_new_match_opponent_intel_pin(intel_directory: Path) -> OpponentIntelPin:
+    """Resolve the immutable opponent-INTEL pin for a brand-new match.
+
+    Bundle 5 (Gemini V2): every new match records, exactly once, either the
+    immutable generation its population INTEL is pinned to or an explicit
+    ``UNAVAILABLE``. Once written it is never revised -- not by
+    ``save_session``, not by later request construction -- so a newer
+    global generation can never retroactively change what an in-progress
+    match reasons under.
+
+    Deliberately **fail-soft**, unlike the rules pin: population INTEL is
+    advisory context, so a missing, incomplete, or untrustworthy artifact
+    pins ``UNAVAILABLE`` instead of blocking match creation. What is *not*
+    soft is the consequence: an ``UNAVAILABLE`` pin deterministically
+    resolves to an ``UNAVAILABLE`` context for the whole match and never
+    silently adopts whatever snapshot appears later.
+    """
+
+    try:
+        pinnable = resolve_pinnable_generation(intel_directory)
+    except (GenerationStoreError, OSError):
+        return OpponentIntelPin.unavailable()
+    if pinnable is None:
+        return OpponentIntelPin.unavailable()
+    return OpponentIntelPin.pinned(
+        generation_id=pinnable.generation_id, snapshot_sha256=pinnable.snapshot_sha256
+    )
+
+
 def _reviewed_board_snapshot_from_turn_facts(facts: TurnFactsSnapshot) -> ReviewedBoardSnapshot:
     """Adapt the flat, human-confirmed :class:`TurnFactsSnapshot` into the
     richer Lane C :class:`ReviewedBoardSnapshot` shape.
@@ -167,8 +208,30 @@ def _legal_actions_from_turn_facts(facts: TurnFactsSnapshot) -> tuple[LegalActio
 
 
 class BattleApplication:
-    def __init__(self, repository: SQLiteRepository) -> None:
+    def __init__(
+        self,
+        repository: SQLiteRepository,
+        *,
+        opponent_intel_directory: str | Path | None = None,
+    ) -> None:
         self.repository = repository
+        #: Bundle 5 (Gemini V2). Where immutable opponent-INTEL generations
+        #: live. ``None`` means "resolve the real runtime location on
+        #: demand" (the same LOCALAPPDATA/env resolution the INTEL CLI and
+        #: the Battle Record UI already use); tests and offline tooling
+        #: pass an explicit directory so they never read or write the
+        #: operator's provisioned runtime artifact.
+        self._opponent_intel_directory = (
+            Path(opponent_intel_directory).expanduser()
+            if opponent_intel_directory is not None
+            else None
+        )
+
+    @property
+    def opponent_intel_directory(self) -> Path:
+        if self._opponent_intel_directory is not None:
+            return self._opponent_intel_directory
+        return intel_db_directory(resolve_intel_runtime_root())
 
     def projection(self) -> DomainProjection:
         session = self.repository.load_active_session()
@@ -188,6 +251,7 @@ class BattleApplication:
             if self.repository.load_active_session() is not None:
                 raise DomainError("ACTIVE_MATCH_EXISTS")
             rules_pin = _resolve_new_match_rules_pin()
+            intel_pin = _resolve_new_match_opponent_intel_pin(self.opponent_intel_directory)
             session = BattleSession(
                 session_id=str(uuid4()),
                 match_id=str(uuid4()),
@@ -198,6 +262,9 @@ class BattleApplication:
                 rules_ruleset_version=rules_pin.ruleset_version,
                 rules_snapshot_id=rules_pin.rules_snapshot_id,
                 rules_facts_sha256=rules_pin.rules_facts_sha256,
+                opponent_intel_pin_status=intel_pin.status,
+                opponent_intel_generation_id=intel_pin.generation_id,
+                opponent_intel_snapshot_sha256=intel_pin.snapshot_sha256,
             )
             self.repository.insert_session(session)
         return session
@@ -960,6 +1027,26 @@ class BattleApplication:
             except ChampionsRulesError as exc:
                 raise DomainError(f"CHAMPIONS_RULES_CONTEXT_INVALID:{exc}") from exc
 
+            # Bundle 5 (Gemini V2): resolve the match's persisted INTEL pin
+            # against immutable archived generation storage, through the
+            # one shared helper the offline rebuild path below also uses.
+            # Never resolves "the current generation", never contacts a
+            # network, and never falls back to the legacy opponent-meta
+            # cache. Fails closed when a PINNED generation is missing,
+            # corrupt, or resolves to a different identity than pinned;
+            # fails soft (deterministic UNAVAILABLE/MISMATCHED, request
+            # still provider-ready) for an unpinned match, an unconfirmed
+            # opponent active, an absent species, or a season/format
+            # mismatch.
+            try:
+                opponent_intel_context = load_opponent_intel_context(
+                    session,
+                    confirmed_state=latest_state,
+                    intel_directory=self.opponent_intel_directory,
+                )
+            except (OpponentIntelContextError, ChampionsRulesError) as exc:
+                raise DomainError(f"OPPONENT_INTEL_CONTEXT_INVALID:{exc}") from exc
+
             try:
                 request = build_rich_state_turn_advice_request(
                     confirmed_state=latest_state,
@@ -973,6 +1060,7 @@ class BattleApplication:
                     self_active=self_active_known.value,
                     bundle3_context=bundle3_context,
                     rules_context=rules_context,
+                    opponent_intel_context=opponent_intel_context,
                     evidence=evidence,
                     self_team_build_sha256=self_team_build_sha256,
                     confirmed_fainted_members=self._confirmed_fainted_members(
@@ -1233,6 +1321,21 @@ class BattleApplication:
         except ChampionsRulesError as exc:
             raise DomainError(f"REBUILD_CHAMPIONS_RULES_CONTEXT_INVALID:{exc}") from exc
 
+        # Bundle 5 (Gemini V2): rebuilt through the exact same shared helper
+        # the authorizing path used, resolving the exact *persisted* INTEL
+        # generation (never "current"), so identical durable state always
+        # reproduces byte-identical ``opponent_intel_context`` -- and a
+        # missing/corrupt/substituted generation fails closed here instead
+        # of silently rebuilding under different population data.
+        try:
+            opponent_intel_context = load_opponent_intel_context(
+                session,
+                confirmed_state=confirmed_state,
+                intel_directory=self.opponent_intel_directory,
+            )
+        except (OpponentIntelContextError, ChampionsRulesError) as exc:
+            raise DomainError(f"REBUILD_OPPONENT_INTEL_CONTEXT_INVALID:{exc}") from exc
+
         try:
             request = build_rich_state_turn_advice_request(
                 confirmed_state=confirmed_state,
@@ -1246,6 +1349,7 @@ class BattleApplication:
                 self_active=self_active_known.value,
                 bundle3_context=bundle3_context,
                 rules_context=rules_context,
+                opponent_intel_context=opponent_intel_context,
                 evidence=evidence,
                 self_team_build_sha256=self_team_build_sha256,
                 confirmed_fainted_members=self._confirmed_fainted_members(

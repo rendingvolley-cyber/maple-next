@@ -194,6 +194,148 @@ def commit_generation(
     return pointer
 
 
+def generation_directory(intel_directory: Path, generation_id: str) -> Path:
+    """The (not-necessarily-existing) directory one generation id occupies."""
+
+    return intel_directory / GENERATIONS_DIRNAME / generation_id
+
+
+def materialize_generation(
+    intel_directory: Path,
+    *,
+    generation_id: str,
+    snapshot_bytes: bytes,
+    catalog_bytes: bytes,
+    snapshot_schema_version: str,
+    catalog_schema_version: str,
+    source: str,
+    created_at: str,
+    snapshot_filename: str = DEFAULT_SNAPSHOT_FILENAME,
+    catalog_filename: str = DEFAULT_CATALOG_FILENAME,
+) -> GenerationPointer:
+    """Archive an exact, already-validated byte pair under a caller-chosen id.
+
+    Bundle 5 (Gemini V2). This is deliberately *not*
+    :func:`commit_generation`: it archives bytes that are already the
+    accepted, validated runtime content into immutable, id-addressable
+    generation storage **without touching the pointer**, so that
+
+    - nothing is downloaded, re-parsed, re-normalized, or otherwise
+      re-derived -- the caller's bytes are written verbatim, and
+    - "which generation is current" is left exactly as it was, so
+      materializing never changes what any existing reader resolves.
+
+    ``generation_id`` is supplied by the caller precisely so it can be
+    *deterministic* (see ``runtime_intel.materialized_generation_id``)
+    rather than a fresh random uuid: the same bytes must always land in the
+    same archived generation, which is what makes materialization
+    idempotent and a durable per-match pin reproducible.
+
+    Idempotent: if the generation already exists and verifies against the
+    same bytes, its existing manifest is returned untouched. If it exists
+    carrying *different* content, this raises rather than overwriting -- a
+    content-derived id can only collide if something is wrong.
+    """
+
+    target = generation_directory(intel_directory, generation_id)
+    manifest = GenerationPointer(
+        generation_id=generation_id,
+        snapshot_filename=snapshot_filename,
+        catalog_filename=catalog_filename,
+        snapshot_sha256=hashlib.sha256(snapshot_bytes).hexdigest(),
+        catalog_sha256=hashlib.sha256(catalog_bytes).hexdigest(),
+        snapshot_schema_version=snapshot_schema_version,
+        catalog_schema_version=catalog_schema_version,
+        source=source,
+        created_at=created_at,
+    )
+    if target.exists():
+        existing = read_generation(intel_directory, generation_id)
+        if (
+            existing.pointer.snapshot_sha256 != manifest.snapshot_sha256
+            or existing.pointer.catalog_sha256 != manifest.catalog_sha256
+        ):
+            raise GenerationStoreError(f"MATERIALIZED_GENERATION_CONFLICT:{generation_id}")
+        return existing.pointer
+
+    generations_root = intel_directory / GENERATIONS_DIRNAME
+    generations_root.mkdir(parents=True, exist_ok=True)
+    staging_dir = generations_root / f".materializing-{uuid4().hex}"
+    manifest_bytes = (
+        json.dumps(manifest.to_json_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode("utf-8")
+    try:
+        staging_dir.mkdir(parents=True, exist_ok=False)
+        _atomic_write_bytes(staging_dir / snapshot_filename, snapshot_bytes)
+        _atomic_write_bytes(staging_dir / catalog_filename, catalog_bytes)
+        _atomic_write_bytes(staging_dir / MANIFEST_FILENAME, manifest_bytes)
+        _fsync_directory(staging_dir)
+        # One rename makes the complete generation visible; a crash before
+        # it leaves only an orphaned staging directory that no id addresses.
+        os.replace(staging_dir, target)
+    except OSError as exc:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        if target.exists():
+            # Lost a benign race against another process materializing the
+            # same content-derived id; verify rather than overwrite.
+            existing = read_generation(intel_directory, generation_id)
+            if existing.pointer.snapshot_sha256 == manifest.snapshot_sha256:
+                return existing.pointer
+        raise GenerationStoreError(f"MATERIALIZE_GENERATION_FAILED:{exc}") from exc
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    _fsync_directory(generations_root)
+    return manifest
+
+
+@dataclass(frozen=True, slots=True)
+class ArchivedGeneration:
+    """One immutable generation resolved by id, independent of the pointer."""
+
+    pointer: GenerationPointer
+    snapshot_path: Path
+    catalog_path: Path
+
+
+def read_generation(intel_directory: Path, generation_id: str) -> ArchivedGeneration:
+    """Resolve one archived generation **by id**, hash-verified. Fails closed.
+
+    Bundle 5 (Gemini V2). Deliberately independent of
+    ``current_generation.json``: a match that pinned a generation must keep
+    resolving *that* generation forever, even after a newer generation has
+    become current. Raises :class:`GenerationStoreError` when the
+    generation is missing, its manifest is corrupt or names a different id,
+    a file is absent, or either file's bytes no longer match the hashes
+    recorded when it was archived -- it never serves partial or substituted
+    content.
+    """
+
+    directory = generation_directory(intel_directory, generation_id)
+    manifest_path = directory / MANIFEST_FILENAME
+    if not directory.is_dir() or not manifest_path.is_file():
+        raise GenerationStoreError(f"GENERATION_NOT_FOUND:{generation_id}")
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GenerationStoreError(f"GENERATION_MANIFEST_UNREADABLE:{generation_id}") from exc
+    pointer = GenerationPointer.from_json_dict(raw)
+    if pointer.generation_id != generation_id:
+        raise GenerationStoreError(f"GENERATION_MANIFEST_ID_MISMATCH:{generation_id}")
+
+    snapshot_path = directory / pointer.snapshot_filename
+    catalog_path = directory / pointer.catalog_filename
+    if not snapshot_path.is_file() or not catalog_path.is_file():
+        raise GenerationStoreError(f"GENERATION_FILES_MISSING:{generation_id}")
+    if hashlib.sha256(snapshot_path.read_bytes()).hexdigest() != pointer.snapshot_sha256:
+        raise GenerationStoreError(f"SNAPSHOT_HASH_MISMATCH:{generation_id}")
+    if hashlib.sha256(catalog_path.read_bytes()).hexdigest() != pointer.catalog_sha256:
+        raise GenerationStoreError(f"CATALOG_HASH_MISMATCH:{generation_id}")
+    return ArchivedGeneration(
+        pointer=pointer, snapshot_path=snapshot_path, catalog_path=catalog_path
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ActiveGeneration:
     pointer: GenerationPointer

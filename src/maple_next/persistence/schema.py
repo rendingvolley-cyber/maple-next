@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -584,6 +584,19 @@ def migrate(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "battle_sessions", "rules_ruleset_version", "TEXT NULL")
     _ensure_column(connection, "battle_sessions", "rules_snapshot_id", "TEXT NULL")
     _ensure_column(connection, "battle_sessions", "rules_facts_sha256", "TEXT NULL")
+    # Bundle 5 (Gemini V2): pin the immutable opponent-INTEL population
+    # generation identity to the match at creation time. NULL on every
+    # existing/legacy row and never backfilled: a pre-Bundle-5 match must
+    # deterministically resolve as UNAVAILABLE population INTEL rather
+    # than retroactively adopting whatever snapshot is provisioned now
+    # (see ``domain/opponent_intel_context.py::OpponentIntelPin.
+    # from_session_fields``). ``opponent_intel_pin_status`` is
+    # ``PINNED``/``UNAVAILABLE`` for any match created from Bundle 5
+    # onward, so "explicitly no INTEL" stays distinguishable from
+    # "predates INTEL".
+    _ensure_column(connection, "battle_sessions", "opponent_intel_pin_status", "TEXT NULL")
+    _ensure_column(connection, "battle_sessions", "opponent_intel_generation_id", "TEXT NULL")
+    _ensure_column(connection, "battle_sessions", "opponent_intel_snapshot_sha256", "TEXT NULL")
     _sanitize_async_job_result_payloads(connection)
     connection.execute(
         "UPDATE schema_meta SET schema_version = ? WHERE singleton_id = 1",

@@ -638,6 +638,21 @@ def build_rules_context(snapshot: ChampionsRulesSnapshot) -> dict[str, Any]:
     }
 
 
+def resolve_pinned_rules_snapshot(pin: RulesPin) -> ChampionsRulesSnapshot:
+    """Resolve one match's persisted pin to the exact validated snapshot.
+
+    The verification step :func:`resolve_pinned_rules_context` already
+    performed, factored out unchanged so Bundle 5 can read canonical
+    regulation fields the compact ``rules_context`` does not carry
+    (``effective_period.season_id``) without re-deriving, re-reading, or
+    weakening the pin check.
+    """
+
+    snapshot = load_bundled_snapshot()
+    verify_pin_against_snapshot(pin, snapshot)
+    return snapshot
+
+
 def resolve_pinned_rules_context(pin: RulesPin) -> dict[str, Any]:
     """Resolve one match's persisted pin to its full ``rules_context`` dict.
 
@@ -650,6 +665,4 @@ def resolve_pinned_rules_context(pin: RulesPin) -> dict[str, Any]:
     different ruleset/version/snapshot.
     """
 
-    snapshot = load_bundled_snapshot()
-    verify_pin_against_snapshot(pin, snapshot)
-    return build_rules_context(snapshot)
+    return build_rules_context(resolve_pinned_rules_snapshot(pin))

@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from maple_next.opponent_intel_db.normalize import NormalizationError, SpeciesStatsRecord
+from maple_next.opponent_intel_db.normalize import (
+    NormalizationError,
+    SpeciesStatsRecord,
+    normalize_species_key,
+)
 
 SNAPSHOT_SCHEMA_VERSION = "opponent-intel-snapshot.v1"
 
@@ -81,15 +85,28 @@ class SnapshotDocument:
                 f"snapshot document 'species' must be an object, got {type(species_raw).__name__}"
             )
 
-        try:
-            species = {
-                species_id: SpeciesStatsRecord.from_json_dict(record)
-                for species_id, record in species_raw.items()
-            }
-        except NormalizationError as exc:
-            raise SnapshotStoreError(
-                f"snapshot document has a malformed species record: {exc}"
-            ) from exc
+        species: dict[str, SpeciesStatsRecord] = {}
+        for species_key, record_raw in species_raw.items():
+            try:
+                record = SpeciesStatsRecord.from_json_dict(record_raw)
+            except NormalizationError as exc:
+                raise SnapshotStoreError(
+                    f"snapshot document has a malformed species record: {exc}"
+                ) from exc
+            # Species identity is the *whole* point of a population lookup:
+            # every resolver in this codebase trusts the outer map key, so a
+            # document whose key names one species while the embedded record
+            # names another could hand a caller Garchomp's statistics while
+            # claiming to describe a confirmed Amoonguss. That is a corrupt
+            # document, not a recoverable one -- fail the whole decode
+            # closed rather than rewriting either value, normalizing one
+            # into the other, or partially accepting the map.
+            if normalize_species_key(str(species_key)) != normalize_species_key(record.species_id):
+                raise SnapshotStoreError(
+                    "snapshot document species key does not match the record's species_id: "
+                    f"key={species_key!r} species_id={record.species_id!r}"
+                )
+            species[species_key] = record
 
         return SnapshotDocument(
             schema_version=schema_version,

@@ -38,7 +38,11 @@ import math
 from dataclasses import dataclass
 from typing import Any, Final
 
-from maple_next.opponent_intel_db.normalize import RankedEntry, SpeciesStatsRecord
+from maple_next.opponent_intel_db.normalize import (
+    RankedEntry,
+    SpeciesStatsRecord,
+    normalize_species_key,
+)
 from maple_next.opponent_intel_db.snapshot_store import SnapshotDocument
 
 #: Compact contract embedded in a rich Turn Advice request (see
@@ -228,7 +232,7 @@ def resolve_species_record(
     if direct is not None:
         return direct
 
-    normalized = key.lower().replace(" ", "-")
+    normalized = normalize_species_key(key)
     normalized_hit = document.species.get(normalized)
     if normalized_hit is not None:
         return normalized_hit
@@ -243,6 +247,37 @@ def resolve_species_record(
         if species_id.lower() == normalized or record.display_name.strip().lower() == folded:
             return record
     return None
+
+
+def species_identity_matches(
+    confirmed_species: str, *, species_id: str, display_name: str
+) -> bool:
+    """Whether ``confirmed_species`` names exactly this resolved species record.
+
+    The inverse of :func:`resolve_species_record`, accepting exactly the
+    equivalences that resolver can produce and nothing more:
+
+    1. the canonical ``species_id`` representation (exact, or equal after
+       the shared case/space/hyphen normalization);
+    2. the exact ``display_name`` representation;
+    3. that same ``display_name`` case-folded.
+
+    Deliberately **not** fuzzy -- no prefix/substring matching, no
+    edit-distance, no alias table -- so a population prior can never be
+    bound to a "close enough" species.
+    """
+
+    key = confirmed_species.strip()
+    if not key or key == _UNKNOWN_SPECIES_TOKEN:
+        return False
+    if key == species_id.strip():
+        return True
+    if normalize_species_key(key) == normalize_species_key(species_id):
+        return True
+    display = display_name.strip()
+    if not display:
+        return False
+    return key == display or key.lower() == display.lower()
 
 
 def _canonical_entry(entry: RankedEntry) -> dict[str, Any]:
@@ -496,7 +531,10 @@ def validate_opponent_intel_context(context: Any) -> None:
     actually produced by :func:`build_opponent_intel_context`, but a rich
     request must never be assembled from a caller-supplied dict that (for
     example) claims ``AVAILABLE`` while carrying malformed, out-of-range,
-    over-length, or entirely absent population data.
+    over-length, or entirely absent population data, or while its
+    ``resolved_species`` -- the species the population payload actually
+    describes -- is not the ``confirmed_active_species`` it claims to
+    describe.
     """
 
     if not isinstance(context, dict):
@@ -540,6 +578,24 @@ def validate_opponent_intel_context(context: Any) -> None:
     resolved = context["resolved_species"]
     if not isinstance(resolved, dict) or set(resolved) != {"species_id", "display_name"}:
         raise OpponentIntelContextError("AVAILABLE_CONTEXT_RESOLVED_SPECIES_INVALID")
+    resolved_species_id = resolved["species_id"]
+    resolved_display_name = resolved["display_name"]
+    if not isinstance(resolved_species_id, str) or not resolved_species_id.strip():
+        raise OpponentIntelContextError("AVAILABLE_CONTEXT_RESOLVED_SPECIES_INVALID")
+    if not isinstance(resolved_display_name, str) or not resolved_display_name.strip():
+        raise OpponentIntelContextError("AVAILABLE_CONTEXT_RESOLVED_SPECIES_INVALID")
+    # The population payload below describes *the resolved record*. If that
+    # record is not the very species named by ``confirmed_active_species``,
+    # the context is claiming to describe the confirmed opponent while
+    # actually carrying another species' statistics -- the exact
+    # wrong-species substitution the authority ordering exists to prevent.
+    # Fail closed; never re-resolve, re-label, or "correct" either value.
+    if not species_identity_matches(
+        species,
+        species_id=resolved_species_id,
+        display_name=resolved_display_name,
+    ):
+        raise OpponentIntelContextError("AVAILABLE_CONTEXT_RESOLVED_SPECIES_NOT_CONFIRMED_ACTIVE")
     snapshot = context["snapshot"]
     if not isinstance(snapshot, dict) or not snapshot.get("generation_id"):
         raise OpponentIntelContextError("AVAILABLE_CONTEXT_REQUIRES_SNAPSHOT_IDENTITY")

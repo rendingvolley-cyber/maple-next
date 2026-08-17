@@ -55,6 +55,7 @@ from maple_next.domain.battle_memory import (
 )
 from maple_next.domain.champions_rules import (
     ChampionsRulesError,
+    ChampionsRulesSnapshot,
     RulesPin,
     resolve_pinned_rules_context,
     resolve_pinned_rules_snapshot,
@@ -221,6 +222,30 @@ def opponent_intel_pin_for_session(session: BattleSession) -> OpponentIntelPin:
     )
 
 
+def _season_id_of(rules_snapshot: ChampionsRulesSnapshot) -> str:
+    """The canonical pinned regulation season id, read from one resolved snapshot."""
+
+    return str(rules_snapshot.effective_period.get("season_id", ""))
+
+
+def load_champions_rules_season_id(session: BattleSession) -> str:
+    """The match's canonical pinned regulation season id. Read-only, fails closed.
+
+    The compact Bundle 4 ``rules_context`` deliberately carries
+    ``facts.battle_format`` but not ``effective_period.season_id``, and that
+    public contract is left exactly as it is. This helper resolves the same
+    pin through the same shared, fail-closed resolver
+    (:func:`~maple_next.domain.champions_rules.resolve_pinned_rules_snapshot`)
+    and exposes only the one extra canonical field the provider-ready
+    boundary needs in order to revalidate *both* halves of an
+    ``opponent_intel_context`` ``MATCHED`` compatibility claim (season and
+    format), rather than only the format. It is a validation input; it
+    never enters the canonical request payload.
+    """
+
+    return _season_id_of(resolve_pinned_rules_snapshot(rules_pin_for_session(session)))
+
+
 def load_opponent_intel_context(
     session: BattleSession,
     *,
@@ -264,7 +289,7 @@ def load_opponent_intel_context(
 
     pin = opponent_intel_pin_for_session(session)
     rules_snapshot = resolve_pinned_rules_snapshot(rules_pin_for_session(session))
-    season_id = str(rules_snapshot.effective_period.get("season_id", ""))
+    season_id = _season_id_of(rules_snapshot)
     battle_format = rules_snapshot.facts.battle_format
 
     active = confirmed_state.opponent_side.active
@@ -334,6 +359,7 @@ def build_pure_rich_state_request_from_loaded_state(
     bundle3_context: Bundle3TurnContext,
     rules_context: dict[str, Any],
     opponent_intel_context: dict[str, Any],
+    rules_season_id: str | None = None,
     evidence: FixedEvidenceMetadata | None = None,
     self_team_build_sha256: str | None = None,
     confirmed_fainted_members: frozenset[str] = frozenset(),
@@ -372,6 +398,7 @@ def build_pure_rich_state_request_from_loaded_state(
         bundle3_context=bundle3_context,
         rules_context=rules_context,
         opponent_intel_context=opponent_intel_context,
+        rules_season_id=rules_season_id,
         evidence=evidence,
         self_team_build_sha256=self_team_build_sha256,
         confirmed_fainted_members=confirmed_fainted_members,

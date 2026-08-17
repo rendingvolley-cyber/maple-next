@@ -14,6 +14,7 @@ from maple_next.application.turn_legal_action_boundary import build_confirmed_le
 from maple_next.application.turn_provider_export_bridge import (
     load_bundle3_turn_context,
     load_champions_rules_context,
+    load_champions_rules_season_id,
     load_opponent_intel_context,
 )
 from maple_next.domain.battle_memory import Bundle3ContextError
@@ -1024,6 +1025,12 @@ class BattleApplication:
             # request without a proven rules_context.
             try:
                 rules_context = load_champions_rules_context(session)
+                # Validation input only (never part of the canonical
+                # request): the canonical pinned season the provider-ready
+                # boundary revalidates an AVAILABLE INTEL context's MATCHED
+                # compatibility claim against, alongside the battle format
+                # rules_context already carries.
+                rules_season_id = load_champions_rules_season_id(session)
             except ChampionsRulesError as exc:
                 raise DomainError(f"CHAMPIONS_RULES_CONTEXT_INVALID:{exc}") from exc
 
@@ -1061,6 +1068,7 @@ class BattleApplication:
                     bundle3_context=bundle3_context,
                     rules_context=rules_context,
                     opponent_intel_context=opponent_intel_context,
+                    rules_season_id=rules_season_id,
                     evidence=evidence,
                     self_team_build_sha256=self_team_build_sha256,
                     confirmed_fainted_members=self._confirmed_fainted_members(
@@ -1318,6 +1326,10 @@ class BattleApplication:
         # instead of silently rebuilding under different rules.
         try:
             rules_context = load_champions_rules_context(session)
+            # Same validation-only input as the authorizing path above, so
+            # the rebuild boundary revalidates an AVAILABLE INTEL context's
+            # MATCHED claim against both canonical rules axes too.
+            rules_season_id = load_champions_rules_season_id(session)
         except ChampionsRulesError as exc:
             raise DomainError(f"REBUILD_CHAMPIONS_RULES_CONTEXT_INVALID:{exc}") from exc
 
@@ -1350,6 +1362,7 @@ class BattleApplication:
                 bundle3_context=bundle3_context,
                 rules_context=rules_context,
                 opponent_intel_context=opponent_intel_context,
+                rules_season_id=rules_season_id,
                 evidence=evidence,
                 self_team_build_sha256=self_team_build_sha256,
                 confirmed_fainted_members=self._confirmed_fainted_members(

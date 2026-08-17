@@ -438,6 +438,7 @@ def build_rich_state_turn_advice_request(
     bundle3_context: Bundle3TurnContext,
     rules_context: dict[str, Any],
     opponent_intel_context: dict[str, Any],
+    rules_season_id: str | None = None,
     evidence: FixedEvidenceMetadata | None = None,
     self_team_build_sha256: str | None = None,
     confirmed_fainted_members: frozenset[str] = frozenset(),
@@ -481,6 +482,20 @@ def build_rich_state_turn_advice_request(
     that the context is bound to the reviewed confirmed opponent active
     (below) and re-validates its shape, but never resolves, re-reads, or
     re-derives population data itself.
+
+    ``rules_season_id`` is the canonical pinned regulation season
+    (``effective_period.season_id`` of the match's pinned Champions rules
+    snapshot, via
+    ``application.turn_provider_export_bridge.load_champions_rules_season_id``).
+    It is a *validation input only* -- it is never embedded in the request
+    and never changes the v6 canonical request shape. It exists because the
+    compact Bundle 4 ``rules_context`` deliberately carries
+    ``facts.battle_format`` but not the season, so without it this boundary
+    could only revalidate half of a ``MATCHED`` compatibility claim. It
+    defaults to ``None`` purely so callers that can only ever supply a
+    non-``AVAILABLE`` context need not thread it; an ``AVAILABLE`` context
+    with no canonical season to check against (``None`` or blank) **fails
+    closed** below rather than being trusted.
     """
 
     gate = evaluate_provider_ready_gate(
@@ -537,6 +552,26 @@ def build_rich_state_turn_advice_request(
     expected_active = opponent_active.value if opponent_active.is_confirmed else None
     if opponent_intel_context["confirmed_active_species"] != expected_active:
         raise RichStateRequestError("OPPONENT_INTEL_CONTEXT_SPECIES_MISMATCH")
+
+    if opponent_intel_context["status"] == CONTEXT_STATUS_AVAILABLE:
+        # A MATCHED compatibility claim is revalidated here against *both*
+        # canonical pinned rules axes, never merely trusted as a label. The
+        # sibling check in ``RichStateTurnAdviceRequest.__post_init__``
+        # covers the battle format (which the compact ``rules_context``
+        # carries); the season is only knowable from the pinned rules
+        # snapshot itself, so it is proven here where the caller has
+        # already resolved it. Without this, a forged AVAILABLE/MATCHED
+        # context carrying a *different season's* population statistics
+        # would reach provider dispatch unchallenged.
+        if rules_season_id is None or not rules_season_id.strip():
+            raise RichStateRequestError(
+                "OPPONENT_INTEL_COMPATIBILITY_CLAIM_INVALID:RULES_SEASON_NOT_SUPPLIED"
+            )
+        season_claim = opponent_intel_context["snapshot"].get("season")
+        if not isinstance(season_claim, str) or season_claim.strip() != rules_season_id.strip():
+            raise RichStateRequestError(
+                "OPPONENT_INTEL_COMPATIBILITY_CLAIM_INVALID:SEASON_MISMATCH"
+            )
 
     projection = build_rich_state_projection(
         confirmed_state, confirmed_legal_actions, evidence=evidence

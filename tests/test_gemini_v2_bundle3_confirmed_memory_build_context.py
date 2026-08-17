@@ -32,6 +32,7 @@ from maple_next.application.turn_provider_export_bridge import (
     build_pure_rich_state_request_from_loaded_state,
     load_bundle3_turn_context,
     load_champions_rules_context,
+    load_champions_rules_season_id,
     load_opponent_intel_context,
 )
 from maple_next.domain.battle_memory import (
@@ -509,6 +510,19 @@ class Bundle3Fixture:
         assert session is not None
         return load_champions_rules_context(session)
 
+    def rules_season_id(self) -> str:
+        """Bundle 5 R1: the canonical pinned season, a validation-only input.
+
+        Threaded into request assembly exactly as production does, so an
+        ``AVAILABLE`` context's ``MATCHED`` compatibility claim is
+        revalidated here against *both* the pinned season and the pinned
+        battle format rather than only the format.
+        """
+
+        session = self.repository.load_active_session()
+        assert session is not None
+        return load_champions_rules_season_id(session)
+
     def opponent_intel_context(self, turn_number: int = CURRENT_TURN_NUMBER) -> dict[str, Any]:
         session = self.repository.load_active_session()
         assert session is not None
@@ -533,7 +547,10 @@ class Bundle3Fixture:
         return self.build_request(opponent_intel_context=opponent_intel_context)
 
     def build_request(
-        self, opponent_intel_context: dict[str, Any] | None = None
+        self,
+        opponent_intel_context: dict[str, Any] | None = None,
+        *,
+        rules_season_id: str | None = None,
     ) -> RichStateTurnAdviceRequest:
         identity = self.identity(CURRENT_TURN_NUMBER)
         state = self.repository.get_confirmed_turn_state(
@@ -560,6 +577,9 @@ class Bundle3Fixture:
                 opponent_intel_context
                 if opponent_intel_context is not None
                 else self.opponent_intel_context()
+            ),
+            rules_season_id=(
+                rules_season_id if rules_season_id is not None else self.rules_season_id()
             ),
             self_team_build_sha256=facts.self_team_build_sha256,
         )

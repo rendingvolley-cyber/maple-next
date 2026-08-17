@@ -18,6 +18,25 @@ class NormalizationError(ValueError):
     """Raised when parser output or a JSON document cannot be normalized."""
 
 
+def normalize_species_key(value: str) -> str:
+    """The single canonical comparison form of a species identity token.
+
+    Exactly the normalization the opponent-INTEL layer already applies when
+    matching a confirmed species name against a snapshot's species ids
+    (``domain.opponent_intel_context.resolve_species_record``): surrounding
+    whitespace stripped, case folded, and interior spaces written as the
+    hyphen the canonical ids use.
+
+    Deliberately *not* fuzzy: no stemming, no alias table, no edit-distance,
+    no punctuation stripping beyond the space/hyphen equivalence above. It
+    lives here, in the lowest-level module both the snapshot codec and the
+    domain context builder already import, so those two boundaries can never
+    drift into disagreeing about what "the same species" means.
+    """
+
+    return value.strip().lower().replace(" ", "-")
+
+
 def _validate_percentage(percentage: Any) -> float | None:
     """Validate a usage percentage, or ``None`` when genuinely missing.
 

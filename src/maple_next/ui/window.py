@@ -1433,34 +1433,47 @@ class MapleMainWindow(QMainWindow):
         self.mock_turn_group.setVisible(projection.primary_cta == "REQUEST_TURN_ADVICE")
         self.turn_advice_group.setVisible(current.turn_advice is not None)
         if current.turn_advice is not None:
-            self.turn_advice_action_label.setText(
-                f"{current.turn_advice.action_type}: {current.turn_advice.action_name}"
-            )
-            structured_v2 = current.turn_advice.structured_v2
-            if structured_v2 is not None:
-                self.turn_advice_robustness_label.setText(
-                    structured_v2.recommendation_robustness
-                )
-                self.turn_advice_prediction_label.setText(
-                    _format_prediction_line_v2(structured_v2.opponent_prediction.primary)
-                )
-                self.turn_advice_alternatives_label.setText(
-                    "\n".join(
-                        _format_prediction_line_v2(line)
-                        for line in structured_v2.opponent_prediction.alternatives
-                    )
-                    or "—"
-                )
-            else:
+            if current.turn_advice.unavailable_reason is not None:
+                # Gemini V2 Bundle 6 R1: fail closed. A v2 row whose
+                # advice_json is corrupt/unreadable must never render its
+                # flattened columns as though they were legitimate advice --
+                # every content field below shows the unavailable state
+                # instead, never a silent v1-style reinterpretation.
+                self.turn_advice_action_label.setText(current.turn_advice.unavailable_reason)
                 self.turn_advice_robustness_label.setText("—")
-                self.turn_advice_prediction_label.setText(
-                    current.turn_advice.opponent_prediction
-                )
+                self.turn_advice_prediction_label.setText("—")
                 self.turn_advice_alternatives_label.setText("—")
-            self.turn_advice_rationale_label.setText(current.turn_advice.rationale)
-            self.turn_advice_warnings_label.setText(
-                "; ".join(current.turn_advice.warnings) or "—"
-            )
+                self.turn_advice_rationale_label.setText("—")
+                self.turn_advice_warnings_label.setText("—")
+            else:
+                self.turn_advice_action_label.setText(
+                    f"{current.turn_advice.action_type}: {current.turn_advice.action_name}"
+                )
+                structured_v2 = current.turn_advice.structured_v2
+                if structured_v2 is not None:
+                    self.turn_advice_robustness_label.setText(
+                        structured_v2.recommendation_robustness
+                    )
+                    self.turn_advice_prediction_label.setText(
+                        _format_prediction_line_v2(structured_v2.opponent_prediction.primary)
+                    )
+                    self.turn_advice_alternatives_label.setText(
+                        "\n".join(
+                            _format_prediction_line_v2(line)
+                            for line in structured_v2.opponent_prediction.alternatives
+                        )
+                        or "—"
+                    )
+                else:
+                    self.turn_advice_robustness_label.setText("—")
+                    self.turn_advice_prediction_label.setText(
+                        current.turn_advice.opponent_prediction
+                    )
+                    self.turn_advice_alternatives_label.setText("—")
+                self.turn_advice_rationale_label.setText(current.turn_advice.rationale)
+                self.turn_advice_warnings_label.setText(
+                    "; ".join(current.turn_advice.warnings) or "—"
+                )
             self.turn_advice_source_label.setText(current.turn_advice.source_type)
             self.turn_advice_model_label.setText(current.turn_advice.model)
             self.turn_advice_binding_label.setText("CURRENT")

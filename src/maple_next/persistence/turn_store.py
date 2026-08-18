@@ -15,6 +15,41 @@ from maple_next.domain.models import (
 from maple_next.persistence.base import StoreBase
 
 
+def turn_advice_snapshot_from_row(row: object) -> TurnAdviceSnapshot:
+    """Reconstruct a ``TurnAdviceSnapshot`` from one ``turn_advices`` row.
+
+    Gemini V2 Bundle 6 R1: the single shared mapping every ``turn_advices``
+    reader must use -- ``response_schema_version`` and ``advice_json`` are
+    always read from the row, never left at the dataclass defaults. Two
+    independent readers (this module's :meth:`TurnStoreMixin.get_turn_advice`
+    and ``persistence/match_store.py``'s
+    ``MatchStoreMixin.get_latest_turn_advice``) previously duplicated this
+    mapping, and the export-facing one silently dropped both v2 fields,
+    downgrading every persisted v2 advice row back to v1 on export. A single
+    shared function makes that drift structurally impossible.
+    """
+
+    warnings = cast(list[str], json.loads(str(row["warnings_json"])))  # type: ignore[index]
+    advice_json_raw = row["advice_json"]  # type: ignore[index]
+    return TurnAdviceSnapshot(
+        turn_advice_id=str(row["turn_advice_id"]),  # type: ignore[index]
+        turn_id=str(row["turn_id"]),  # type: ignore[index]
+        turn_number=int(row["turn_number"]),  # type: ignore[index]
+        job_id=str(row["job_id"]),  # type: ignore[index]
+        input_snapshot_id=str(row["input_snapshot_id"]),  # type: ignore[index]
+        action_type=ActionType(str(row["action_type"])),  # type: ignore[index]
+        action_name=str(row["action_name"]),  # type: ignore[index]
+        opponent_prediction=str(row["opponent_prediction"]),  # type: ignore[index]
+        rationale=str(row["rationale"]),  # type: ignore[index]
+        is_mock=bool(row["is_mock"]),  # type: ignore[index]
+        source_type=str(row["source_type"]),  # type: ignore[index]
+        model=str(row["model"]),  # type: ignore[index]
+        warnings=tuple(warnings),
+        response_schema_version=str(row["response_schema_version"]),  # type: ignore[index]
+        advice_json=str(advice_json_raw) if advice_json_raw is not None else None,
+    )
+
+
 class TurnStoreMixin(StoreBase):
     def append_turn(self, session_id: str, turn: BattleTurn) -> None:
         self.connection.execute(
@@ -121,25 +156,7 @@ class TurnStoreMixin(StoreBase):
         ).fetchone()
         if row is None:
             raise KeyError(turn_advice_id)
-        warnings = cast(list[str], json.loads(str(row["warnings_json"])))
-        advice_json_raw = row["advice_json"]
-        return TurnAdviceSnapshot(
-            turn_advice_id=str(row["turn_advice_id"]),
-            turn_id=str(row["turn_id"]),
-            turn_number=int(row["turn_number"]),
-            job_id=str(row["job_id"]),
-            input_snapshot_id=str(row["input_snapshot_id"]),
-            action_type=ActionType(str(row["action_type"])),
-            action_name=str(row["action_name"]),
-            opponent_prediction=str(row["opponent_prediction"]),
-            rationale=str(row["rationale"]),
-            is_mock=bool(row["is_mock"]),
-            source_type=str(row["source_type"]),
-            model=str(row["model"]),
-            warnings=tuple(warnings),
-            response_schema_version=str(row["response_schema_version"]),
-            advice_json=str(advice_json_raw) if advice_json_raw is not None else None,
-        )
+        return turn_advice_snapshot_from_row(row)
 
     def append_recorded_action(self, session_id: str, action: RecordedAction) -> None:
         self.connection.execute(

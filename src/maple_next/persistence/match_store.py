@@ -14,6 +14,7 @@ from maple_next.domain.models import (
     TurnFactsSnapshot,
 )
 from maple_next.persistence.base import StoreBase
+from maple_next.persistence.turn_store import turn_advice_snapshot_from_row
 
 
 class MatchStoreMixin(StoreBase):
@@ -152,22 +153,7 @@ class MatchStoreMixin(StoreBase):
         ).fetchone()
         if row is None:
             return None
-        warnings = cast(list[str], json.loads(str(row["warnings_json"])))
-        return TurnAdviceSnapshot(
-            turn_advice_id=str(row["turn_advice_id"]),
-            turn_id=str(row["turn_id"]),
-            turn_number=int(row["turn_number"]),
-            job_id=str(row["job_id"]),
-            input_snapshot_id=str(row["input_snapshot_id"]),
-            action_type=ActionType(str(row["action_type"])),
-            action_name=str(row["action_name"]),
-            opponent_prediction=str(row["opponent_prediction"]),
-            rationale=str(row["rationale"]),
-            is_mock=bool(row["is_mock"]),
-            source_type=str(row["source_type"]),
-            model=str(row["model"]),
-            warnings=tuple(warnings),
-        )
+        return turn_advice_snapshot_from_row(row)
 
     def get_turn_facts_created_at(self, turn_facts_id: str) -> str | None:
         row = self.connection.execute(

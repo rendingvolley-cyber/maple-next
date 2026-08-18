@@ -57,6 +57,14 @@ class TurnFactsView:
     human_note: str
 
 
+#: Gemini V2 Bundle 6 R1. Fixed message shown instead of advice content when
+#: a v2-tagged row's ``advice_json`` fails to decode/re-validate. Exact
+#: wording is not load-bearing -- the fail-closed behavior it signals is.
+STRUCTURED_ADVICE_UNAVAILABLE_MESSAGE = (
+    "保存済みGeminiアドバイスの構造データを読み込めません。"
+)
+
+
 @dataclass(frozen=True, slots=True)
 class TurnAdviceView:
     action_type: str
@@ -76,6 +84,15 @@ class TurnAdviceView:
     #: fabricated, never rendered from flattened columns as though it were
     #: structured detail).
     structured_v2: TurnAdviceBodyV2 | None = None
+    #: Gemini V2 Bundle 6 R1. ``None`` for a normally-rendering row (v1, or
+    #: a cleanly-decoded v2 row). Set to
+    #: :data:`STRUCTURED_ADVICE_UNAVAILABLE_MESSAGE` only when this is a
+    #: v2-tagged row whose ``advice_json`` failed to decode/re-validate --
+    #: when set, every other field on this view is a safe placeholder, never
+    #: the row's real flattened content, and the UI must render this message
+    #: INSTEAD of normal advice content, never alongside or in place of a
+    #: silent v1-style fallback.
+    unavailable_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,26 +486,42 @@ class SelectionFlowController:
         if projection.current_turn_advice_id is not None:
             stored_turn_advice = self._repository.get_turn_advice(projection.current_turn_advice_id)
             structured_v2: TurnAdviceBodyV2 | None = None
+            unavailable_reason: str | None = None
             if stored_turn_advice.response_schema_version != RESPONSE_SCHEMA_VERSION_V1:
                 try:
                     structured_v2 = load_structured_turn_advice_v2(stored_turn_advice)
                 except TurnAdviceStructuredDataCorruptError:
-                    # Fail closed: render this row as if no structured detail
-                    # exists, never as a fabricated/partial v2 view and never
-                    # by silently reinterpreting the flattened columns.
-                    structured_v2 = None
-            turn_advice = TurnAdviceView(
-                action_type=stored_turn_advice.action_type.value,
-                action_name=stored_turn_advice.action_name,
-                opponent_prediction=stored_turn_advice.opponent_prediction,
-                rationale=stored_turn_advice.rationale,
-                is_mock=stored_turn_advice.is_mock,
-                source_type=stored_turn_advice.source_type,
-                model=stored_turn_advice.model,
-                warnings=stored_turn_advice.warnings,
-                response_schema_version=stored_turn_advice.response_schema_version,
-                structured_v2=structured_v2,
-            )
+                    # Fail closed: this row's flattened columns must never
+                    # be rendered as though they were legitimate advice --
+                    # only the explicit unavailable/corrupt state below.
+                    unavailable_reason = STRUCTURED_ADVICE_UNAVAILABLE_MESSAGE
+            if unavailable_reason is not None:
+                turn_advice = TurnAdviceView(
+                    action_type="",
+                    action_name="",
+                    opponent_prediction="",
+                    rationale="",
+                    is_mock=stored_turn_advice.is_mock,
+                    source_type=stored_turn_advice.source_type,
+                    model=stored_turn_advice.model,
+                    warnings=(),
+                    response_schema_version=stored_turn_advice.response_schema_version,
+                    structured_v2=None,
+                    unavailable_reason=unavailable_reason,
+                )
+            else:
+                turn_advice = TurnAdviceView(
+                    action_type=stored_turn_advice.action_type.value,
+                    action_name=stored_turn_advice.action_name,
+                    opponent_prediction=stored_turn_advice.opponent_prediction,
+                    rationale=stored_turn_advice.rationale,
+                    is_mock=stored_turn_advice.is_mock,
+                    source_type=stored_turn_advice.source_type,
+                    model=stored_turn_advice.model,
+                    warnings=stored_turn_advice.warnings,
+                    response_schema_version=stored_turn_advice.response_schema_version,
+                    structured_v2=structured_v2,
+                )
         if projection.session_id is not None:
             action_history = tuple(
                 RecordedActionView(

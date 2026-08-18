@@ -19,6 +19,17 @@ Source-membership rule (spec sec. 8):
   species already confirmed as belonging to the opponent during this match
   (from completed-Turn battle memory), and must not be the opponent's
   current confirmed active. Never inferred from population partners.
+
+Gemini V2 Bundle 6 R1: the two evidence sets above are never merged into one
+undifferentiated "allowed" pool before checking a move line's claimed
+``support_basis``. A move confirmed in battle memory authorizes any
+``support_basis`` claim (the confirmed-memory authority path is unchanged).
+A move that exists *only* in the matched population snapshot -- never
+independently confirmed this match -- can only ever authorize
+``support_basis = POPULATION_PRIOR``; claiming ``CONFIRMED_MATCH`` (or any
+other basis) for a population-only move is rejected here, even though pure
+schema validation alone cannot catch it (the schema has no visibility into
+which evidence set actually grounds the name).
 """
 
 from __future__ import annotations
@@ -42,6 +53,7 @@ _SWITCH_CATEGORY: Final[str] = "SWITCH"
 class TurnAdviceV2SemanticResultCode(StrEnum):
     VALID = "VALID"
     SPECIFIC_ACTION_MOVE_UNSUPPORTED = "SPECIFIC_ACTION_MOVE_UNSUPPORTED"
+    MOVE_POPULATION_ONLY_BASIS_MISMATCH = "MOVE_POPULATION_ONLY_BASIS_MISMATCH"
     SPECIFIC_ACTION_SWITCH_TARGET_UNCONFIRMED = "SPECIFIC_ACTION_SWITCH_TARGET_UNCONFIRMED"
     SPECIFIC_ACTION_SWITCH_TARGET_IS_CURRENT_ACTIVE = (
         "SPECIFIC_ACTION_SWITCH_TARGET_IS_CURRENT_ACTIVE"
@@ -52,6 +64,9 @@ _SANITIZED_REASON: Final[dict[TurnAdviceV2SemanticResultCode, str]] = {
     TurnAdviceV2SemanticResultCode.VALID: "TURN_ADVICE_V2_SEMANTICS_VALID",
     TurnAdviceV2SemanticResultCode.SPECIFIC_ACTION_MOVE_UNSUPPORTED: (
         "TURN_ADVICE_V2_SPECIFIC_ACTION_MOVE_UNSUPPORTED"
+    ),
+    TurnAdviceV2SemanticResultCode.MOVE_POPULATION_ONLY_BASIS_MISMATCH: (
+        "TURN_ADVICE_V2_MOVE_POPULATION_ONLY_BASIS_MISMATCH"
     ),
     TurnAdviceV2SemanticResultCode.SPECIFIC_ACTION_SWITCH_TARGET_UNCONFIRMED: (
         "TURN_ADVICE_V2_SPECIFIC_ACTION_SWITCH_TARGET_UNCONFIRMED"
@@ -140,12 +155,19 @@ def _check_prediction_line(
         return TurnAdviceV2SemanticResultCode.VALID
 
     if line.category in _MOVE_CATEGORIES:
-        allowed = _confirmed_opponent_move_names(request) | _matched_population_move_names(
-            request
-        )
-        if line.specific_action not in allowed:
-            return TurnAdviceV2SemanticResultCode.SPECIFIC_ACTION_MOVE_UNSUPPORTED
-        return TurnAdviceV2SemanticResultCode.VALID
+        # Evidence sets are kept separate, never merged into one pool, so a
+        # move's claimed support_basis can be checked against which set
+        # actually grounds it. A move confirmed in battle memory authorizes
+        # any support_basis (the confirmed-memory authority path is
+        # unchanged); a population-only move authorizes only
+        # support_basis = POPULATION_PRIOR.
+        if line.specific_action in _confirmed_opponent_move_names(request):
+            return TurnAdviceV2SemanticResultCode.VALID
+        if line.specific_action in _matched_population_move_names(request):
+            if line.support_basis != "POPULATION_PRIOR":
+                return TurnAdviceV2SemanticResultCode.MOVE_POPULATION_ONLY_BASIS_MISMATCH
+            return TurnAdviceV2SemanticResultCode.VALID
+        return TurnAdviceV2SemanticResultCode.SPECIFIC_ACTION_MOVE_UNSUPPORTED
 
     if line.category == _SWITCH_CATEGORY:
         current_active = _current_opponent_active_species(request)

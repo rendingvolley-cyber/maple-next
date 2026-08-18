@@ -1372,22 +1372,35 @@ class TurnStateFlowController(MatchFlowController):
         # ConfirmedLegalActionSelection.confirmation_id) plus an exact
         # type/name match -- never a synthetic "TYPE:NAME" string.
         action_id = matching_selection.confirmation_id
+        # Gemini V2 Bundle 6: the rich lane's contract is now ``.v7``
+        # (response schema v2) -- this injected/mock payload must match that
+        # shape exactly, the same way it always matched whatever schema was
+        # current for every prior bundle. ``UNKNOWN``/``NONE``/``LOW`` mirror
+        # the old ``category="UNKNOWN"`` mock semantics exactly: this manual
+        # operator entry never claims a classified category, a grounded
+        # exact action, or graded evidence.
         adapter.enqueue_response(
             SanitizedProviderResult(
                 payload={
+                    "response_schema_version": "maple-turn-advice-response.v2",
                     "recommended_action": {
                         "action_id": action_id,
                         "action_type": typed_action.value,
                         "action_name": normalized_name,
                     },
-                    "reasons": [normalized_rationale],
-                    "warnings": list(warnings),
+                    "recommendation_robustness": "HIGH",
+                    "reasons": [normalized_rationale[:280]],
                     "opponent_prediction": {
-                        "category": "UNKNOWN",
-                        "predicted_action": normalized_prediction,
-                        "summary": normalized_prediction,
-                        "confidence": 0.5,
+                        "primary": {
+                            "category": "UNKNOWN",
+                            "specific_action": None,
+                            "support_basis": "NONE",
+                            "support": "LOW",
+                            "summary": normalized_prediction[:400],
+                        },
+                        "alternatives": [],
                     },
+                    "warnings": list(warnings)[:2],
                 },
                 source_type=FAKE_TURN_ADVICE_SOURCE_TYPE,
                 model=FAKE_TURN_MODEL,

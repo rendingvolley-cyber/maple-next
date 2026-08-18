@@ -469,7 +469,11 @@ def test_rich_request_contains_required_fields(rich_fixture: RichSessionFixture)
         opponent_intel_context=unavailable_intel_context_for(state),
     )
     assert request.contract_version == RICH_STATE_REQUEST_CONTRACT_VERSION
-    assert request.prompt_version == legacy_turn_request.TURN_PROMPT_VERSION
+    # Gemini V2 Bundle 6: the rich lane now pins prompt v2 (paired with
+    # response schema v2), not the legacy/pre-v7 shared TURN_PROMPT_VERSION.
+    from maple_next.providers.turn_request import TURN_PROMPT_VERSION_V2
+
+    assert request.prompt_version == TURN_PROMPT_VERSION_V2
     assert request.job_type == "TURN_ADVICE"
     assert request.identity == rich_fixture.identity()
     assert request.reviewed_confirmed_state_id == state.confirmed_state_id
@@ -481,7 +485,11 @@ def test_rich_request_contains_required_fields(rich_fixture: RichSessionFixture)
     assert move_action.owner_active == "Dondozo"
     switch_action = next(a for a in request.legal_actions if a.action_type is ActionType.SWITCH)
     assert switch_action.switch_target == "Gholdengo"
-    assert request.requested_output_schema == legacy_turn_request.REQUESTED_OUTPUT_SCHEMA
+    # Gemini V2 Bundle 6: the rich lane now pins REQUESTED_OUTPUT_SCHEMA_V2,
+    # not the legacy/pre-v7 shared v1 schema.
+    from maple_next.providers.turn_response_v2 import REQUESTED_OUTPUT_SCHEMA_V2
+
+    assert request.requested_output_schema == REQUESTED_OUTPUT_SCHEMA_V2
     assert request.state_confirmation == state.confirmation
     assert len(request.request_hash) == 64
 
@@ -531,12 +539,18 @@ def test_rich_prompt_requires_japanese_only_for_human_facing_text(
 
     prompt = build_rich_provider_prompt(request)
 
-    assert "opponent_prediction.summary" in prompt
+    # Gemini V2 Bundle 6: the rich lane's Japanese-language requirement now
+    # refers to "every opponent_prediction line's summary" (primary and
+    # alternatives), not the old flat "opponent_prediction.summary" field;
+    # the reasons/warnings guidance moved into the shared prompt v2 body
+    # (still present, still enforced) rather than only the JP addendum.
+    assert "opponent_prediction line's summary" in prompt
     assert "decision-oriented, non-repetitive natural Japanese" in prompt
-    assert "these human-facing fields must be Japanese" in prompt
-    assert "Use at most two reasons" in prompt
-    assert "actionable current-turn risk" in prompt
-    assert "otherwise return an empty warnings" in prompt
+    assert "human-facing" in prompt
+    assert "must be Japanese" in prompt
+    assert "Give 1-2 concise, decisive reasons" in prompt
+    assert "concrete, current-turn risk" in prompt
+    assert "Give 0-2 warnings" in prompt
     assert "Do not translate or alter machine/contract values" in prompt
     assert "action_id" in prompt
     assert "action_type" in prompt

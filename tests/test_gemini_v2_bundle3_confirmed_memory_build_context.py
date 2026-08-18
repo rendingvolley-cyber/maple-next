@@ -602,13 +602,14 @@ def names_only_fixture(tmp_path: Path) -> Bundle3Fixture:
 
 
 def test_request_contract_is_v4_with_all_four_new_fields(fixture: Bundle3Fixture) -> None:
-    """The Bundle 3 fields below survive verbatim even though Bundle 4 has
-    since raised the contract to ``.v5`` (see
-    ``test_gemini_v2_bundle4_versioned_rules_context.py``)."""
+    """The Bundle 3 fields below survive verbatim even though later bundles
+    have since raised the contract to ``.v5``, ``.v6``, and ``.v7`` (see
+    ``test_gemini_v2_bundle4_versioned_rules_context.py`` and
+    ``test_gemini_v2_bundle5_opponent_intel_context.py``)."""
 
     request = fixture.build_request()
-    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v6"
-    assert request.contract_version == "maple-turn-advice.v6"
+    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v7"
+    assert request.contract_version == "maple-turn-advice.v7"
     canonical = canonical_rich_request_dict(request)
     for field in (
         "applied_selection_id",

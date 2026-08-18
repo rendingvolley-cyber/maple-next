@@ -36,6 +36,11 @@ CONTRACT_VERSION_V2: Final[str] = "maple-turn-advice.v2"
 TURN_ADVICE_CONTRACT_VERSION_V1: Final[str] = CONTRACT_VERSION
 TURN_ADVICE_CONTRACT_VERSION_V2: Final[str] = CONTRACT_VERSION_V2
 TURN_PROMPT_VERSION: Final[str] = "maple-turn-prompt.v1"
+#: Gemini V2 Bundle 6. Used only by the rich-state ``.v7`` request lane
+#: (``providers/turn_advice_rich_state.py``) together with
+#: ``REQUESTED_OUTPUT_SCHEMA_V2``. ``TURN_PROMPT_VERSION`` above remains
+#: fixed and immutable for every legacy and pre-v7 rich request.
+TURN_PROMPT_VERSION_V2: Final[str] = "maple-turn-prompt.v2"
 JOB_TYPE: Final[str] = "TURN_ADVICE"
 
 #: Fixed and deterministic. Never derived from a live provider schema.

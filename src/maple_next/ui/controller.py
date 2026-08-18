@@ -9,12 +9,18 @@ from typing import cast
 from uuid import uuid4
 
 from maple_next.application.projection import DomainProjection
-from maple_next.application.service import BattleApplication, DomainError
+from maple_next.application.service import (
+    BattleApplication,
+    DomainError,
+    TurnAdviceStructuredDataCorruptError,
+    load_structured_turn_advice_v2,
+)
 from maple_next.domain.enums import ActionOrder, ActionType, HpBucket, ResultDisposition
 from maple_next.domain.models import AppliedSelectionSnapshot, SelfTeamPreset
 from maple_next.domain.team_build import ChampionsTeamBuild
 from maple_next.domain.turn_state import ActionResultDelta, TurnIdentity
 from maple_next.persistence.sqlite import SQLiteRepository
+from maple_next.providers.turn_response_v2 import RESPONSE_SCHEMA_VERSION_V1, TurnAdviceBodyV2
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter, describe_gemini_failure
 
@@ -61,6 +67,15 @@ class TurnAdviceView:
     source_type: str = "MOCK"
     model: str = "mock-dev"
     warnings: tuple[str, ...] = ()
+    #: Gemini V2 Bundle 6. ``"maple-turn-advice-response.v1"`` for every
+    #: legacy row -- always shown in the audit footer, never fabricated.
+    response_schema_version: str = RESPONSE_SCHEMA_VERSION_V1
+    #: Populated only when the stored row is v2 and its ``advice_json``
+    #: decodes and re-validates cleanly; ``None`` for every v1 row and for a
+    #: v2 row whose structured data is corrupt (fail closed -- never
+    #: fabricated, never rendered from flattened columns as though it were
+    #: structured detail).
+    structured_v2: TurnAdviceBodyV2 | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,6 +468,15 @@ class SelectionFlowController:
             )
         if projection.current_turn_advice_id is not None:
             stored_turn_advice = self._repository.get_turn_advice(projection.current_turn_advice_id)
+            structured_v2: TurnAdviceBodyV2 | None = None
+            if stored_turn_advice.response_schema_version != RESPONSE_SCHEMA_VERSION_V1:
+                try:
+                    structured_v2 = load_structured_turn_advice_v2(stored_turn_advice)
+                except TurnAdviceStructuredDataCorruptError:
+                    # Fail closed: render this row as if no structured detail
+                    # exists, never as a fabricated/partial v2 view and never
+                    # by silently reinterpreting the flattened columns.
+                    structured_v2 = None
             turn_advice = TurnAdviceView(
                 action_type=stored_turn_advice.action_type.value,
                 action_name=stored_turn_advice.action_name,
@@ -462,6 +486,8 @@ class SelectionFlowController:
                 source_type=stored_turn_advice.source_type,
                 model=stored_turn_advice.model,
                 warnings=stored_turn_advice.warnings,
+                response_schema_version=stored_turn_advice.response_schema_version,
+                structured_v2=structured_v2,
             )
         if projection.session_id is not None:
             action_history = tuple(

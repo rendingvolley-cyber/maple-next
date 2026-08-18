@@ -1,0 +1,8 @@
+# tests/test_issue31_turn_state_bundle_b_second_remediation.py is one of two
+# files in this repository historically committed with mixed CRLF/LF line
+# endings (see its own in-file comments). `git diff --check` treats a
+# trailing CR as whitespace by default, which flags every touched line in
+# that file regardless of content. This scopes the whitespace check off for
+# that one path rather than normalizing its line endings, which would
+# rewrite unrelated pre-existing lines.
+tests/test_issue31_turn_state_bundle_b_second_remediation.py -whitespace

@@ -302,7 +302,11 @@ def test_incomplete_flat_pair_is_never_archived(tmp_path: Path) -> None:
 
 
 def test_schema_version_advanced_for_the_additive_intel_pin() -> None:
-    assert SCHEMA_VERSION == 20
+    # Gemini V2 Bundle 6 additively raised this further, 20 -> 21, for the
+    # versioned Turn Advice response contract (turn_advices.response_schema_
+    # version / advice_json) -- the Bundle 5 opponent-INTEL pin columns
+    # this test's name refers to are untouched.
+    assert SCHEMA_VERSION == 21
 
 
 def test_new_match_pins_the_accepted_generation(tmp_path: Path) -> None:
@@ -905,7 +909,11 @@ def test_authority_can_never_be_escalated(tmp_path: Path) -> None:
 
 
 def test_request_contract_is_v6() -> None:
-    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v6"
+    # Gemini V2 Bundle 6 raised this further, .v6 -> .v7 (response schema
+    # v2); Bundle 5's single-field addition this test's name refers to
+    # (opponent_intel_context) is proven elsewhere in this file and remains
+    # untouched.
+    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v7"
 
 
 def test_v6_preserves_every_v5_field_and_adds_exactly_one(tmp_path: Path) -> None:
@@ -947,7 +955,9 @@ def test_v6_preserves_every_v5_field_and_adds_exactly_one(tmp_path: Path) -> Non
             "opponent_intel_context",
         ):
             assert field in canonical
-        assert canonical["contract_version"] == "maple-turn-advice.v6"
+        # Gemini V2 Bundle 6 raised the contract further (.v6 -> .v7); every
+        # Bundle 5 field this test proves is present is still untouched.
+        assert canonical["contract_version"] == "maple-turn-advice.v7"
     finally:
         fixture.close()
 
@@ -1098,10 +1108,23 @@ def test_bundle4_rules_authority_paragraph_is_unchanged_and_separate() -> None:
 
 
 def test_rich_prompt_carries_both_authority_paragraphs(tmp_path: Path) -> None:
+    """The rich prompt still embeds the full canonical request either way.
+
+    Gemini V2 Bundle 6 gave the rich lane its own independent Initial
+    Prompt v2 text (see ``providers/turn_advice_rich_state.py``'s module
+    docstring) -- it is deliberately no longer byte-identical to the
+    legacy/pre-v7 shared ``_TURN_INITIAL_PROMPT``. What this test actually
+    proves -- both Bundle 4's ``rules_context`` and Bundle 5's
+    ``opponent_intel_context`` reach the provider inside the canonical
+    request JSON -- still holds under prompt v2, and prompt v2's own text
+    (asserted in ``test_gemini_v2_bundle6_*`` prompt-authority tests) still
+    states the same confirmed > pinned rules > population prior > general
+    knowledge authority ordering Bundle 5 introduced here.
+    """
+
     fixture = _available_fixture(tmp_path)
     try:
         prompt = build_rich_provider_prompt(fixture.build_request())
-        assert legacy_turn_request._TURN_INITIAL_PROMPT in prompt
         assert "opponent_intel_context" in prompt
         assert "rules_context" in prompt
     finally:

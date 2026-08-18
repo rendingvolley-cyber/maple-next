@@ -2341,13 +2341,16 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         assert isinstance(form, QFormLayout)
         bound_labels = (
             self.turn_advice_action_label,
+            self.turn_advice_robustness_label,
             self.turn_advice_prediction_label,
+            self.turn_advice_alternatives_label,
             self.turn_advice_rationale_label,
             self.turn_advice_warnings_label,
             self.turn_advice_source_label,
             self.turn_advice_model_label,
             self.turn_advice_binding_label,
             self.turn_advice_legality_label,
+            self.turn_advice_schema_version_label,
         )
         for field in bound_labels:
             row_label = form.labelForField(field)
@@ -2373,6 +2376,23 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         primary_layout.addWidget(primary_heading)
         primary_layout.addWidget(self.turn_advice_action_label)
 
+        # Gemini V2 Bundle 6: additive, hidden by default (see the
+        # visibility toggle alongside ``turn_advice_warning_card`` below) --
+        # a legacy v1 row never shows this card, so v1 rendering is
+        # unchanged. recommendation_robustness is distinct from any
+        # prediction's support level; it modifies the recommended action
+        # above, so it sits directly beneath it.
+        self.turn_advice_robustness_card = QWidget()
+        self.turn_advice_robustness_card.setObjectName("adviceRobustnessCard")
+        robustness_layout = QVBoxLayout(self.turn_advice_robustness_card)
+        robustness_layout.setContentsMargins(10, 4, 10, 4)
+        robustness_layout.setSpacing(2)
+        robustness_heading = QLabel("推奨の頑健性")
+        robustness_heading.setProperty("muted", True)
+        self.turn_advice_robustness_label.setObjectName("adviceRobustness")
+        robustness_layout.addWidget(robustness_heading)
+        robustness_layout.addWidget(self.turn_advice_robustness_label)
+
         prediction_card = QWidget()
         prediction_card.setObjectName("advicePredictionCard")
         prediction_layout = QVBoxLayout(prediction_card)
@@ -2383,6 +2403,20 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.turn_advice_prediction_label.setObjectName("advicePrediction")
         prediction_layout.addWidget(prediction_heading)
         prediction_layout.addWidget(self.turn_advice_prediction_label)
+
+        # Additive, hidden by default (zero/one/two alternatives -- never a
+        # fabricated filler entry). Directly beneath the primary prediction
+        # it is an alternative to.
+        self.turn_advice_alternatives_card = QWidget()
+        self.turn_advice_alternatives_card.setObjectName("adviceAlternativesCard")
+        alternatives_layout = QVBoxLayout(self.turn_advice_alternatives_card)
+        alternatives_layout.setContentsMargins(10, 4, 10, 4)
+        alternatives_layout.setSpacing(2)
+        alternatives_heading = QLabel("代替の相手予測")
+        alternatives_heading.setProperty("muted", True)
+        self.turn_advice_alternatives_label.setObjectName("adviceAlternatives")
+        alternatives_layout.addWidget(alternatives_heading)
+        alternatives_layout.addWidget(self.turn_advice_alternatives_label)
 
         reasons_card = QWidget()
         reasons_layout = QVBoxLayout(reasons_card)
@@ -2419,6 +2453,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 ("Model", self.turn_advice_model_label),
                 ("Binding", self.turn_advice_binding_label),
                 ("Legality", self.turn_advice_legality_label),
+                ("Response Schema", self.turn_advice_schema_version_label),
             )
         ):
             title_label = QLabel(title)
@@ -2436,7 +2471,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
         form.addRow(self.turn_advice_primary_card)
+        form.addRow(self.turn_advice_robustness_card)
         form.addRow(prediction_card)
+        form.addRow(self.turn_advice_alternatives_card)
         form.addRow(reasons_card)
         form.addRow(self.turn_advice_warning_card)
         form.addRow(self.turn_advice_audit_group)
@@ -3864,6 +3901,15 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.turn_advice_group.setVisible(advice_visible)
         self.turn_advice_warning_card.setVisible(
             current.turn_advice is not None and bool(current.turn_advice.warnings)
+        )
+        # Gemini V2 Bundle 6: additive cards, visible only for a row whose
+        # structured v2 detail actually decoded (never for a legacy v1 row,
+        # and never fabricated for a v2 row whose advice_json failed to
+        # decode -- see ``ui/controller.py``'s operator-view construction).
+        structured_v2 = current.turn_advice.structured_v2 if current.turn_advice else None
+        self.turn_advice_robustness_card.setVisible(structured_v2 is not None)
+        self.turn_advice_alternatives_card.setVisible(
+            structured_v2 is not None and bool(structured_v2.opponent_prediction.alternatives)
         )
         self.gemini_empty_label.setText(
             "Turn撮影後に確認へ"

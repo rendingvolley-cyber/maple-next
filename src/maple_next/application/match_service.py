@@ -12,10 +12,12 @@ from typing import Any
 from uuid import uuid4
 
 from maple_next.application.match_export_v3 import (
+    MATCH_EXPORT_SCHEMA_VERSION_V4,
     ConfirmedTurnRecord,
     MatchExportV3Error,
     build_integrated_match_export_v3_payload,
     parse_match_export_v3,
+    parse_match_export_v4,
     validate_confirmed_states_for_export,
     validate_delta_chain_for_export,
     validate_evidence_hash_shape,
@@ -27,6 +29,7 @@ from maple_next.application.service import (
     DomainError,
     _resolve_new_match_opponent_intel_pin,
     _resolve_new_match_rules_pin,
+    load_structured_turn_advice_v2,
 )
 from maple_next.domain.enums import BattleState, MatchOutcome
 from maple_next.domain.match_models import MatchExportRecord, MatchOutcomeRecord
@@ -34,6 +37,10 @@ from maple_next.domain.models import BattleSession
 from maple_next.opponent_intel_db.generation_store import GenerationStoreError
 from maple_next.opponent_intel_db.runtime_intel import load_pinned_generation
 from maple_next.persistence.sqlite import SQLiteRepository
+from maple_next.providers.turn_response_v2 import (
+    RESPONSE_SCHEMA_VERSION_V2,
+    turn_advice_body_v2_to_canonical_dict,
+)
 
 MATCH_EXPORT_SCHEMA_VERSION = "maple-match.v2"
 MATCH_EXPORT_SCHEMA_VERSION_V1 = "maple-match.v1"
@@ -148,8 +155,17 @@ class MatchApplication(BattleApplication):
         if uses_rich_state:
             payload = self._build_export_payload_v3(session, outcome, legacy_payload)
             encoded = self._encode_payload(payload)
+            # Gemini V2 Bundle 6: ``_build_export_payload_v3`` only ever sets
+            # ``schema_version`` to ``.v4`` when at least one turn actually
+            # carries a v2 ``structured_response`` -- every other rich-state
+            # match is still ``.v3`` and keeps using the unchanged v3 parser.
+            parse_rich_export = (
+                parse_match_export_v4
+                if payload["schema_version"] == MATCH_EXPORT_SCHEMA_VERSION_V4
+                else parse_match_export_v3
+            )
             try:
-                parse_match_export_v3(encoded)
+                parse_rich_export(encoded)
             except MatchExportV3Error as exc:
                 raise DomainError(f"V3_EXPORT_PRE_WRITE_PARSE_FAILED:{exc}") from exc
         else:
@@ -178,7 +194,7 @@ class MatchApplication(BattleApplication):
         if uses_rich_state:
             try:
                 read_back = export_path.read_bytes()
-                parse_match_export_v3(read_back)
+                parse_rich_export(read_back)
             except OSError as exc:
                 raise DomainError("V3_EXPORT_READ_BACK_FAILED") from exc
             except MatchExportV3Error as exc:
@@ -314,6 +330,19 @@ class MatchApplication(BattleApplication):
                     "action_name": actual.action_name,
                 },
             }
+            # Gemini V2 Bundle 6: additive, present only for a turn whose
+            # advice was accepted under the v2 response contract. A v1-advice
+            # turn (or a turn with no advice at all) gains neither key, so a
+            # match with only v1 advice keeps exporting byte-identically to
+            # before this bundle. Never a fallback to flattened fields on
+            # corruption -- a corrupt advice_json fails the whole export
+            # closed (propagates TurnAdviceStructuredDataCorruptError) rather
+            # than silently omitting the structured detail.
+            if advice is not None and advice.response_schema_version == RESPONSE_SCHEMA_VERSION_V2:
+                turn_payload["response_schema_version"] = advice.response_schema_version
+                turn_payload["structured_response"] = turn_advice_body_v2_to_canonical_dict(
+                    load_structured_turn_advice_v2(advice)
+                )
             if detailed_build is not None:
                 active_build = detailed_build.member_by_name(facts.self_active)
                 turn_payload["reviewed_facts"]["self_active_build"] = (
@@ -496,6 +525,15 @@ class MatchApplication(BattleApplication):
         # legacy/pre-Bundle-5 match that was never pinned; additive and
         # optional, never required by ``parse_match_export_v3``.
         payload["opponent_intel_pin"] = self._opponent_intel_pin_export(session)
+        # Gemini V2 Bundle 6: ``legacy_payload["turns"]`` (reused verbatim by
+        # ``build_integrated_match_export_v3_payload`` above) already carries
+        # ``structured_response`` on any turn whose advice was accepted
+        # under the v2 response contract. Bumping to ``.v4`` here -- after
+        # the v3 payload is otherwise fully built -- is the only schema_version
+        # change; every other v3 key/shape is untouched, and a match with no
+        # v2 advice at all stays ``.v3`` exactly as before this bundle.
+        if any("structured_response" in turn for turn in payload.get("turns", ())):
+            payload["schema_version"] = MATCH_EXPORT_SCHEMA_VERSION_V4
         return payload
 
     def _opponent_intel_pin_export(self, session: BattleSession) -> dict[str, Any] | None:

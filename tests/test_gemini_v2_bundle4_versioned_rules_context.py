@@ -468,16 +468,18 @@ def test_provider_ready_request_fails_closed_for_unpinned_match(tmp_path: Path) 
 
 
 def test_request_contract_still_carries_rules_context_after_v6() -> None:
-    """Bundle 5 advanced the contract to v6; Bundle 4's field is unchanged.
+    """Bundle 5 advanced the contract to v6, Bundle 6 to v7; Bundle 4's field is unchanged.
 
-    The version constant moved (``.v5`` -> ``.v6``) because Bundle 5 added
-    exactly one new top-level field. Bundle 4's ``rules_context`` -- its
-    presence, its schema version, and its content -- is untouched, which the
-    assertions below and ``test_canonical_request_carries_rules_context_and_
+    The version constant moved (``.v5`` -> ``.v6`` -> ``.v7``) because Bundle
+    5 added exactly one new top-level field and Bundle 6 changed only the
+    response-side contract (prompt/schema version), never a request field.
+    Bundle 4's ``rules_context`` -- its presence, its schema version, and
+    its content -- is untouched, which the assertions below and
+    ``test_canonical_request_carries_rules_context_and_
     all_bundle_1_to_3_fields`` continue to prove.
     """
 
-    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v6"
+    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v7"
 
 
 def test_canonical_request_carries_rules_context_and_all_bundle_1_to_3_fields(
@@ -614,8 +616,18 @@ def test_absent_mechanic_must_not_be_asserted_as_confirmed() -> None:
     assert "Never fabricate a Champions-specific mechanic" in prompt
 
 
-def test_rich_prompt_embeds_the_shared_initial_prompt_unmodified(tmp_path: Path) -> None:
-    """The rich (Bundle 4) prompt path is not a second, independent copy."""
+def test_rich_prompt_embeds_the_canonical_request_including_rules_context(
+    tmp_path: Path,
+) -> None:
+    """The rich prompt still embeds the full canonical request, rules_context included.
+
+    Gemini V2 Bundle 6 gave the rich lane its own independent Initial Prompt
+    v2 text (paired with response schema v2) -- it is deliberately no longer
+    byte-identical to the legacy/pre-v7 shared ``_TURN_INITIAL_PROMPT`` (see
+    ``providers/turn_advice_rich_state.py``'s module docstring). What Bundle
+    4 actually guarantees -- ``rules_context`` reaching the provider inside
+    the canonical request JSON -- still holds under prompt v2.
+    """
 
     from maple_next.providers.turn_advice_rich_state import build_rich_provider_prompt
 
@@ -624,7 +636,6 @@ def test_rich_prompt_embeds_the_shared_initial_prompt_unmodified(tmp_path: Path)
         request = fixture.build_request()
         prompt = build_rich_provider_prompt(request)
         assert "rules_context" in prompt
-        assert legacy_turn_request._TURN_INITIAL_PROMPT in prompt
     finally:
         fixture.close()
 

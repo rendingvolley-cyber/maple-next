@@ -91,7 +91,13 @@ def test_gemini_recommendation_is_primary_and_audit_is_secondary(tmp_path: Path)
     assert window.turn_advice_action_label.font().pointSize() >= (
         window.turn_advice_source_label.font().pointSize()
     )
-    assert window.turn_advice_prediction_label.text() == "相手は交代を選ぶ可能性が高い"
+    # Gemini V2 Bundle 6: the prediction label now renders the compact
+    # structured v2 line (category/support_basis/support + summary) rather
+    # than the bare summary string, per spec's "compactly show category,
+    # support, specific action if present, summary" requirement.
+    assert window.turn_advice_prediction_label.text() == (
+        "[UNKNOWN/NONE/LOW] —: 相手は交代を選ぶ可能性が高い"
+    )
     assert "対面有利" in window.turn_advice_rationale_label.text()
     assert window.turn_advice_warning_card.isVisible()
     assert window.turn_advice_warnings_label.text() == "相手の先制技に注意"

@@ -102,11 +102,27 @@ from maple_next.providers.turn_response import (
     TurnAdviceSchemaError,
     turn_advice_body_from_dict,
 )
+from maple_next.providers.turn_response_v2 import (
+    RESPONSE_SCHEMA_VERSION_V1,
+    RESPONSE_SCHEMA_VERSION_V2,
+    TurnAdviceBodyV2,
+    canonical_turn_advice_v2_json,
+    turn_advice_body_v2_from_canonical_json,
+    turn_advice_body_v2_from_dict,
+)
+from maple_next.providers.turn_response_v2_semantics import (
+    TurnAdviceV2SemanticResultCode,
+    sanitized_reason_for_v2_semantics,
+    validate_turn_advice_v2_semantics,
+)
 from maple_next.providers.turn_validation import (
+    TurnAdviceParseError,
     TurnAdviceResultCode,
     build_normalized_turn_advice_result,
     sanitized_reason_for,
+    select_response_parser_version,
     validate_turn_advice_legality,
+    validate_turn_advice_legality_v2,
     validate_turn_advice_result,
 )
 from maple_next.workers.contracts.models import JobEnvelope, ResultEnvelope
@@ -114,6 +130,39 @@ from maple_next.workers.contracts.models import JobEnvelope, ResultEnvelope
 
 class DomainError(RuntimeError):
     """Raised when a command violates the canonical transition contract."""
+
+
+class TurnAdviceStructuredDataCorruptError(RuntimeError):
+    """Gemini V2 Bundle 6: a V2-tagged advice row's ``advice_json`` is invalid.
+
+    Raised by :func:`load_structured_turn_advice_v2`. Callers (UI rendering,
+    match export v4) must catch this explicitly and refuse to render/export
+    the row's structured detail -- never silently fall back to the row's
+    flattened compatibility columns as though nothing were wrong, and never
+    fabricate structured data that was never actually persisted.
+    """
+
+
+def load_structured_turn_advice_v2(advice: TurnAdviceSnapshot) -> TurnAdviceBodyV2:
+    """Decode and strictly re-validate a persisted/exported V2 advice body.
+
+    Re-runs the exact same strict schema parser used at apply-time
+    (:func:`~maple_next.providers.turn_response_v2.turn_advice_body_v2_from_dict`)
+    against ``advice.advice_json`` -- a canonical JSON blob is never trusted
+    merely because it was already accepted once. Fails closed
+    (:class:`TurnAdviceStructuredDataCorruptError`) on anything other than a
+    row explicitly tagged :data:`RESPONSE_SCHEMA_VERSION_V2` with a valid,
+    schema-conformant ``advice_json``.
+    """
+
+    if advice.response_schema_version != RESPONSE_SCHEMA_VERSION_V2 or advice.advice_json is None:
+        raise TurnAdviceStructuredDataCorruptError(advice.turn_advice_id)
+    try:
+        return turn_advice_body_v2_from_canonical_json(advice.advice_json)
+    except ValueError as exc:
+        # Covers both json.JSONDecodeError (a ValueError subclass) and
+        # TurnAdviceSchemaError (also a ValueError subclass).
+        raise TurnAdviceStructuredDataCorruptError(advice.turn_advice_id) from exc
 
 
 def _resolve_new_match_rules_pin() -> RulesPin:
@@ -1479,6 +1528,12 @@ class BattleApplication:
 
                 source_type = str(result.source_type).strip()
                 model = str(result.model).strip()
+                # The legacy contract is always ``.v1``/``.v2`` -- this
+                # always resolves "v1", routed through the same trusted
+                # request/job-contract dispatcher the rich lane uses (Gemini
+                # V2 Bundle 6), never from any claim inside the payload.
+                parser_version = select_response_parser_version(request.contract_version)
+                assert parser_version == "v1"
                 body = turn_advice_body_from_dict(result.payload)
                 normalized: NormalizedTurnAdviceResult = build_normalized_turn_advice_result(
                     request=request,
@@ -1511,8 +1566,16 @@ class BattleApplication:
                     source_type=source_type,
                     model=model,
                     warnings=warnings,
+                    response_schema_version=RESPONSE_SCHEMA_VERSION_V1,
+                    advice_json=None,
                 )
-            except (KeyError, TypeError, ValueError, TurnAdviceSchemaError):
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+                TurnAdviceSchemaError,
+                TurnAdviceParseError,
+            ):
                 self.repository.audit_result(
                     result, ResultDisposition.INVALID_REJECTED, "INVALID_PAYLOAD"
                 )
@@ -1615,26 +1678,6 @@ class BattleApplication:
                     raise ValueError(sanitized_reason_for(TurnAdviceResultCode.SOURCE_INVALID))
                 if not model:
                     raise ValueError(sanitized_reason_for(TurnAdviceResultCode.MODEL_INVALID))
-                body = turn_advice_body_from_dict(result.payload)
-                normalized = NormalizedTurnAdviceResult(
-                    contract_version=rebuilt.contract_version,
-                    job_type=rebuilt.job_type,
-                    session_id=rebuilt.identity.session_id,
-                    match_id=rebuilt.identity.match_id,
-                    generation=rebuilt.identity.generation,
-                    turn_number=rebuilt.identity.turn_number,
-                    battle_revision=rebuilt.identity.battle_revision,
-                    reviewed_snapshot_id=rebuilt.reviewed_confirmed_state_id,
-                    reviewed_snapshot_hash=rebuilt.reviewed_snapshot_hash,
-                    request_payload_hash=result.request_payload_hash,
-                    source_type=source_type,
-                    model=model,
-                    advice=body,
-                )
-                legality_code = validate_turn_advice_legality(rebuilt, normalized)
-                if legality_code is not TurnAdviceResultCode.VALID:
-                    raise ValueError(sanitized_reason_for(legality_code))
-
                 # ``turn_advices.input_snapshot_id`` has a durable FK against
                 # the legacy ``reviewed_turn_facts`` table (schema v14) --
                 # the rich ``ConfirmedTurnState.confirmed_state_id`` cannot
@@ -1646,32 +1689,95 @@ class BattleApplication:
                 # reader/export code that already expects it.
                 if session.current_reviewed_board_id is None:
                     raise DomainError("REVIEWED_TURN_FACTS_REQUIRED_FOR_ADVICE_RECORD")
-                recommended = body.recommended_action
-                action_type = ActionType(recommended.action_type)
-                action_name = recommended.action_name
-                opponent_prediction = body.opponent_prediction.summary
-                rationale = "; ".join(body.reasons)
-                warnings = tuple(body.warnings)
-                advice = TurnAdviceSnapshot(
-                    turn_advice_id=result.result_id,
-                    turn_id=session.current_turn_id,
-                    turn_number=rebuilt.identity.turn_number,
-                    job_id=job.job_id,
-                    input_snapshot_id=session.current_reviewed_board_id,
-                    action_type=action_type,
-                    action_name=action_name,
-                    opponent_prediction=opponent_prediction,
-                    rationale=rationale,
-                    is_mock=source_type != "GEMINI",
-                    source_type=source_type,
-                    model=model,
-                    warnings=warnings,
-                )
+
+                # Gemini V2 Bundle 6: trusted response-parser selection keyed
+                # on the rebuilt request's own contract version -- never on
+                # any version claim inside ``result.payload`` itself.
+                parser_version = select_response_parser_version(rebuilt.contract_version)
+                if parser_version == "v2":
+                    body_v2 = turn_advice_body_v2_from_dict(result.payload)
+                    legality_code = validate_turn_advice_legality_v2(
+                        rebuilt, body_v2.recommended_action
+                    )
+                    if legality_code is not TurnAdviceResultCode.VALID:
+                        raise ValueError(sanitized_reason_for(legality_code))
+                    semantic_code = validate_turn_advice_v2_semantics(body_v2, request=rebuilt)
+                    if semantic_code is not TurnAdviceV2SemanticResultCode.VALID:
+                        raise ValueError(sanitized_reason_for_v2_semantics(semantic_code))
+
+                    recommended_v2 = body_v2.recommended_action
+                    action_type = ActionType(recommended_v2.action_type)
+                    action_name = recommended_v2.action_name
+                    opponent_prediction = body_v2.opponent_prediction.primary.summary
+                    rationale = "; ".join(body_v2.reasons)
+                    warnings = tuple(body_v2.warnings)
+                    advice = TurnAdviceSnapshot(
+                        turn_advice_id=result.result_id,
+                        turn_id=session.current_turn_id,
+                        turn_number=rebuilt.identity.turn_number,
+                        job_id=job.job_id,
+                        input_snapshot_id=session.current_reviewed_board_id,
+                        action_type=action_type,
+                        action_name=action_name,
+                        opponent_prediction=opponent_prediction,
+                        rationale=rationale,
+                        is_mock=source_type != "GEMINI",
+                        source_type=source_type,
+                        model=model,
+                        warnings=warnings,
+                        response_schema_version=RESPONSE_SCHEMA_VERSION_V2,
+                        advice_json=canonical_turn_advice_v2_json(body_v2),
+                    )
+                else:
+                    body = turn_advice_body_from_dict(result.payload)
+                    normalized = NormalizedTurnAdviceResult(
+                        contract_version=rebuilt.contract_version,
+                        job_type=rebuilt.job_type,
+                        session_id=rebuilt.identity.session_id,
+                        match_id=rebuilt.identity.match_id,
+                        generation=rebuilt.identity.generation,
+                        turn_number=rebuilt.identity.turn_number,
+                        battle_revision=rebuilt.identity.battle_revision,
+                        reviewed_snapshot_id=rebuilt.reviewed_confirmed_state_id,
+                        reviewed_snapshot_hash=rebuilt.reviewed_snapshot_hash,
+                        request_payload_hash=result.request_payload_hash,
+                        source_type=source_type,
+                        model=model,
+                        advice=body,
+                    )
+                    legality_code = validate_turn_advice_legality(rebuilt, normalized)
+                    if legality_code is not TurnAdviceResultCode.VALID:
+                        raise ValueError(sanitized_reason_for(legality_code))
+
+                    recommended = body.recommended_action
+                    action_type = ActionType(recommended.action_type)
+                    action_name = recommended.action_name
+                    opponent_prediction = body.opponent_prediction.summary
+                    rationale = "; ".join(body.reasons)
+                    warnings = tuple(body.warnings)
+                    advice = TurnAdviceSnapshot(
+                        turn_advice_id=result.result_id,
+                        turn_id=session.current_turn_id,
+                        turn_number=rebuilt.identity.turn_number,
+                        job_id=job.job_id,
+                        input_snapshot_id=session.current_reviewed_board_id,
+                        action_type=action_type,
+                        action_name=action_name,
+                        opponent_prediction=opponent_prediction,
+                        rationale=rationale,
+                        is_mock=source_type != "GEMINI",
+                        source_type=source_type,
+                        model=model,
+                        warnings=warnings,
+                        response_schema_version=RESPONSE_SCHEMA_VERSION_V1,
+                        advice_json=None,
+                    )
             except (
                 KeyError,
                 TypeError,
                 ValueError,
                 TurnAdviceSchemaError,
+                TurnAdviceParseError,
                 ProviderReadyGateError,
                 DomainError,
             ):

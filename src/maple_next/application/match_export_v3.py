@@ -54,8 +54,19 @@ from maple_next.domain.turn_state import (
     side_state_from_json,
     side_state_to_json,
 )
+from maple_next.providers.turn_response_v2 import (
+    RESPONSE_SCHEMA_VERSION_V2,
+    TurnAdviceSchemaError,
+    turn_advice_body_v2_from_dict,
+)
 
 MATCH_EXPORT_SCHEMA_VERSION_V3 = "maple-match.v3"
+#: Gemini V2 Bundle 6. Additive over ``.v3``: every ``.v3`` top-level and
+#: per-turn key is unchanged. Used only for a match export that contains at
+#: least one Turn Advice row accepted under the v2 response contract -- a
+#: match with only v1 advice rows keeps exporting as ``.v3`` exactly as
+#: before (see ``application/match_service.py``).
+MATCH_EXPORT_SCHEMA_VERSION_V4 = "maple-match.v4"
 
 #: Distinct from the Bundle B request/projection contract versions -- this
 #: is what an exported rich turn's ``rich_state`` block advertises.
@@ -985,22 +996,17 @@ def _validate_full_document_rich_chain(
         previous_state = state
 
 
-def parse_match_export_v3(raw: bytes) -> dict[str, Any]:
-    """Strict parse: valid JSON object, all required keys, correct schema_version.
+def _parse_match_export_core(raw: bytes, *, expected_schema_version: str) -> dict[str, Any]:
+    """Shared strict-parse core for ``maple-match.v3`` and ``.v4``.
 
-    When any turn carries a ``rich_state`` block, that block is validated
-    recursively (required sub-keys, knowledge/delta invariants, evidence
-    hash shape, no duplicate legal actions). Once every rich turn has been
-    reconstructed, a second full-document pass
-    (:func:`_validate_full_document_rich_chain`) validates the whole
-    document as one canonical chain: top-level identity against every
-    state/delta/legal-action, legacy turn_number against the embedded
-    state, state/delta uniqueness, the previous-state chain across
-    adjacent exported turns, turn/revision progression, and the final
-    revision bound. The full payload is also scanned recursively for a
-    forbidden provider/prompt/header/credential key -- a raw provider
-    request/response, prompt text, or embedded image bytes/base64 fails
-    the parse closed.
+    Valid JSON object, all required top-level/selection/legacy-turn keys,
+    exact ``schema_version`` match, no forbidden provider/prompt/header/
+    credential key anywhere, and (when any turn carries a ``rich_state``
+    block) the full rich-state document chain. Identical behavior to what
+    :func:`parse_match_export_v3` always performed -- only the expected
+    ``schema_version`` is now a parameter, so :func:`parse_match_export_v4`
+    (Gemini V2 Bundle 6) can reuse this exact core instead of duplicating
+    it.
     """
 
     try:
@@ -1012,7 +1018,7 @@ def parse_match_export_v3(raw: bytes) -> dict[str, Any]:
     missing = _REQUIRED_TOP_LEVEL_KEYS - payload.keys()
     if missing:
         raise MatchExportV3Error(f"V3_EXPORT_MISSING_KEYS:{sorted(missing)}")
-    if payload["schema_version"] != MATCH_EXPORT_SCHEMA_VERSION_V3:
+    if payload["schema_version"] != expected_schema_version:
         raise MatchExportV3Error("V3_EXPORT_SCHEMA_VERSION_MISMATCH")
 
     forbidden = _find_forbidden_key(payload)
@@ -1059,6 +1065,63 @@ def parse_match_export_v3(raw: bytes) -> dict[str, Any]:
         final_battle_revision=int(payload["final_battle_revision"]),
         records=tuple(rich_records),
     )
+    return payload
+
+
+def parse_match_export_v3(raw: bytes) -> dict[str, Any]:
+    """Strict parse: valid JSON object, all required keys, correct schema_version.
+
+    When any turn carries a ``rich_state`` block, that block is validated
+    recursively (required sub-keys, knowledge/delta invariants, evidence
+    hash shape, no duplicate legal actions). Once every rich turn has been
+    reconstructed, a second full-document pass
+    (:func:`_validate_full_document_rich_chain`) validates the whole
+    document as one canonical chain: top-level identity against every
+    state/delta/legal-action, legacy turn_number against the embedded
+    state, state/delta uniqueness, the previous-state chain across
+    adjacent exported turns, turn/revision progression, and the final
+    revision bound. The full payload is also scanned recursively for a
+    forbidden provider/prompt/header/credential key -- a raw provider
+    request/response, prompt text, or embedded image bytes/base64 fails
+    the parse closed.
+    """
+
+    return _parse_match_export_core(raw, expected_schema_version=MATCH_EXPORT_SCHEMA_VERSION_V3)
+
+
+def parse_match_export_v4(raw: bytes) -> dict[str, Any]:
+    """Strict parse for ``maple-match.v4`` (Gemini V2 Bundle 6).
+
+    Identical to :func:`parse_match_export_v3` in every respect (same core,
+    same rich-state chain validation, same forbidden-key scan) except the
+    expected ``schema_version``, plus one additive per-turn check: any turn
+    carrying ``structured_response`` must also carry
+    ``response_schema_version == "maple-turn-advice-response.v2"``, and
+    ``structured_response`` must strictly re-validate against the exact v2
+    response schema. A turn with neither key is valid (a v1-advice turn in
+    an otherwise-v4 export); a turn with only one of the two, or an invalid
+    ``structured_response``, fails the parse closed rather than silently
+    downgrading to that turn's flattened ``advice`` fields.
+    """
+
+    payload = _parse_match_export_core(raw, expected_schema_version=MATCH_EXPORT_SCHEMA_VERSION_V4)
+    for turn_payload in payload["turns"]:
+        if not isinstance(turn_payload, dict):  # pragma: no cover - core already enforced this
+            raise MatchExportV3Error("V4_EXPORT_TURN_MUST_BE_OBJECT")
+        has_structured_response = "structured_response" in turn_payload
+        has_response_schema_version = "response_schema_version" in turn_payload
+        if has_structured_response != has_response_schema_version:
+            raise MatchExportV3Error("V4_EXPORT_TURN_STRUCTURED_RESPONSE_FIELDS_INCOMPLETE")
+        if not has_structured_response:
+            continue
+        if turn_payload["response_schema_version"] != RESPONSE_SCHEMA_VERSION_V2:
+            raise MatchExportV3Error("V4_EXPORT_TURN_RESPONSE_SCHEMA_VERSION_INVALID")
+        try:
+            turn_advice_body_v2_from_dict(turn_payload["structured_response"])
+        except TurnAdviceSchemaError as exc:
+            raise MatchExportV3Error(
+                f"V4_EXPORT_TURN_STRUCTURED_RESPONSE_INVALID:{exc}"
+            ) from exc
     return payload
 
 

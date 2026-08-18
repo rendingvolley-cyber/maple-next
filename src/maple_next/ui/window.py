@@ -45,6 +45,7 @@ from maple_next.ocr.contracts import (
     OcrFieldKey,
 )
 from maple_next.ocr.service import OcrCandidateService, UnavailableOcrCandidateBackend
+from maple_next.providers.turn_response_v2 import PredictionLineV2
 from maple_next.ui.controller import OperatorView, SelectionFlowController, TurnFactsView
 from maple_next.ui.team_build_editor import ChampionsTeamBuildEditor
 from maple_next.ui.team_import import (
@@ -133,6 +134,13 @@ _PREVIEW_UNAVAILABLE_LABEL = (
 )
 _PREVIEW_STALE_LABEL = "previewなし — frameがstaleです。manual-safe fallback。"
 _PREVIEW_INVALID_LABEL = "previewなし — frame imageがinvalidです。manual-safe fallback。"
+
+
+def _format_prediction_line_v2(line: PredictionLineV2) -> str:
+    """Compact operator-facing rendering of one Gemini V2 Bundle 6 prediction line."""
+
+    action = line.specific_action or "—"
+    return f"[{line.category}/{line.support_basis}/{line.support}] {action}: {line.summary}"
 
 
 class _AspectRatioPreviewLabel(QLabel):
@@ -1183,24 +1191,34 @@ class MapleMainWindow(QMainWindow):
         self.turn_advice_group = QGroupBox("受領したTurn Advice")
         layout = QFormLayout(self.turn_advice_group)
         self.turn_advice_action_label = QLabel()
+        # Gemini V2 Bundle 6: robustness/alternatives are additive rows,
+        # populated only for a v2 advice row -- "—" for a legacy v1 row,
+        # never a fabricated value.
+        self.turn_advice_robustness_label = QLabel()
         self.turn_advice_prediction_label = QLabel()
         self.turn_advice_prediction_label.setWordWrap(True)
         self.turn_advice_rationale_label = QLabel()
         self.turn_advice_rationale_label.setWordWrap(True)
+        self.turn_advice_alternatives_label = QLabel()
+        self.turn_advice_alternatives_label.setWordWrap(True)
         self.turn_advice_warnings_label = QLabel()
         self.turn_advice_warnings_label.setWordWrap(True)
         self.turn_advice_source_label = QLabel()
         self.turn_advice_model_label = QLabel()
         self.turn_advice_binding_label = QLabel()
         self.turn_advice_legality_label = QLabel()
+        self.turn_advice_schema_version_label = QLabel()
         layout.addRow("推奨action", self.turn_advice_action_label)
+        layout.addRow("頑健性", self.turn_advice_robustness_label)
         layout.addRow("相手予測", self.turn_advice_prediction_label)
         layout.addRow("理由", self.turn_advice_rationale_label)
+        layout.addRow("代替予測", self.turn_advice_alternatives_label)
         layout.addRow("警告", self.turn_advice_warnings_label)
         layout.addRow("Source", self.turn_advice_source_label)
         layout.addRow("Model", self.turn_advice_model_label)
         layout.addRow("Binding", self.turn_advice_binding_label)
         layout.addRow("Legality", self.turn_advice_legality_label)
+        layout.addRow("Response Schema", self.turn_advice_schema_version_label)
         self._right_column_layout.addWidget(self.turn_advice_group)
 
     def _build_actual_action_group(self) -> None:
@@ -1418,9 +1436,27 @@ class MapleMainWindow(QMainWindow):
             self.turn_advice_action_label.setText(
                 f"{current.turn_advice.action_type}: {current.turn_advice.action_name}"
             )
-            self.turn_advice_prediction_label.setText(
-                current.turn_advice.opponent_prediction
-            )
+            structured_v2 = current.turn_advice.structured_v2
+            if structured_v2 is not None:
+                self.turn_advice_robustness_label.setText(
+                    structured_v2.recommendation_robustness
+                )
+                self.turn_advice_prediction_label.setText(
+                    _format_prediction_line_v2(structured_v2.opponent_prediction.primary)
+                )
+                self.turn_advice_alternatives_label.setText(
+                    "\n".join(
+                        _format_prediction_line_v2(line)
+                        for line in structured_v2.opponent_prediction.alternatives
+                    )
+                    or "—"
+                )
+            else:
+                self.turn_advice_robustness_label.setText("—")
+                self.turn_advice_prediction_label.setText(
+                    current.turn_advice.opponent_prediction
+                )
+                self.turn_advice_alternatives_label.setText("—")
             self.turn_advice_rationale_label.setText(current.turn_advice.rationale)
             self.turn_advice_warnings_label.setText(
                 "; ".join(current.turn_advice.warnings) or "—"
@@ -1429,6 +1465,9 @@ class MapleMainWindow(QMainWindow):
             self.turn_advice_model_label.setText(current.turn_advice.model)
             self.turn_advice_binding_label.setText("CURRENT")
             self.turn_advice_legality_label.setText("VALID")
+            self.turn_advice_schema_version_label.setText(
+                current.turn_advice.response_schema_version
+            )
 
         self.actual_action_group.setVisible(
             projection.primary_cta == "RECORD_ACTUAL_ACTION"

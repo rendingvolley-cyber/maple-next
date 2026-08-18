@@ -254,6 +254,13 @@ def test_applied_canonical_advice_store_has_only_allowlist_fields(tmp_path: Path
         "model",
         "warnings_json",
         "created_at",
+        # Gemini V2 Bundle 6: additive, specific-extracted fields -- never a
+        # raw payload dump. ``response_schema_version`` is a fixed, allowed
+        # string; ``advice_json`` is the canonical, strictly re-validated
+        # accepted v2 body (never the raw provider response text), covered
+        # by the ``not any("payload" in column ...)`` check below.
+        "response_schema_version",
+        "advice_json",
     }
     assert not any("payload" in column for column in columns)
 

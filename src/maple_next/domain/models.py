@@ -237,6 +237,18 @@ class TurnAdviceSnapshot:
     source_type: str = "MOCK"
     model: str = "mock-dev"
     warnings: tuple[str, ...] = ()
+    #: Gemini V2 Bundle 6. ``"maple-turn-advice-response.v1"`` for every
+    #: legacy/pre-Bundle-6 row (the domain-layer default, never imported from
+    #: ``providers.turn_response_v2`` -- this module stays free of any
+    #: provider-layer dependency); ``"maple-turn-advice-response.v2"`` only
+    #: when ``advice_json`` carries the canonical, strictly re-validated v2
+    #: body this row was actually persisted with.
+    response_schema_version: str = "maple-turn-advice-response.v1"
+    #: Canonical v2 JSON (see
+    #: ``persistence.turn_store.canonical_turn_advice_v2_json``) when
+    #: ``response_schema_version`` is v2; always ``None`` for a v1 row. Never
+    #: the raw provider response text.
+    advice_json: str | None = None
 
     def __post_init__(self) -> None:
         if self.turn_number < 1:
@@ -249,6 +261,13 @@ class TurnAdviceSnapshot:
             raise ValueError("advice rationale must be explicit")
         if not self.source_type.strip():
             raise ValueError("advice source_type must be explicit")
+        if not self.response_schema_version.strip():
+            raise ValueError("advice response_schema_version must be explicit")
+        if self.response_schema_version == "maple-turn-advice-response.v2":
+            if self.advice_json is None or not self.advice_json.strip():
+                raise ValueError("v2 advice row requires advice_json")
+        elif self.advice_json is not None:
+            raise ValueError("non-v2 advice row must not carry advice_json")
 
 
 @dataclass(frozen=True, slots=True)

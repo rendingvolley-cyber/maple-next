@@ -16,12 +16,19 @@ from __future__ import annotations
 
 import json
 from enum import StrEnum
-from typing import Final, Protocol, runtime_checkable
+from typing import Final, Literal, Protocol, runtime_checkable
 
 from maple_next.domain.enums import ActionType
-from maple_next.providers.turn_request import TurnAdviceRequest, request_payload_hash
+from maple_next.providers.turn_advice_rich_state import RICH_STATE_REQUEST_CONTRACT_VERSION
+from maple_next.providers.turn_request import (
+    CONTRACT_VERSION,
+    CONTRACT_VERSION_V2,
+    TurnAdviceRequest,
+    request_payload_hash,
+)
 from maple_next.providers.turn_response import (
     NormalizedTurnAdviceResult,
+    RecommendedAction,
     TurnAdviceBody,
     TurnAdviceSchemaError,
     turn_advice_body_from_dict,
@@ -108,6 +115,47 @@ def sanitized_reason_for(code: TurnAdviceResultCode) -> str:
     """Map a result code to its fixed sanitized reason token."""
 
     return _SANITIZED_REASON[code]
+
+
+#: Gemini V2 Bundle 6. Rich-state request contract versions that predate the
+#: ``.v7``/response-schema-v2 boundary. These values never had named module
+#: constants of their own -- each was superseded by the next bundle's raise
+#: of ``RICH_STATE_REQUEST_CONTRACT_VERSION`` before this dispatcher existed
+#: -- so they are listed here literally, purely to document (and unit-test)
+#: that a historical rich request of any of these versions resolves to the
+#: v1 parser, exactly like a legacy request.
+_RICH_STATE_PRE_V7_CONTRACT_VERSIONS: Final[frozenset[str]] = frozenset(
+    {
+        "maple-turn-advice.v3",
+        "maple-turn-advice.v4",
+        "maple-turn-advice.v5",
+        "maple-turn-advice.v6",
+    }
+)
+
+
+def select_response_parser_version(contract_version: str) -> Literal["v1", "v2"]:
+    """Trusted response-parser selection, keyed on the REQUEST/job contract only.
+
+    Never chooses a parser because the provider's own response body claims a
+    version -- that value is not even trusted input until after the correct
+    parser has already accepted it. Legacy ``maple-turn-advice.v1``/``.v2``
+    and every pre-``.v7`` rich contract resolve to the v1 parser
+    (:func:`~maple_next.providers.turn_response.turn_advice_body_from_dict`);
+    only the current rich contract
+    (:data:`~maple_next.providers.turn_advice_rich_state.RICH_STATE_REQUEST_CONTRACT_VERSION`,
+    ``.v7``) resolves to the v2 parser
+    (:func:`~maple_next.providers.turn_response_v2.turn_advice_body_v2_from_dict`).
+    Any other contract version fails closed.
+    """
+
+    if contract_version in {CONTRACT_VERSION, CONTRACT_VERSION_V2}:
+        return "v1"
+    if contract_version in _RICH_STATE_PRE_V7_CONTRACT_VERSIONS:
+        return "v1"
+    if contract_version == RICH_STATE_REQUEST_CONTRACT_VERSION:
+        return "v2"
+    raise TurnAdviceParseError("TURN_ADVICE_CONTRACT_VERSION_UNSUPPORTED")
 
 
 def parse_turn_advice_body(provider_text: str) -> TurnAdviceBody:
@@ -207,18 +255,21 @@ def validate_turn_advice_binding(
     return TurnAdviceResultCode.VALID
 
 
-def validate_turn_advice_legality(
-    request: LegalActionBindingRequest, result: NormalizedTurnAdviceResult
+def _check_recommended_action_legality(
+    request: LegalActionBindingRequest, chosen: RecommendedAction
 ) -> TurnAdviceResultCode:
     """Exact 3-way legal-action match plus MOVE/SWITCH ownership re-check.
 
-    The recommended action's ``action_id``, ``action_type``, and
-    ``action_name`` must all match one legal action in ``request.legal_actions``
-    — matching on id alone (or any two of the three fields) is not enough.
-    Never substitutes or auto-corrects a bad response with a legal one.
+    ``chosen``'s ``action_id``, ``action_type``, and ``action_name`` must all
+    match one legal action in ``request.legal_actions`` — matching on id
+    alone (or any two of the three fields) is not enough. Never substitutes
+    or auto-corrects a bad response with a legal one. Shared, unchanged core
+    of both :func:`validate_turn_advice_legality` (v1) and
+    :func:`validate_turn_advice_legality_v2` (Gemini V2 Bundle 6) — the v1
+    response schema's ``RecommendedAction`` type is reused verbatim by v2, so
+    the same exact-match check applies to both without reimplementation.
     """
 
-    chosen = result.advice.recommended_action
     id_matches = [a for a in request.legal_actions if a.action_id == chosen.action_id]
     if not id_matches:
         return TurnAdviceResultCode.ILLEGAL_ACTION
@@ -241,6 +292,34 @@ def validate_turn_advice_legality(
         return TurnAdviceResultCode.NON_OWNED_ACTION
 
     return TurnAdviceResultCode.VALID
+
+
+def validate_turn_advice_legality(
+    request: LegalActionBindingRequest, result: NormalizedTurnAdviceResult
+) -> TurnAdviceResultCode:
+    """Exact 3-way legal-action match plus MOVE/SWITCH ownership re-check.
+
+    The recommended action's ``action_id``, ``action_type``, and
+    ``action_name`` must all match one legal action in ``request.legal_actions``
+    — matching on id alone (or any two of the three fields) is not enough.
+    Never substitutes or auto-corrects a bad response with a legal one.
+    """
+
+    return _check_recommended_action_legality(request, result.advice.recommended_action)
+
+
+def validate_turn_advice_legality_v2(
+    request: LegalActionBindingRequest, recommended_action: RecommendedAction
+) -> TurnAdviceResultCode:
+    """Gemini V2 Bundle 6: identical legality check for a v2 response body.
+
+    Takes ``recommended_action`` directly rather than a
+    :class:`NormalizedTurnAdviceResult` — v2 bodies are never wrapped in that
+    v1-typed envelope (spec: v1 classes are never weakened or repurposed for
+    v2). Delegates to the exact same core as :func:`validate_turn_advice_legality`.
+    """
+
+    return _check_recommended_action_legality(request, recommended_action)
 
 
 def validate_turn_advice_result(

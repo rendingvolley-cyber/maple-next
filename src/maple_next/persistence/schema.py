@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -597,6 +597,22 @@ def migrate(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "battle_sessions", "opponent_intel_pin_status", "TEXT NULL")
     _ensure_column(connection, "battle_sessions", "opponent_intel_generation_id", "TEXT NULL")
     _ensure_column(connection, "battle_sessions", "opponent_intel_snapshot_sha256", "TEXT NULL")
+    # Bundle 6 (Gemini V2): versioned Turn Advice response contract.
+    # ``response_schema_version`` defaults every existing/legacy row to
+    # ``maple-turn-advice-response.v1`` -- historical rows are never
+    # retroactively reclassified as v2, since their richer structured detail
+    # (recommendation_robustness, support/support_basis, alternatives) was
+    # never captured and must remain genuinely unknown rather than
+    # fabricated. ``advice_json`` is NULL for every v1 row; it carries the
+    # canonical, strictly re-validated v2 body only for a row explicitly
+    # tagged v2 (see ``domain/models.py::TurnAdviceSnapshot``).
+    _ensure_column(
+        connection,
+        "turn_advices",
+        "response_schema_version",
+        "TEXT NOT NULL DEFAULT 'maple-turn-advice-response.v1'",
+    )
+    _ensure_column(connection, "turn_advices", "advice_json", "TEXT NULL")
     _sanitize_async_job_result_payloads(connection)
     connection.execute(
         "UPDATE schema_meta SET schema_version = ? WHERE singleton_id = 1",

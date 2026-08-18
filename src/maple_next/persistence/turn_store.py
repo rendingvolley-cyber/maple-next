@@ -89,8 +89,9 @@ class TurnStoreMixin(StoreBase):
             INSERT INTO turn_advices (
                 turn_advice_id, session_id, turn_id, turn_number, job_id,
                 input_snapshot_id, action_type, action_name, opponent_prediction,
-                rationale, is_mock, source_type, model, warnings_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rationale, is_mock, source_type, model, warnings_json,
+                response_schema_version, advice_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 advice.turn_advice_id,
@@ -107,6 +108,8 @@ class TurnStoreMixin(StoreBase):
                 advice.source_type,
                 advice.model,
                 json.dumps(list(advice.warnings), ensure_ascii=False),
+                advice.response_schema_version,
+                advice.advice_json,
                 self._now(),
             ),
         )
@@ -119,6 +122,7 @@ class TurnStoreMixin(StoreBase):
         if row is None:
             raise KeyError(turn_advice_id)
         warnings = cast(list[str], json.loads(str(row["warnings_json"])))
+        advice_json_raw = row["advice_json"]
         return TurnAdviceSnapshot(
             turn_advice_id=str(row["turn_advice_id"]),
             turn_id=str(row["turn_id"]),
@@ -133,6 +137,8 @@ class TurnStoreMixin(StoreBase):
             source_type=str(row["source_type"]),
             model=str(row["model"]),
             warnings=tuple(warnings),
+            response_schema_version=str(row["response_schema_version"]),
+            advice_json=str(advice_json_raw) if advice_json_raw is not None else None,
         )
 
     def append_recorded_action(self, session_id: str, action: RecordedAction) -> None:

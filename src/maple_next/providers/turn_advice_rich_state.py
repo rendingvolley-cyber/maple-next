@@ -10,13 +10,17 @@ nothing over the network, and does not touch:
   not imported, not modified;
 - the operator UI.
 
-It reuses (imports, never modifies) ``_TURN_INITIAL_PROMPT`` indirectly via
-the shared renderer functions in ``providers/turn_request.py``
-(``_render_provider_prompt_from_canonical_request`` /
-``_render_provider_request_body_from_prompt``), plus
-``TURN_PROMPT_VERSION`` and ``REQUESTED_OUTPUT_SCHEMA`` from that same
-module, so this additive contract never copies or re-implements the
-Initial Prompt v1 text or the legacy response schema.
+It reuses (imports, never modifies) the shared body renderer
+``_render_provider_request_body_from_prompt`` and ``TURN_PROMPT_VERSION_V2``
+from ``providers/turn_request.py``, and the strict v2 response schema
+``REQUESTED_OUTPUT_SCHEMA_V2`` from ``providers/turn_response_v2.py`` (which
+itself only imports pure schema primitives from ``turn_response.py`` -- this
+module never imports ``turn_response.py`` directly and never touches the v1
+parser). Gemini V2 Bundle 6: every request this module builds is contract
+``.v7``, paired with Initial Prompt v2 (``_TURN_INITIAL_PROMPT_V2``, defined
+in this module) and response schema v2. The legacy Initial Prompt v1 text
+and ``REQUESTED_OUTPUT_SCHEMA`` (v1) in ``turn_request.py`` are never copied,
+reimplemented, or repointed here.
 
 This module intentionally does not accept or manufacture a
 ``DispatchDecision``. Dispatch authorization (trusted-human-activation,
@@ -70,11 +74,10 @@ from maple_next.domain.turn_state_projection import (
     projection_to_canonical_dict,
 )
 from maple_next.providers.turn_request import (
-    REQUESTED_OUTPUT_SCHEMA,
-    TURN_PROMPT_VERSION,
-    _render_provider_prompt_from_canonical_request,
+    TURN_PROMPT_VERSION_V2,
     _render_provider_request_body_from_prompt,
 )
+from maple_next.providers.turn_response_v2 import REQUESTED_OUTPUT_SCHEMA_V2
 
 #: Additive, versioned request contract. Distinct from the legacy
 #: ``maple-turn-advice.v1``/``.v2`` contracts in ``turn_request.py`` *and*
@@ -109,7 +112,17 @@ from maple_next.providers.turn_request import (
 #: snapshot, or a different confirmed opponent active, changes the hash.
 #: Bundle 5 is input context only -- it does not touch the response/output
 #: contract, legal actions, confirmed state, or battle memory.
-RICH_STATE_REQUEST_CONTRACT_VERSION = "maple-turn-advice.v6"
+#:
+#: Bundle 6 (Gemini V2) raises this from ``.v6`` to ``.v7``: every ``.v6``
+#: field is preserved verbatim with unchanged semantics. Bundle 6 replaces
+#: what changes on the *response side* -- ``prompt_version`` now pins
+#: ``TURN_PROMPT_VERSION_V2`` and ``requested_output_schema`` now pins
+#: ``REQUESTED_OUTPUT_SCHEMA_V2`` (``providers/turn_response_v2.py``) for
+#: every request built by this module. Trusted response-parser selection is
+#: keyed off this contract version (see
+#: ``turn_validation.select_response_parser_version``), never off any claim
+#: inside the provider's own response body.
+RICH_STATE_REQUEST_CONTRACT_VERSION = "maple-turn-advice.v7"
 
 #: Top-level keys ``rules_context`` must carry. Defence in depth: the value
 #: is always actually produced by
@@ -135,19 +148,113 @@ _REQUIRED_RULES_CONTEXT_KEYS: Final[frozenset[str]] = frozenset(
 #: job envelope from a legacy one.
 RICH_STATE_JOB_TYPE = "TURN_ADVICE"
 
+#: Gemini V2 Bundle 6. Self-contained ``maple-turn-prompt.v2`` instructions,
+#: paired exclusively with ``REQUESTED_OUTPUT_SCHEMA_V2``
+#: (``providers/turn_response_v2.py``). Deliberately a fully independent
+#: text -- not an edit of ``turn_request._TURN_INITIAL_PROMPT`` -- because
+#: the v1 text's numeric bounds (1-3 reasons, 0-5 warnings) and field names
+#: (``predicted_action``, ``confidence``) no longer match the v2 response
+#: shape. The v1 prompt text is never mutated; legacy and pre-v7 rich
+#: requests keep using it unchanged.
+_TURN_INITIAL_PROMPT_V2: Final[str] = (
+    """You are advising a human Pokémon Champions player for exactly one reviewed turn.
+
+The request contains canonical facts confirmed by Maple.
+HP values are buckets, not exact percentages. Do not convert a bucket to exact HP.
+
+Only the current active Pokémon's HP and status are confirmed.
+Do not assume the current HP or status of a benched switch target.
+
+The opponent's build and remaining selected Pokémon are not confirmed.
+Do not state opponent moves, item, ability, nature, stat allocation, speed relation,
+damage range, or remaining team members as confirmed facts.
+
+Authority order, strongest to weakest, for every claim you make:
+1. Confirmed current-match facts and battle_memory.
+2. Pinned official Champions rules (rules_context), within its declared coverage.
+3. Pinned opponent population prior (opponent_intel_context), when present.
+4. General Pokémon knowledge and model training data.
+A lower-authority source must never override a higher one. General knowledge alone can
+never establish an opponent's move, item, ability, nature, speed relation, exact damage
+range, teammate, or a Pokémon Champions-specific mechanic, timer, format detail, or
+restriction -- if you need one of those and it is not confirmed or pinned, treat it as
+unknown rather than asserting it.
+
+opponent_intel_context, when present, is a population-level statistical prior only. High
+usage in it never confirms a move, item, ability, or teammate; low usage or a missing
+entry never makes one impossible. Use it only to rank plausible possibilities, never to
+assert a fact.
+
+Every opponent_prediction line (primary and each alternative) is your inference about
+what the opponent will do, never a confirmed future fact -- word every summary as a
+prediction, not as something already known to be true.
+
+Before choosing, silently compare every legal_actions entry for immediate value, risk of
+losing the current active Pokémon or a necessary team resource, robustness against
+plausible opponent categories (DAMAGING_MOVE, NON_DAMAGING_MOVE, SWITCH, UNKNOWN), and
+confirmed HP buckets, status, stat stages, weather, terrain, and side effects.
+
+You must always choose exactly one action from legal_actions -- there is always a best
+available action even under uncertainty; never omit recommended_action or leave it
+ambiguous. Copy action_id, action_type, and action_name exactly.
+
+recommendation_robustness describes how much the primary and meaningful alternative
+opponent lines could change your recommendation -- it is not a probability and it is not
+the same thing as any prediction line's support level. HIGH means the recommendation
+stays best across the primary and every meaningful alternative. MEDIUM means it stays
+best overall but one plausible alternative narrows the margin. LOW means it is still the
+single best legal action but is sensitive to one specific unresolved opponent line -- LOW
+robustness must always be paired with at least one warning naming that exact
+uncertainty; never lower robustness without also explaining why in a warning, and never
+withhold a recommendation because robustness is low.
+
+For each opponent_prediction line, support_basis names the least-authoritative source
+still materially required to support that specific line, using the same authority order
+above: CONFIRMED_MATCH, PINNED_RULES, POPULATION_PRIOR, GENERAL_KNOWLEDGE, or NONE (NONE
+only for an UNKNOWN line). support is a separate, ordinal LOW/MEDIUM/HIGH strength of
+evidence -- never a calibrated probability, win rate, or usage percentage, and never
+copied directly from a population usage number. A GENERAL_KNOWLEDGE line must always use
+LOW support. A POPULATION_PRIOR line must never use HIGH support. Naming a
+support_basis, even CONFIRMED_MATCH, describes how well-supported your inference is --
+it never means the predicted future action itself is confirmed.
+
+Set a line's specific_action to a concrete move or Pokémon name only when support is not
+LOW and the exact name is grounded either in confirmed current-match battle memory or in
+the pinned opponent_intel_context's matched move/species list -- never from general
+knowledge, strategic convenience, or imagined coverage. For a SWITCH line, specific_action
+may only name a Pokémon species already confirmed as belonging to the opponent during
+this match, and never the opponent's current active. When evidence does not support a
+specific name, or the category itself is unclear, use category UNKNOWN with
+specific_action null, support_basis NONE, and support LOW rather than guessing --
+UNKNOWN is an expected, acceptable answer, never a failure.
+
+Give 1-2 concise, decisive reasons focused on why the recommendation holds across the
+important plausible opponent lines -- not chain-of-thought, not generic filler. If a
+population tendency materially shaped a reason, describe it as a tendency or prior, never
+as an opponent fact. Give 0-2 warnings, each for a concrete, current-turn risk that could
+materially change the recommendation; do not add a warning merely because some support is
+LOW or MEDIUM, and do not repeat a reason as a warning.
+
+Do not expose hidden chain-of-thought, and do not add hedging labels such as 暫定,
+判断保留, or 保留推奨 anywhere in your response.
+
+The human alone decides and operates the game. Do not execute a move, switch, keyboard
+input, controller input, or any other game action.
+Follow requested_output_schema exactly and return strict JSON only."""
+)
+
 #: Rich-provider-only presentation constraint. This is deliberately appended
 #: at the canonical rich prompt boundary rather than changing the shared
 #: Initial Prompt, the response schema, or any machine-facing request value.
-_RICH_JAPANESE_HUMAN_TEXT_INSTRUCTION: Final[str] = """Human-facing language requirement:
-Write opponent_prediction.summary, every reasons item, and every warnings item in concise,
-decision-oriented, non-repetitive natural Japanese that a human can scan during the current turn.
-Even when the canonical request contains English text, these human-facing fields must be Japanese.
-Use at most two reasons and include only the most important decision factors.
-Add a warning only for a concrete, actionable current-turn risk; otherwise return an empty warnings
-array. Do not repeat a reason as a warning or inflate warnings with generic uncertainty.
+_RICH_JAPANESE_HUMAN_TEXT_INSTRUCTION_V2: Final[str] = """Human-facing language requirement:
+Write every reasons item, every warnings item, and every opponent_prediction line's summary
+in concise, decision-oriented, non-repetitive natural Japanese that a human can scan during
+the current turn. Even when the canonical request contains English text, these human-facing
+fields must be Japanese.
 Do not translate or alter machine/contract values, including recommended_action action_id,
-action_type, or action_name; opponent_prediction category, predicted_action, or confidence;
-source/model/binding/legality values; IDs; hashes; or enum-like tokens."""
+action_type, or action_name; recommendation_robustness; opponent_prediction category,
+specific_action, support_basis, or support; response_schema_version; source/model/binding/
+legality values; IDs; hashes; or enum-like tokens."""
 
 
 class RichStateRequestError(Exception):
@@ -402,18 +509,38 @@ def rich_request_payload_hash(request: RichStateTurnAdviceRequest) -> str:
     return hashlib.sha256(encode_canonical_rich_request(request)).hexdigest()
 
 
-def build_rich_provider_prompt(request: RichStateTurnAdviceRequest) -> str:
-    """Build the rich request's prompt via the shared Initial Prompt v1 renderer.
+def _render_provider_prompt_from_canonical_request_v2(
+    canonical_request: dict[str, Any],
+) -> str:
+    """Secret-free Initial Prompt v2 renderer, paired with response schema v2.
 
-    Delegates to the same private renderer the legacy
-    ``turn_request.build_provider_prompt`` uses -- ``_TURN_INITIAL_PROMPT``
-    is never copied or independently reimplemented here.
+    Deliberately independent of ``turn_request._render_provider_prompt_from_canonical_request``
+    (the v1 renderer): sharing it would require feeding it the v1 prompt text,
+    whose numeric bounds and field names no longer match the v2 response
+    contract. The v1 renderer/text are never mutated.
     """
 
-    prompt = _render_provider_prompt_from_canonical_request(
+    canonical = json.dumps(
+        canonical_request,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"{_TURN_INITIAL_PROMPT_V2}\n\nCanonical request:\n{canonical}"
+
+
+def build_rich_provider_prompt(request: RichStateTurnAdviceRequest) -> str:
+    """Build the rich request's prompt v2, paired with ``REQUESTED_OUTPUT_SCHEMA_V2``.
+
+    Every request this module builds is contract ``.v7`` (response schema
+    v2) -- there is no live older rich contract to branch on (see the
+    ``RICH_STATE_REQUEST_CONTRACT_VERSION`` docstring).
+    """
+
+    prompt = _render_provider_prompt_from_canonical_request_v2(
         canonical_rich_request_dict(request)
     )
-    return f"{prompt}\n\n{_RICH_JAPANESE_HUMAN_TEXT_INSTRUCTION}"
+    return f"{prompt}\n\n{_RICH_JAPANESE_HUMAN_TEXT_INSTRUCTION_V2}"
 
 
 def build_rich_provider_request_body(request: RichStateTurnAdviceRequest) -> dict[str, Any]:
@@ -592,7 +719,7 @@ def build_rich_state_turn_advice_request(
 
     request = RichStateTurnAdviceRequest(
         contract_version=RICH_STATE_REQUEST_CONTRACT_VERSION,
-        prompt_version=TURN_PROMPT_VERSION,
+        prompt_version=TURN_PROMPT_VERSION_V2,
         job_type=RICH_STATE_JOB_TYPE,
         identity=current_identity,
         reviewed_confirmed_state_id=projection.reviewed_confirmed_state_id,
@@ -604,7 +731,7 @@ def build_rich_state_turn_advice_request(
         legal_actions=legal_actions,
         legal_switches=legal_switch_confirmation.legal_switches,
         legal_switches_status=legal_switch_confirmation.status.value,
-        requested_output_schema=REQUESTED_OUTPUT_SCHEMA,
+        requested_output_schema=REQUESTED_OUTPUT_SCHEMA_V2,
         state_confirmation=confirmed_state.confirmation,
         evidence=evidence,
         self_team_build_sha256=self_team_build_sha256,

@@ -99,6 +99,24 @@ def sanitized_capture_message(error_code: str | None) -> str | None:
     )
 
 
+def is_frame_newer_than(frame: FramePacket, baseline: FramePacket | None) -> bool:
+    """True when ``frame`` is demonstrably newer than ``baseline``.
+
+    Proves a reacquire actually observed a new capture rather than resubmitting
+    whatever the capture backend already had cached. With no baseline, any
+    valid frame counts as newer. Otherwise both the frame identity and the
+    monotonic capture clock must have advanced - a frame sharing either with
+    the baseline is treated as the same underlying capture, never as newer.
+    """
+
+    if baseline is None:
+        return True
+    return (
+        frame.frame_id != baseline.frame_id
+        and frame.captured_monotonic_ns > baseline.captured_monotonic_ns
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CaptureStatus:
     """Sanitized, immutable snapshot of capture state for UI/consumer display.

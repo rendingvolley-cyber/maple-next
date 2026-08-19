@@ -1,9 +1,10 @@
 """NEW MATCH-triggered Selection screenshot matching.
 
 The live UGREEN capture worker may continue to own the device for preview, but
-Selection ROI matching is event-driven: one immutable canonical frame is copied
-at the instant the human presses NEW MATCH, and only that frozen frame is cropped
-and matched for the new Selection identity. No Selection ROI timer is allowed.
+Selection ROI matching is event-driven: once NEW MATCH binds the new
+match/generation, one immutable canonical frame is reacquired through the
+capture abstraction and copied, and only that frozen frame is cropped and
+matched for the new Selection identity. No Selection ROI timer is allowed.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from maple_next.capture.contracts import (
     FrameKind,
     FramePacket,
     VideoCaptureBackend,
+    is_frame_newer_than,
 )
 from maple_next.selection_roi.contracts import (
     SELECTION_SLOT_COUNT,
@@ -118,7 +120,27 @@ class SelectionSnapshotMatchFlowWindow(SelectionRoiMatchFlowWindow):
 
         return
 
-    def _freeze_frame_at_new_match(self) -> tuple[FramePacket | None, str]:
+    def _capture_new_match_baseline(self) -> FramePacket | None:
+        """Read the pre-transition frame solely as a staleness baseline.
+
+        This value is never frozen or submitted to Selection ROI matching. It
+        exists only so the post-transition reacquire below can prove it
+        observed a frame that is demonstrably newer, rather than resubmitting
+        whatever the capture backend already had cached before NEW MATCH.
+        """
+
+        _status, frame = self._capture_service.latest_snapshot()
+        return frame
+
+    def _reacquire_frame_after_new_match(
+        self, baseline: FramePacket | None
+    ) -> tuple[FramePacket | None, str]:
+        """Obtain ONE fresh canonical frame after the new generation is bound.
+
+        Fails closed (returns no frame) rather than fabricating a crop or
+        reusing the pre-transition baseline when no fresh frame is available.
+        """
+
         status, frame = self._capture_service.latest_snapshot()
         if (
             not status.available
@@ -129,7 +151,7 @@ class SelectionSnapshotMatchFlowWindow(SelectionRoiMatchFlowWindow):
             return (
                 None,
                 status.operator_message
-                or "NEW MATCH時の映像を取得できません。相手6体は手入力できます。",
+                or "NEW MATCH後の映像を取得できません。相手6体は手入力できます。",
             )
         if (
             frame.frame_kind is not FrameKind.CANONICAL
@@ -140,14 +162,19 @@ class SelectionSnapshotMatchFlowWindow(SelectionRoiMatchFlowWindow):
         ):
             return (
                 None,
-                "NEW MATCH時の映像が1280x720 canonical frameではありません。手入力できます。",
+                "NEW MATCH後の映像が1280x720 canonical frameではありません。手入力できます。",
+            )
+        if not is_frame_newer_than(frame, baseline):
+            return (
+                None,
+                "NEW MATCH後の新しい映像をまだ取得できません。相手6体は手入力できます。",
             )
 
         frozen_image = frame.image.copy()
         if frozen_image.isNull():
             return (
                 None,
-                "NEW MATCH時のスクリーンショットを固定できません。手入力できます。",
+                "NEW MATCH後のスクリーンショットを固定できません。手入力できます。",
             )
         self._new_match_snapshot_counter += 1
         frozen = FramePacket(
@@ -167,7 +194,7 @@ class SelectionSnapshotMatchFlowWindow(SelectionRoiMatchFlowWindow):
             content_rect=frame.content_rect,
             frame_kind=frame.frame_kind,
         )
-        return frozen, "NEW MATCH時のスクリーンショットを固定しました。解析中です。"
+        return frozen, "NEW MATCH後のスクリーンショットを固定しました。解析中です。"
 
     def _submit_snapshot_for_new_identity(
         self,
@@ -204,9 +231,10 @@ class SelectionSnapshotMatchFlowWindow(SelectionRoiMatchFlowWindow):
         if not self._mutation_slots_allowed():
             return
         self._autoload_last_used_self_team_preset()
-        frozen, message = self._freeze_frame_at_new_match()
+        baseline = self._capture_new_match_baseline()
         previous_identity = self._selection_identity(self._controller.refresh())
         super()._on_new_match(_checked)
+        frozen, message = self._reacquire_frame_after_new_match(baseline)
         self._submit_snapshot_for_new_identity(
             frame=frozen,
             unavailable_message=message,
@@ -217,9 +245,10 @@ class SelectionSnapshotMatchFlowWindow(SelectionRoiMatchFlowWindow):
         if not self._mutation_slots_allowed():
             return
         self._autoload_last_used_self_team_preset()
-        frozen, message = self._freeze_frame_at_new_match()
+        baseline = self._capture_new_match_baseline()
         previous_identity = self._selection_identity(self._controller.refresh())
         super()._on_new_match_after_export(_checked)
+        frozen, message = self._reacquire_frame_after_new_match(baseline)
         self._submit_snapshot_for_new_identity(
             frame=frozen,
             unavailable_message=message,

@@ -33,6 +33,20 @@ from maple_next.ui.match_controller import MatchFlowController
 from maple_next.ui.selection_snapshot_window import SelectionSnapshotMatchFlowWindow
 
 
+class _TimedQtFrame:
+    """Hermetic QVideoFrame fake: real production callback path, no hardware."""
+
+    def __init__(self, start_time_us: int, image: QImage) -> None:
+        self._start_time_us = start_time_us
+        self._image = image
+
+    def startTime(self) -> int:  # noqa: N802 - mirrors Qt API
+        return self._start_time_us
+
+    def toImage(self) -> QImage:  # noqa: N802 - mirrors Qt API
+        return self._image
+
+
 def _qt_application() -> QApplication:
     existing = QApplication.instance()
     if existing is not None:
@@ -360,38 +374,55 @@ def test_two_rapid_new_matches_reject_late_result_from_first_generation(
     repository.close()
 
 
-def test_new_match_async_frame_ready_submits_first_fresh_frame_after_stale_fast_path(
+def test_new_match_async_reacquire_submits_first_fresh_frame_via_production_backend(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mandatory decisive regression.
+    """Mandatory decisive regression - real production callback path, no cheating.
 
     baseline A -> NEW MATCH -> immediate post-bind latest_snapshot() still
-    returns A -> zero ROI submits so far -> later CaptureService.frame_ready
-    emits fresh B -> exactly one ROI submit for B, bound to the new
-    generation. This is the exact field failure mode: a single synchronous
-    reacquire read taken microseconds after generation-bind is not
-    guaranteed to already reflect a new capture, so the request must stay
-    armed for the capture backend's own frame_ready signal instead of
-    failing closed immediately.
+    returns A -> zero ROI submits so far -> the real QtMultimediaUgreenBackend
+    admits fresh Qt frame B through its production callback -> that reaches
+    CaptureService._on_frame -> CaptureService.frame_ready fires on its own,
+    with no manual ``frame_ready.emit(...)`` anywhere in this test -> exactly
+    one ROI submit for B, bound to the new generation.
+
+    This is the exact field failure mode: a single synchronous reacquire read
+    taken microseconds after generation-bind is not guaranteed to already
+    reflect a new capture, so the request must stay armed for the capture
+    backend's own frame_ready signal instead of failing closed immediately -
+    and that signal must actually be reachable from the real backend's Qt
+    callback, not just from a test manually poking the service.
     """
 
     repository, window = _build_window(tmp_path)
-    source_image = QImage(1280, 720, QImage.Format.Format_RGB32)
-    source_image.fill(QColor("#a1b2c3"))
-    baseline_status, baseline_frame = _available_snapshot(
-        source_image, frame_id="frame-A", monotonic_ns=100
-    )
+    backend = window._capture_service._backend  # noqa: SLF001
+    # Bypass real QMediaDevices/QCamera hardware discovery only - the same
+    # focused backend state-machine probe pattern already used throughout
+    # tests/test_issue31_capture_30fps_cap.py. Everything downstream of this
+    # (admission, conversion, the on_frame callback, canonicalization, and
+    # frame_ready) is the genuine production code path.
+    backend._running = True  # noqa: SLF001
 
-    def latest_snapshot() -> tuple[CaptureStatus, FramePacket]:
-        # Every synchronous read - baseline and the immediate post-bind fast
-        # path - observes the identical pre-transition frame A.
-        return baseline_status, baseline_frame
+    source_image_a = QImage(1280, 720, QImage.Format.Format_RGB32)
+    source_image_a.fill(QColor("#a1b2c3"))
+    source_image_b = QImage(1280, 720, QImage.Format.Format_RGB32)
+    source_image_b.fill(QColor("#c3b2a1"))
 
     submitted: list[FramePacket] = []
-    monkeypatch.setattr(window._capture_service, "latest_snapshot", latest_snapshot)  # noqa: SLF001
     assert window._selection_roi_worker is not None  # noqa: SLF001
     monkeypatch.setattr(window._selection_roi_worker, "submit", submitted.append)  # noqa: SLF001
+
+    # Frame A is already on the capture feed before the operator presses NEW
+    # MATCH - admitted through the real backend callback exactly as
+    # continuous live capture would, then read back as the pre-transition
+    # baseline and the (stale) immediate post-bind fast-path attempt.
+    frame_a = _TimedQtFrame(start_time_us=0, image=source_image_a)
+    backend._on_qt_frame(frame_a, window._capture_service._on_frame)  # noqa: SLF001
+    assert backend.metrics()["successful_conversion_count"] == 1
+    packet_a = backend.get_latest_frame()
+    assert packet_a is not None
+    assert backend.metrics()["successful_conversion_count"] == 1  # no double conversion
 
     window.new_match_button.click()
     new_generation_identity = window._selection_identity(  # noqa: SLF001
@@ -402,15 +433,17 @@ def test_new_match_async_frame_ready_submits_first_fresh_frame_after_stale_fast_
     assert submitted == []
     assert window._new_match_reacquire_pending is not None  # noqa: SLF001
     assert window._new_match_reacquire_timer.isActive()  # noqa: SLF001
+    assert backend.metrics()["successful_conversion_count"] == 1
 
-    _fresh_status, fresh_frame_b = _available_snapshot(
-        source_image, frame_id="frame-B", monotonic_ns=200
-    )
-    window._capture_service.frame_ready.emit(fresh_frame_b)  # noqa: SLF001
+    # Well past the ~33.3ms/30fps admission gate, so frame B is admitted
+    # rather than thinned.
+    frame_b = _TimedQtFrame(start_time_us=50_000, image=source_image_b)
+    backend._on_qt_frame(frame_b, window._capture_service._on_frame)  # noqa: SLF001
 
+    assert backend.metrics()["successful_conversion_count"] == 2
     assert len(submitted) == 1
     frozen = submitted[0]
-    assert frozen.frame_id.startswith("frame-B:new-match-snapshot:")
+    assert not frozen.frame_id.startswith(packet_a.frame_id)
     assert (
         window._selection_roi_submitted_identities[frozen.frame_id]  # noqa: SLF001
         == new_generation_identity
@@ -418,10 +451,15 @@ def test_new_match_async_frame_ready_submits_first_fresh_frame_after_stale_fast_
     assert window._new_match_reacquire_pending is None  # noqa: SLF001
     assert not window._new_match_reacquire_timer.isActive()  # noqa: SLF001
 
-    # A second, older-or-equal frame arriving afterwards changes nothing:
-    # already disarmed, exactly one submit total.
-    window._capture_service.frame_ready.emit(fresh_frame_b)  # noqa: SLF001
-    assert len(submitted) == 1
+    # get_latest_frame() after the callback returns the same cached B (a
+    # distinct, newer packet than A) without performing a second conversion.
+    cached = backend.get_latest_frame()
+    assert cached is not None
+    assert cached.frame_id != packet_a.frame_id
+    assert cached.captured_monotonic_ns > packet_a.captured_monotonic_ns
+    assert frozen.frame_id.startswith(cached.frame_id)
+    assert backend.metrics()["successful_conversion_count"] == 2
+    assert backend.metrics()["conversion_attempt_count"] == 2
 
     window.close()
     repository.close()

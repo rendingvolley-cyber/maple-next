@@ -1,4 +1,10 @@
-"""NEW MATCH binds the new generation, then reacquires and submits one frame."""
+"""NEW MATCH binds the new generation, then reacquires and submits one frame.
+
+The reacquire is a bounded one-shot wait, not a single poll: a fast-path
+synchronous read is tried first, and only when that already yields a fresh
+frame is it used directly. Otherwise the request stays armed for the first
+CaptureService.frame_ready canonical frame, bounded by a timeout.
+"""
 
 from __future__ import annotations
 
@@ -195,7 +201,12 @@ def test_new_match_does_not_submit_stale_pretransition_frame(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Case B: the reacquire observes the same frame as the baseline -> no submit."""
+    """Case B: the fast-path reacquire observes the same frame as the baseline.
+
+    This must not fail permanently - it stays armed for the async
+    CaptureService.frame_ready fallback (covered by the decisive regression
+    test below) until the bounded timeout, which is exercised here directly.
+    """
 
     repository, window = _build_window(tmp_path)
     source_image = QImage(1280, 720, QImage.Format.Format_RGB32)
@@ -223,6 +234,16 @@ def test_new_match_does_not_submit_stale_pretransition_frame(
     assert window._controller.refresh().projection.session_state == "SELECTION_OPEN"  # noqa: SLF001
     assert "新しい映像" in window.selection_roi_status_label.text()
     assert not window._selection_roi_timer.isActive()  # noqa: SLF001
+    assert window._new_match_reacquire_pending is not None  # noqa: SLF001
+    assert window._new_match_reacquire_timer.isActive()  # noqa: SLF001
+
+    # Bounded one-shot timeout: no further capture reads or retries, just a
+    # single fail-closed transition to a truthful unavailable message.
+    window._on_new_match_reacquire_timeout()  # noqa: SLF001
+    assert calls == 2
+    assert submitted == []
+    assert window._new_match_reacquire_pending is None  # noqa: SLF001
+    assert "取得できませんでした" in window.selection_roi_status_label.text()
 
     window.close()
     repository.close()
@@ -254,11 +275,19 @@ def test_new_match_without_frame_keeps_manual_selection_flow_and_submits_nothing
     assert window._controller.refresh().projection.session_state == "SELECTION_OPEN"  # noqa: SLF001
     assert "手動入力" in window.selection_roi_status_label.text()
     assert not window._selection_roi_timer.isActive()  # noqa: SLF001
+    assert window._new_match_reacquire_pending is not None  # noqa: SLF001
 
     # No hidden retry/poll loop: further polling stays a no-op and issues no
     # additional capture reads.
     window._poll_selection_roi()  # noqa: SLF001
     assert calls == 2
+
+    # The bounded timeout is the only thing that ever ends the wait - it also
+    # issues no additional capture reads.
+    window._on_new_match_reacquire_timeout()  # noqa: SLF001
+    assert calls == 2
+    assert submitted == []
+    assert window._new_match_reacquire_pending is None  # noqa: SLF001
 
     window.close()
     repository.close()
@@ -331,6 +360,126 @@ def test_two_rapid_new_matches_reject_late_result_from_first_generation(
     repository.close()
 
 
+def test_new_match_async_frame_ready_submits_first_fresh_frame_after_stale_fast_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mandatory decisive regression.
+
+    baseline A -> NEW MATCH -> immediate post-bind latest_snapshot() still
+    returns A -> zero ROI submits so far -> later CaptureService.frame_ready
+    emits fresh B -> exactly one ROI submit for B, bound to the new
+    generation. This is the exact field failure mode: a single synchronous
+    reacquire read taken microseconds after generation-bind is not
+    guaranteed to already reflect a new capture, so the request must stay
+    armed for the capture backend's own frame_ready signal instead of
+    failing closed immediately.
+    """
+
+    repository, window = _build_window(tmp_path)
+    source_image = QImage(1280, 720, QImage.Format.Format_RGB32)
+    source_image.fill(QColor("#a1b2c3"))
+    baseline_status, baseline_frame = _available_snapshot(
+        source_image, frame_id="frame-A", monotonic_ns=100
+    )
+
+    def latest_snapshot() -> tuple[CaptureStatus, FramePacket]:
+        # Every synchronous read - baseline and the immediate post-bind fast
+        # path - observes the identical pre-transition frame A.
+        return baseline_status, baseline_frame
+
+    submitted: list[FramePacket] = []
+    monkeypatch.setattr(window._capture_service, "latest_snapshot", latest_snapshot)  # noqa: SLF001
+    assert window._selection_roi_worker is not None  # noqa: SLF001
+    monkeypatch.setattr(window._selection_roi_worker, "submit", submitted.append)  # noqa: SLF001
+
+    window.new_match_button.click()
+    new_generation_identity = window._selection_identity(  # noqa: SLF001
+        window._controller.refresh()
+    )
+
+    # Zero ROI submits so far: the fast path only ever saw the stale baseline.
+    assert submitted == []
+    assert window._new_match_reacquire_pending is not None  # noqa: SLF001
+    assert window._new_match_reacquire_timer.isActive()  # noqa: SLF001
+
+    _fresh_status, fresh_frame_b = _available_snapshot(
+        source_image, frame_id="frame-B", monotonic_ns=200
+    )
+    window._capture_service.frame_ready.emit(fresh_frame_b)  # noqa: SLF001
+
+    assert len(submitted) == 1
+    frozen = submitted[0]
+    assert frozen.frame_id.startswith("frame-B:new-match-snapshot:")
+    assert (
+        window._selection_roi_submitted_identities[frozen.frame_id]  # noqa: SLF001
+        == new_generation_identity
+    )
+    assert window._new_match_reacquire_pending is None  # noqa: SLF001
+    assert not window._new_match_reacquire_timer.isActive()  # noqa: SLF001
+
+    # A second, older-or-equal frame arriving afterwards changes nothing:
+    # already disarmed, exactly one submit total.
+    window._capture_service.frame_ready.emit(fresh_frame_b)  # noqa: SLF001
+    assert len(submitted) == 1
+
+    window.close()
+    repository.close()
+
+
+def test_second_new_match_replaces_still_armed_first_pending_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second NEW MATCH cancels an unresolved first wait, not just its result."""
+
+    repository, window = _build_window(tmp_path)
+    source_image = QImage(1280, 720, QImage.Format.Format_RGB32)
+    source_image.fill(QColor("#334455"))
+    stale_status, stale_frame = _available_snapshot(
+        source_image, frame_id="frame-A", monotonic_ns=100
+    )
+
+    def latest_snapshot() -> tuple[CaptureStatus, FramePacket]:
+        return stale_status, stale_frame
+
+    submitted: list[FramePacket] = []
+    monkeypatch.setattr(window._capture_service, "latest_snapshot", latest_snapshot)  # noqa: SLF001
+    assert window._selection_roi_worker is not None  # noqa: SLF001
+    monkeypatch.setattr(window._selection_roi_worker, "submit", submitted.append)  # noqa: SLF001
+
+    window.new_match_button.click()
+    first_identity = window._selection_identity(window._controller.refresh())  # noqa: SLF001
+    assert window._new_match_reacquire_pending is not None  # noqa: SLF001
+    assert window._new_match_reacquire_pending.target_identity == first_identity  # noqa: SLF001
+
+    window._controller.abort_match(human_confirmed=True)  # noqa: SLF001
+    window.render_view(window._controller.refresh())  # noqa: SLF001
+    window.new_match_button.click()
+    second_identity = window._selection_identity(window._controller.refresh())  # noqa: SLF001
+
+    assert first_identity != second_identity
+    assert submitted == []
+    # Replaced, not merely appended to: the still-armed request now belongs
+    # to the second generation only.
+    assert window._new_match_reacquire_pending is not None  # noqa: SLF001
+    assert window._new_match_reacquire_pending.target_identity == second_identity  # noqa: SLF001
+
+    _fresh_status, fresh_frame_b = _available_snapshot(
+        source_image, frame_id="frame-B", monotonic_ns=200
+    )
+    window._capture_service.frame_ready.emit(fresh_frame_b)  # noqa: SLF001
+
+    assert len(submitted) == 1
+    assert (
+        window._selection_roi_submitted_identities[submitted[0].frame_id]  # noqa: SLF001
+        == second_identity
+    )
+
+    window.close()
+    repository.close()
+
+
 def test_successful_one_shot_submission_does_not_enable_continuous_polling(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -367,4 +516,36 @@ def test_successful_one_shot_submission_does_not_enable_continuous_polling(
     assert not window._selection_roi_timer.isActive()  # noqa: SLF001
 
     window.close()
+    repository.close()
+
+
+def test_close_event_disarms_a_still_armed_reacquire(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing the window while armed leaves no dangling timer behind."""
+
+    repository, window = _build_window(tmp_path)
+    source_image = QImage(1280, 720, QImage.Format.Format_RGB32)
+    source_image.fill(QColor("#667788"))
+    stale_status, stale_frame = _available_snapshot(
+        source_image, frame_id="frame-A", monotonic_ns=100
+    )
+
+    def latest_snapshot() -> tuple[CaptureStatus, FramePacket]:
+        return stale_status, stale_frame
+
+    monkeypatch.setattr(window._capture_service, "latest_snapshot", latest_snapshot)  # noqa: SLF001
+    assert window._selection_roi_worker is not None  # noqa: SLF001
+    monkeypatch.setattr(window._selection_roi_worker, "submit", lambda _frame: None)  # noqa: SLF001
+
+    window.new_match_button.click()
+    assert window._new_match_reacquire_pending is not None  # noqa: SLF001
+    assert window._new_match_reacquire_timer.isActive()  # noqa: SLF001
+
+    window.close()
+
+    assert window._new_match_reacquire_pending is None  # noqa: SLF001
+    assert not window._new_match_reacquire_timer.isActive()  # noqa: SLF001
+
     repository.close()

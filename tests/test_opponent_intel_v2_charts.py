@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication
 from maple_next.ui.opponent_intel_charts import (
     _ROW_HEIGHT,
     BarChartWidget,
+    _row_layout,
     render_entries_as_text,
     top_ranked_entries,
 )
@@ -146,3 +147,49 @@ def test_top_ranked_entries_applies_the_limit() -> None:
     top = top_ranked_entries(entries, 3)
     assert len(top) == 3
     assert [name for name, _, _ in top] == ["P9", "P8", "P7"]
+
+
+def _assert_regions_do_not_overlap(layout) -> None:  # noqa: ANN001
+    regions = [
+        (layout.label_left, layout.label_width),
+        (layout.badge_left, layout.badge_width),
+        (layout.bar_left, layout.bar_width),
+        (layout.percent_left, layout.percent_width),
+    ]
+    regions.sort()
+    for (left, width), (next_left, _next_width) in zip(regions, regions[1:], strict=False):
+        assert left + width <= next_left, (
+            f"region [{left}, {left + width}) overlaps the next region starting at "
+            f"{next_left}"
+        )
+
+
+def test_row_layout_regions_do_not_overlap_at_representative_desktop_width() -> None:
+    """R3R1 mandatory case 14: label / badge / bar / percentage never
+    geometrically overlap, at both the ~1920x1080 nominal per-chart width
+    and the enforced minimum right-column floor width."""
+
+    for width in (90, 150, 190, 260, 400):
+        _assert_regions_do_not_overlap(_row_layout(0, width))
+
+
+def test_bar_chart_long_label_with_badge_and_percentage_does_not_raise() -> None:
+    widget = BarChartWidget()
+    widget.set_entries(
+        [
+            ("とてもながいポケモンわざのなまえのれい", 100.0, True),
+            ("イダイトウ (オス) すごくながいこだわりのもちもの", 45.0, True),
+        ]
+    )
+    widget.resize(180, widget.sizeHint().height())
+    _pump(widget)
+    assert not widget.has_render_error()
+    assert widget.toolTip() != ""
+    widget.deleteLater()
+
+
+def test_bar_chart_tooltip_only_set_when_something_is_observed() -> None:
+    widget = BarChartWidget()
+    widget.set_entries([("A", 10.0, False), ("B", 5.0, False)])
+    assert widget.toolTip() == ""
+    widget.deleteLater()

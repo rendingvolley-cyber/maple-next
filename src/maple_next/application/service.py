@@ -2224,6 +2224,50 @@ class BattleApplication:
         except LegalSwitchError as exc:
             raise DomainError(f"LEGAL_SWITCH_CANDIDATES_UNAVAILABLE:{exc}") from exc
 
+    def derive_legal_switch_candidates_for_active(
+        self, candidate_active_name: str
+    ) -> tuple[str, ...]:
+        """Pre-confirmation prefill aid: candidates for a NOT-YET-confirmed
+        active Pokemon, usable while still ``TURN_CAPTURE_PENDING`` (before
+        any ``ConfirmedTurnState`` exists for this Turn). Read-only, never
+        itself a confirmation -- the operator's later CONFIRM TURN FACTS
+        click is what turns whatever is displayed from this into a real
+        ``LegalSwitchConfirmation``, not this call.
+
+        Deliberately does not require ``_current_legal_switch_binding()``'s
+        ``TURN_REVIEWED`` state: the UI needs to show/refresh this prefill
+        as the operator types the active box, before Turn facts are
+        confirmed at all.
+        """
+
+        session = self._require_active_session()
+        if session.current_turn_id is None:
+            raise DomainError("CURRENT_TURN_REQUIRED")
+        if session.current_applied_selection_id is None:
+            raise DomainError("APPLIED_SELECTION_REQUIRED")
+        turn = self.repository.get_turn(session.current_turn_id)
+        identity = TurnIdentity(
+            session_id=session.session_id,
+            match_id=session.match_id,
+            generation=session.generation,
+            turn_id=turn.turn_id,
+            turn_number=turn.turn_number,
+            battle_revision=session.battle_revision,
+        )
+        applied = self.repository.get_applied_selection(session.current_applied_selection_id)
+        name = candidate_active_name.strip()
+        if not name or name not in applied.selected_three:
+            raise DomainError("SELF_ACTIVE_UNKNOWN")
+        memory_by_name = self._self_local_memory_by_name(identity, applied)
+        try:
+            return derive_legal_switch_candidates(
+                applied=applied,
+                current_active_name=name,
+                local_memory_by_name=memory_by_name,
+            )
+        except LegalSwitchError as exc:
+            raise DomainError(f"LEGAL_SWITCH_CANDIDATES_UNAVAILABLE:{exc}") from exc
+
     def confirm_legal_switches(
         self,
         *,

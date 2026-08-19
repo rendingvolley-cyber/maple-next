@@ -788,6 +788,7 @@ class TurnStateFlowController(MatchFlowController):
         opponent_side: SideState | None = None,
         weather: Known[str] | None = None,
         terrain: Known[str] | None = None,
+        legal_switch_selection: tuple[str, ...] | None = None,
     ) -> OperatorView:
         """Confirm legacy Turn facts, then persist the Bundle A rich state.
 
@@ -803,6 +804,16 @@ class TurnStateFlowController(MatchFlowController):
         switch, bound to that exact Turn identity. A failure in the legacy
         step (validation, staleness, missing applied selection) leaves
         every rich-state table untouched.
+
+        ``legal_switch_selection``, when supplied, is the EXACT set of
+        legal-switch names the operator had visibly selected in the UI at
+        the moment of this click (a candidate prefill the operator may have
+        edited) -- never re-derived here. This same click persists it as
+        the final ``CONFIRMED_NONEMPTY``/``CONFIRMED_NONE`` legal-switch
+        confirmation for the binding just created above, atomically with
+        the rest of this factual revision. ``None`` (every caller that
+        predates this parameter) leaves legal-switch confirmation
+        untouched, exactly as before.
         """
 
         before_error = self._error_message
@@ -893,38 +904,40 @@ class TurnStateFlowController(MatchFlowController):
                 self._repository.append_confirmed_legal_action_selection(selection)
             self._save_pokemon_local_memory(identity, "SELF", self_side)
             self._save_pokemon_local_memory(identity, "OPPONENT", opponent_side)
-        self._auto_confirm_legal_switches_for_new_state()
+        if legal_switch_selection is not None:
+            self._confirm_legal_switch_selection_for_new_state(legal_switch_selection)
         self._error_message = None
         return self.refresh()
 
-    def _auto_confirm_legal_switches_for_new_state(self) -> None:
-        """CONFIRM TURN FACTS also persists the deterministic legal-switch set
-        for the ``ConfirmedTurnState`` binding it just created -- the same
-        human confirmation action, no redundant second click.
+    def _confirm_legal_switch_selection_for_new_state(
+        self, legal_switch_selection: tuple[str, ...]
+    ) -> None:
+        """CONFIRM TURN FACTS also persists exactly the operator's visible
+        legal-switch selection for the ``ConfirmedTurnState`` binding just
+        created -- the same human confirmation action, no redundant second
+        click. Never re-derives a set of its own: an operator-facing
+        candidate PREFILL is not itself sufficient final confirmation
+        (unknown/absent HP must never be silently promoted to
+        CONFIRMED_NONEMPTY), so this only ever writes back what was already
+        displayed and possibly edited before the click.
 
-        Runs only after that state (and the fresh local-memory rows) are
-        durably committed, since candidate derivation reads them back
-        through the same repository. Purely best-effort and never a
-        fallback/guess: when the facts needed are not yet available (no
-        applied selection, active Pokemon still unknown, or any other
-        precondition the existing candidate-derivation/confirmation
-        commands already enforce), this silently leaves the binding at
-        NOT_CAPTURED_OR_UNRESOLVED -- exactly today's behavior -- and never
-        raises past ``confirm_turn_facts``'s own success/failure result.
+        Runs only after the state (and the fresh local-memory rows) are
+        durably committed, since the write path re-derives/validates the
+        exact same binding fresh through the repository. If this write
+        fails closed (stale binding, a selection outside selected_three, a
+        confirmed-fainted member, the active itself, ...), the binding
+        simply stays NOT_CAPTURED_OR_UNRESOLVED -- Turn facts remain
+        confirmed, but the revision is not presented as SEND-ready.
         """
 
-        try:
-            candidates = self._application.derive_legal_switch_candidates_for_current_turn()
-        except DomainError:
-            return
         status = (
             LegalSwitchStatus.CONFIRMED_NONEMPTY
-            if candidates
+            if legal_switch_selection
             else LegalSwitchStatus.CONFIRMED_NONE
         )
         try:
             self._application.confirm_legal_switches(
-                legal_switches=candidates, status=status, human_confirmed=True
+                legal_switches=legal_switch_selection, status=status, human_confirmed=True
             )
         except DomainError:
             return
@@ -1097,6 +1110,16 @@ class TurnStateFlowController(MatchFlowController):
         workbench. Read-only; never itself a confirmation."""
 
         return self._application.derive_legal_switch_candidates_for_current_turn()
+
+    def derive_legal_switch_candidates_for_active(
+        self, candidate_active_name: str
+    ) -> tuple[str, ...]:
+        """Pre-confirmation prefill aid, usable before Turn facts are even
+        confirmed: candidates for whatever active Pokemon is currently
+        displayed/being edited. Read-only; never itself a confirmation --
+        see :meth:`confirm_turn_facts`'s ``legal_switch_selection``."""
+
+        return self._application.derive_legal_switch_candidates_for_active(candidate_active_name)
 
     def confirm_legal_switches(
         self, *, legal_switches: tuple[str, ...], status: LegalSwitchStatus

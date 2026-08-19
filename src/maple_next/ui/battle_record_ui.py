@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from maple_next.application.service import DomainError
 from maple_next.capture.contracts import VideoCaptureBackend
 from maple_next.domain.battle_events import (
     MAJOR_STATUS_CLEAR_LABEL,
@@ -147,7 +148,7 @@ def _ranked_chart_entries(view: OpponentIntelView) -> _RankedChartEntries:
             (
                 entry.name,
                 entry.percentage,
-                view.ability != "不明" and entry.name == view.ability,
+                view.ability_confirmed and entry.name == view.ability,
             )
             for entry in meta.abilities
         ],
@@ -155,7 +156,7 @@ def _ranked_chart_entries(view: OpponentIntelView) -> _RankedChartEntries:
     )
     item_entries = top_ranked_entries(
         [
-            (entry.name, entry.percentage, view.item != "不明" and entry.name == view.item)
+            (entry.name, entry.percentage, view.item_confirmed and entry.name == view.item)
             for entry in meta.items
         ],
         _CHART_ITEMS_LIMIT,
@@ -994,14 +995,12 @@ class _OpponentIntelWidget(QGroupBox):
         self.facts_label.setText(
             f"この対戦で判明：特性 {view.ability} / 持ち物 {view.item} / 観測技 {moves}"
         )
-        ability_confirmed = view.ability != "不明" and " / " not in view.ability
-        item_confirmed = view.item != "不明"
         moves_confirmed = bool(view.observed_moves)
         self.fact_chips["ability"].setText(
-            f"特性: {view.ability} {'✓' if ability_confirmed else '(未確認)'}"
+            f"特性: {view.ability} {'✓' if view.ability_confirmed else '(未確認)'}"
         )
         self.fact_chips["item"].setText(
-            f"持ち物: {view.item} {'✓' if item_confirmed else '(未確認)'}"
+            f"持ち物: {view.item} {'✓' if view.item_confirmed else '(未確認)'}"
         )
         self.fact_chips["moves"].setText(
             f"観測技: {moves} {'✓' if moves_confirmed else '(未確認)'}"
@@ -1172,12 +1171,25 @@ class _OpponentIntelWidget(QGroupBox):
             section = QGroupBox(section_title)
             section.setObjectName(f"intelDetail_{key}")
             section_layout = QVBoxLayout(section)
+            # Full ranking, never truncated -- the main panel's top-N bars
+            # are the only intentionally-limited view; this dialog exists
+            # specifically to expose the rest. Scrolls rather than
+            # overflowing the dialog's fixed size when the source data has
+            # many entries.
             lines = value.split(", ") if value != "データなし" else ["データなし"]
-            for line in lines[:5]:
+            rows_container = QWidget()
+            rows_layout = QVBoxLayout(rows_container)
+            rows_layout.setContentsMargins(0, 0, 0, 0)
+            rows_layout.setSpacing(1)
+            for line in lines:
                 row = QLabel(line)
                 row.setProperty("rankRow", True)
-                section_layout.addWidget(row)
-            section_layout.addStretch(1)
+                rows_layout.addWidget(row)
+            rows_layout.addStretch(1)
+            rows_scroll = QScrollArea()
+            rows_scroll.setWidgetResizable(True)
+            rows_scroll.setWidget(rows_container)
+            section_layout.addWidget(rows_scroll)
             self._detail_sections[key] = section
             ranking_row.addWidget(section, 1)
         layout.addLayout(ranking_row, 1)
@@ -1387,15 +1399,25 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.review_state_event_button.clicked.connect(self._open_common_state_event_dialog)
         editor_layout.addWidget(self.review_state_event_button)
 
-        # Bundle 2 (Gemini V2): explicit legal-switch confirmation workbench.
-        # Factual only -- no strategy content, no Opponent INTEL, no
-        # mechanics inference. An empty selection alone is never
-        # CONFIRMED_NONE; that requires the separate explicit button below.
+        # Bundle 2 (Gemini V2) R3R1: editable legal-switch prefill/confirm
+        # workbench. Factual only -- no strategy content, no Opponent
+        # INTEL, no mechanics inference. Before CONFIRM TURN FACTS this
+        # list shows a CANDIDATE prefill (selected_three - active -
+        # confirmed-fainted) the operator can correct; it is never itself a
+        # confirmation. The same CONFIRM TURN FACTS click reads exactly
+        # this visible/edited selection and persists it as the final
+        # CONFIRMED_NONEMPTY/CONFIRMED_NONE legal-switch confirmation, in
+        # the same revision as the rest of Turn facts -- no second click.
+        # The two buttons below remain for an explicit correction after
+        # that confirmation has already landed.
+        self._legal_switch_prefill_candidates: tuple[str, ...] = ()
+        self._legal_switch_prefill_active_text: str | None = None
         self.legal_switch_group = QGroupBox("交代可能なポケモン（Legal Switches）")
         self.legal_switch_group.setToolTip(
-            "CONFIRM TURN FACTSを押すと、選出した3体からactiveと確定ひんし"
-            "を除いた交代先が自動的に確定されます。誤りがあれば下のリストと"
-            "ボタンで修正してください。"
+            "候補は自動で表示されますが、それ自体は確定ではありません。"
+            "必要ならチェックを直してからCONFIRM TURN FACTSを押すと、"
+            "その時点で見えている選択がそのまま確定されます。"
+            "確定後の修正は下のリストとボタンで行えます。"
         )
         legal_switch_layout = QVBoxLayout(self.legal_switch_group)
         legal_switch_layout.setContentsMargins(2, 2, 2, 2)
@@ -1407,11 +1429,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.legal_switch_list.setMaximumHeight(70)
         legal_switch_layout.addWidget(self.legal_switch_list)
         legal_switch_buttons_row = QHBoxLayout()
-        self.confirm_legal_switches_selected_button = QPushButton("選択した交代先を確定")
+        self.confirm_legal_switches_selected_button = QPushButton("選択した交代先を確定（修正）")
         self.confirm_legal_switches_selected_button.clicked.connect(
             self._on_confirm_legal_switches_selected
         )
-        self.confirm_legal_switches_none_button = QPushButton("交代先なしを確定")
+        self.confirm_legal_switches_none_button = QPushButton("交代先なしを確定（修正）")
         self.confirm_legal_switches_none_button.clicked.connect(
             self._on_confirm_legal_switches_none
         )
@@ -1419,6 +1441,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         legal_switch_buttons_row.addWidget(self.confirm_legal_switches_none_button)
         legal_switch_layout.addLayout(legal_switch_buttons_row)
         editor_layout.addWidget(self.legal_switch_group)
+        # Refresh the pre-confirmation prefill whenever the operator's
+        # in-progress active-Pokemon choice changes -- mirrors the existing
+        # _on_turn_active_changed/_prefill_legal_moves_for_active pattern
+        # for legal moves.
+        self.self_active_box.currentTextChanged.connect(
+            self._on_self_active_changed_for_legal_switches
+        )
 
         state_layout.addWidget(self.current_state_editor_container)
 
@@ -4076,6 +4105,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             return
         moves = [field.text().strip() for field in self.move_inputs if field.text().strip()]
         switches = [checkbox.text() for checkbox in self.switch_checkboxes if checkbox.isChecked()]
+        # The exact legal-switch candidates currently visible/edited in the
+        # workbench list -- CONFIRM TURN FACTS confirms exactly this, never
+        # a freshly re-derived set. See confirm_turn_facts's
+        # legal_switch_selection parameter.
+        legal_switch_selection = tuple(
+            item.text() for item in self.legal_switch_list.selectedItems()
+        )
         self_active_known = _active_known_from_combo(self.self_active_box)
         opponent_active_known = _active_known_from_line(self.opponent_active_input)
         self_hp_known = _hp_known_from_combo(self.self_hp_box)
@@ -4099,6 +4135,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             opponent_side=opponent_side,
             weather=self.weather_field.to_known(),
             terrain=self.terrain_field.to_known(),
+            legal_switch_selection=legal_switch_selection,
         )
         pending_confirmation = self._pending_ocr_ability_confirmation
         if pending_confirmation is not None:
@@ -4380,15 +4417,56 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
         self.render_view(view)
 
+    def _on_self_active_changed_for_legal_switches(self, _text: str = "") -> None:
+        """Nudge the legal-switch prefill to refresh when the operator's
+        in-progress active-Pokemon choice changes. Display-only -- never
+        persists anything; see :meth:`_render_legal_switch_workbench`."""
+
+        if self._last_rendered_session_state != "TURN_CAPTURE_PENDING":
+            return
+        self._render_legal_switch_workbench(self._bundle_c_controller.turn_state_summary())
+
     def _render_legal_switch_workbench(self, summary: TurnStateSummaryView) -> None:
-        """Bundle 2: reflect the current binding's derived candidates and
-        confirmed/unresolved status. Always re-derives from ``summary``
-        (never carries forward stale selection state) -- a new TurnIdentity
-        or invalidated binding renders as fresh candidates / unresolved,
-        exactly like every other identity-bound workbench control here."""
+        """R3R1: before CONFIRM TURN FACTS, show an editable CANDIDATE
+        PREFILL (never itself a confirmation) for whatever active Pokemon
+        is currently displayed; CONFIRM TURN FACTS reads exactly this
+        visible/edited selection to persist the final confirmation (see
+        ``_on_confirm_turn_facts``). After confirmation, reflect (and allow
+        the two buttons below to override) the actual persisted
+        ``LegalSwitchConfirmation`` -- never re-derived candidates.
+
+        A new TurnIdentity/binding or a fresh active choice always replaces
+        whatever was shown before; an unrelated same-binding re-render
+        (e.g. editing another field) preserves the operator's own edit.
+        """
 
         confirmation = summary.legal_switch_confirmation
-        candidates = summary.legal_switch_candidates
+        session_state = self._last_rendered_session_state
+        pre_confirm_editable = confirmation is None and session_state == "TURN_CAPTURE_PENDING"
+        active_prefill_changed = False
+        if pre_confirm_editable:
+            active_text = self.self_active_box.currentText().strip()
+            if active_text != self._legal_switch_prefill_active_text:
+                self._legal_switch_prefill_active_text = active_text
+                active_prefill_changed = True
+                if not active_text or self.self_active_box.currentIndex() <= 0:
+                    self._legal_switch_prefill_candidates = ()
+                else:
+                    try:
+                        self._legal_switch_prefill_candidates = (
+                            self._bundle_c_controller.derive_legal_switch_candidates_for_active(
+                                active_text
+                            )
+                        )
+                    except DomainError:
+                        self._legal_switch_prefill_candidates = ()
+            candidates = self._legal_switch_prefill_candidates
+        elif confirmation is not None:
+            candidates = summary.legal_switch_candidates
+        else:
+            candidates = ()
+            self._legal_switch_prefill_active_text = None
+
         previously_selected = {item.text() for item in self.legal_switch_list.selectedItems()}
         self.legal_switch_list.clear()
         for name in candidates:
@@ -4397,22 +4475,35 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             for index in range(self.legal_switch_list.count()):
                 item = self.legal_switch_list.item(index)
                 item.setSelected(item.text() in confirmation.legal_switches)
+        elif pre_confirm_editable and active_prefill_changed:
+            # A fresh prefill for a newly-chosen active: every candidate
+            # starts selected -- PREFILL is not yet a deliberate operator
+            # removal of anything.
+            for index in range(self.legal_switch_list.count()):
+                self.legal_switch_list.item(index).setSelected(True)
         else:
             # Same-binding re-render (e.g. an unrelated field edit) keeps
             # the operator's unfinished selection; a genuinely new
-            # candidate set (new TurnIdentity/binding) cannot contain it.
+            # candidate set (new TurnIdentity/binding/active) cannot
+            # contain it.
             for index in range(self.legal_switch_list.count()):
                 item = self.legal_switch_list.item(index)
                 item.setSelected(item.text() in previously_selected)
+
         if confirmation is None:
-            self.legal_switch_status_label.setText("未確認 (UNRESOLVED)")
+            self.legal_switch_status_label.setText(
+                "未確認 (この一覧のままCONFIRM TURN FACTSで確定します)"
+                if pre_confirm_editable
+                else "未確認 (UNRESOLVED)"
+            )
         elif confirmation.status is LegalSwitchStatus.CONFIRMED_NONE:
             self.legal_switch_status_label.setText("確定: 交代先なし (CONFIRMED_NONE)")
         else:
             names = "、".join(confirmation.legal_switches)
             self.legal_switch_status_label.setText(f"確定 (CONFIRMED_NONEMPTY): {names}")
-        has_confirmed_state = summary.confirmed_state is not None
-        self.legal_switch_group.setEnabled(has_confirmed_state)
+        self.legal_switch_group.setEnabled(
+            session_state in {"TURN_CAPTURE_PENDING", "TURN_REVIEWED"}
+        )
 
     def _open_state_event_dialog(self, context: str) -> None:
         callback = self._apply_review_effect if context == "review" else self._apply_result_effect

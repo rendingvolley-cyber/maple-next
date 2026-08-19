@@ -86,9 +86,13 @@ def _full_side_state(*, active: Known[str]) -> SideState:
 def test_1_confirm_facts_auto_resolves_legal_switches_when_deterministic(
     tmp_path: Path,
 ) -> None:
-    """R3: CONFIRM TURN FACTS itself persists the deterministic legal-switch
-    set (selected_three - active - confirmed_fainted) as CONFIRMED_NONEMPTY,
-    the same human confirmation action, no second click required."""
+    """R3R1: CONFIRM TURN FACTS persists exactly the visible workbench
+    selection (here: every prefilled candidate, since the operator never
+    touched it) as CONFIRMED_NONEMPTY, the same human confirmation action,
+    no second click required. The prefill itself (selected_three - active -
+    confirmed_fainted) is only ever an editable candidate list, never a
+    silent auto-confirmation on its own -- see test_1f/1g/1h below for the
+    operator editing it before confirming."""
 
     repository, controller, window, transport = build_window(tmp_path)
     _advance_to_turn_capture_pending(controller)
@@ -298,6 +302,183 @@ def test_1e_provider_authorization_off_still_fails_closed_after_auto_resolve(
     repository.close()
 
 
+def test_1f_candidates_are_visible_and_unconfirmed_before_the_human_click(
+    tmp_path: Path,
+) -> None:
+    """R3R1 mandatory case 1: unknown bench availability still populates the
+    operator-facing candidate UI, but persistence remains
+    NOT_CAPTURED_OR_UNRESOLVED until the human actually presses CONFIRM
+    TURN FACTS. A displayed prefill is never itself sufficient
+    confirmation."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+
+    # Setting active alone (no HP/moves/notes yet) is enough to trigger the
+    # prefill refresh -- CONFIRM TURN FACTS has not been pressed.
+    window.self_active_box.setCurrentText(SELECTED_THREE[0])
+
+    assert {
+        window.legal_switch_list.item(i).text() for i in range(window.legal_switch_list.count())
+    } == {"Gholdengo", "Dragonite"}
+    assert all(
+        window.legal_switch_list.item(i).isSelected()
+        for i in range(window.legal_switch_list.count())
+    )
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is None
+    assert "未確認" in window.legal_switch_status_label.text()
+    assert transport.call_count == 0
+    repository.close()
+
+
+def test_1g_operator_unchecks_one_candidate_before_confirm(tmp_path: Path) -> None:
+    """R3R1 mandatory case 3: selected A/B/C, active A, candidates B/C
+    prefilled -> operator unchecks B -> CONFIRM TURN FACTS ->
+    CONFIRMED_NONEMPTY [C] only. The removed candidate must never reappear
+    in the persisted set."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+    assert {
+        window.legal_switch_list.item(i).text() for i in range(window.legal_switch_list.count())
+    } == {"Gholdengo", "Dragonite"}
+
+    for index in range(window.legal_switch_list.count()):
+        item = window.legal_switch_list.item(index)
+        if item.text() == "Gholdengo":
+            item.setSelected(False)
+
+    window._on_confirm_turn_facts()  # noqa: SLF001
+
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is not None
+    assert summary.legal_switch_confirmation.status is LegalSwitchStatus.CONFIRMED_NONEMPTY
+    assert summary.legal_switch_confirmation.legal_switches == ("Dragonite",)
+    assert transport.call_count == 0
+    repository.close()
+
+
+def test_1h_operator_unchecks_all_candidates_before_confirm(tmp_path: Path) -> None:
+    """R3R1 mandatory case 4: operator unchecks every prefilled candidate ->
+    CONFIRM TURN FACTS -> CONFIRMED_NONE [] -- an explicit, human-reviewed
+    zero, not a guess."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+
+    for index in range(window.legal_switch_list.count()):
+        window.legal_switch_list.item(index).setSelected(False)
+
+    window._on_confirm_turn_facts()  # noqa: SLF001
+
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is not None
+    assert summary.legal_switch_confirmation.status is LegalSwitchStatus.CONFIRMED_NONE
+    assert summary.legal_switch_confirmation.legal_switches == ()
+    assert "LEGAL_SWITCHES_UNRESOLVED" not in summary.provider_ready_denial_reasons
+    assert transport.call_count == 0
+    repository.close()
+
+
+def test_1i_confirmed_fainted_member_cannot_be_confirmed_legal(tmp_path: Path) -> None:
+    """R3R1 mandatory case 5: even if a confirmed-fainted member somehow
+    reaches the confirm call (e.g. a stale/forced selection bypassing the
+    UI's own prefill filtering), the write path fails closed rather than
+    persisting it -- defense in depth, not merely a UI-level filter."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    session = repository.load_active_session()
+    assert session is not None
+    with repository.transaction():
+        repository.upsert_pokemon_local_state(
+            session_id=session.session_id,
+            match_id=session.match_id,
+            generation=session.generation,
+            side="SELF",
+            memory=PokemonLocalMemory(
+                pokemon_name="Dragonite",
+                hp_bucket=Known.confirmed(HpBucket.ZERO, provenance_chain=_HUMAN),
+                status=Known.confirmed("NONE", provenance_chain=_HUMAN),
+            ),
+        )
+
+    view = controller.confirm_turn_facts(
+        self_active=SELECTED_THREE[0],
+        opponent_active=OPPONENT_TEAM[0],
+        self_hp="100",
+        opponent_hp="100",
+        legal_moves=["Flower Trick", "Knock Off"],
+        legal_switches=[],
+        human_note="",
+        human_confirmed=True,
+        self_side=_full_side_state(
+            active=Known.confirmed(SELECTED_THREE[0], provenance_chain=_HUMAN)
+        ),
+        opponent_side=_full_side_state(
+            active=Known.confirmed(OPPONENT_TEAM[0], provenance_chain=_HUMAN)
+        ),
+        weather=Known.confirmed("NONE", provenance_chain=_HUMAN),
+        terrain=Known.confirmed("NONE", provenance_chain=_HUMAN),
+        # Forced/stale: includes the confirmed-fainted "Dragonite" as if the
+        # operator had (incorrectly) left it checked.
+        legal_switch_selection=("Gholdengo", "Dragonite"),
+    )
+    assert view.error_message is None  # Turn facts themselves still confirm.
+
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is None
+    assert "LEGAL_SWITCHES_UNRESOLVED" in summary.provider_ready_denial_reasons
+    assert transport.call_count == 0
+    repository.close()
+
+
+def test_1j_selection_naming_a_non_selected_pokemon_is_rejected(tmp_path: Path) -> None:
+    """R3R1 mandatory case 6 (stale/foreign reference): a legal-switch name
+    outside the applied selected_three (e.g. a stale name left over from a
+    different binding) must never be persisted -- the write path always
+    re-validates against the CURRENT applied selection, not whatever the
+    caller happened to pass."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+
+    view = controller.confirm_turn_facts(
+        self_active=SELECTED_THREE[0],
+        opponent_active=OPPONENT_TEAM[0],
+        self_hp="100",
+        opponent_hp="100",
+        legal_moves=["Flower Trick", "Knock Off"],
+        legal_switches=[],
+        human_note="",
+        human_confirmed=True,
+        self_side=_full_side_state(
+            active=Known.confirmed(SELECTED_THREE[0], provenance_chain=_HUMAN)
+        ),
+        opponent_side=_full_side_state(
+            active=Known.confirmed(OPPONENT_TEAM[0], provenance_chain=_HUMAN)
+        ),
+        weather=Known.confirmed("NONE", provenance_chain=_HUMAN),
+        terrain=Known.confirmed("NONE", provenance_chain=_HUMAN),
+        legal_switch_selection=("Not-In-Selected-Three",),
+    )
+    assert view.error_message is None
+
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is None
+    assert "LEGAL_SWITCHES_UNRESOLVED" in summary.provider_ready_denial_reasons
+    assert transport.call_count == 0
+    repository.close()
+
+
 def test_2_confirm_two_candidates_selected_is_confirmed_nonempty(tmp_path: Path) -> None:
     repository, controller, window, transport = build_window(tmp_path)
     _advance_to_turn_capture_pending(controller)
@@ -440,7 +621,11 @@ def test_4_new_turn_identity_invalidates_previous_ui_confirmation(tmp_path: Path
 
     summary = controller.turn_state_summary()
     assert summary.legal_switch_confirmation is None
-    assert window.legal_switch_status_label.text() == "未確認 (UNRESOLVED)"
+    # Turn 2 is a fresh, not-yet-confirmed binding back in
+    # TURN_CAPTURE_PENDING -- the label reflects the pre-confirm-editable
+    # prefill state, not the plain post-confirmation UNRESOLVED text.
+    assert "未確認" in window.legal_switch_status_label.text()
+    assert "CONFIRMED_NONEMPTY" not in window.legal_switch_status_label.text()
     assert transport.call_count == 0
     repository.close()
 

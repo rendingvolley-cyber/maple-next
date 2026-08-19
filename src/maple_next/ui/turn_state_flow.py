@@ -893,8 +893,41 @@ class TurnStateFlowController(MatchFlowController):
                 self._repository.append_confirmed_legal_action_selection(selection)
             self._save_pokemon_local_memory(identity, "SELF", self_side)
             self._save_pokemon_local_memory(identity, "OPPONENT", opponent_side)
+        self._auto_confirm_legal_switches_for_new_state()
         self._error_message = None
         return self.refresh()
+
+    def _auto_confirm_legal_switches_for_new_state(self) -> None:
+        """CONFIRM TURN FACTS also persists the deterministic legal-switch set
+        for the ``ConfirmedTurnState`` binding it just created -- the same
+        human confirmation action, no redundant second click.
+
+        Runs only after that state (and the fresh local-memory rows) are
+        durably committed, since candidate derivation reads them back
+        through the same repository. Purely best-effort and never a
+        fallback/guess: when the facts needed are not yet available (no
+        applied selection, active Pokemon still unknown, or any other
+        precondition the existing candidate-derivation/confirmation
+        commands already enforce), this silently leaves the binding at
+        NOT_CAPTURED_OR_UNRESOLVED -- exactly today's behavior -- and never
+        raises past ``confirm_turn_facts``'s own success/failure result.
+        """
+
+        try:
+            candidates = self._application.derive_legal_switch_candidates_for_current_turn()
+        except DomainError:
+            return
+        status = (
+            LegalSwitchStatus.CONFIRMED_NONEMPTY
+            if candidates
+            else LegalSwitchStatus.CONFIRMED_NONE
+        )
+        try:
+            self._application.confirm_legal_switches(
+                legal_switches=candidates, status=status, human_confirmed=True
+            )
+        except DomainError:
+            return
 
     def _build_opponent_entry_event(
         self,

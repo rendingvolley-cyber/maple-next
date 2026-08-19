@@ -305,6 +305,10 @@ def test_visible_v5_send_dispatches_production_compatible_transport_once(
     _fill_minimal_current_state(window)
 
     # -- STEP 1: confirm Turn facts. --
+    # R3: this same click now also auto-persists the deterministic
+    # legal-switch set for the binding it just created (selected_three minus
+    # active minus confirmed-fainted) -- no longer a separate, easy-to-miss
+    # second step for the common, unambiguous case.
     assert not window.confirm_turn_facts_button.isHidden()
     assert window.confirm_turn_facts_button.isEnabled()
     window.confirm_turn_facts_button.click()
@@ -313,12 +317,17 @@ def test_visible_v5_send_dispatches_production_compatible_transport_once(
     assert adapter.dispatch_count == 0
     summary = controller.turn_state_summary()
     assert summary.confirmed_state is not None
-    assert summary.legal_switch_confirmation is None
     assert summary.legal_switch_candidates == ("Gholdengo", "Dragonite")
-    assert summary.provider_ready is False
-    assert "LEGAL_SWITCHES_UNRESOLVED" in summary.provider_ready_denial_reasons
+    assert summary.legal_switch_confirmation is not None
+    assert summary.legal_switch_confirmation.legal_switches == ("Gholdengo", "Dragonite")
+    assert "LEGAL_SWITCHES_UNRESOLVED" not in summary.provider_ready_denial_reasons
+    assert summary.provider_ready is True
+    send_button = window._bundle_c_gemini_send_button  # noqa: SLF001
+    assert send_button.isEnabled()
 
-    # -- STEP 2: explicitly confirm both real candidates. --
+    # -- STEP 2: an explicit operator re-confirmation of the same set is
+    # still available (never removed) and remains purely factual -- it must
+    # still never dispatch. --
     for index in range(window.legal_switch_list.count()):
         window.legal_switch_list.item(index).setSelected(True)
     window._on_confirm_legal_switches_selected()  # noqa: SLF001
@@ -329,7 +338,6 @@ def test_visible_v5_send_dispatches_production_compatible_transport_once(
     assert summary.legal_switch_confirmation is not None
     assert summary.legal_switch_confirmation.legal_switches == ("Gholdengo", "Dragonite")
     assert summary.provider_ready is True
-    send_button = window._bundle_c_gemini_send_button  # noqa: SLF001
     assert send_button.isEnabled()
 
     # -- STEP 3: the distinct explicit send action. --
@@ -338,9 +346,10 @@ def test_visible_v5_send_dispatches_production_compatible_transport_once(
     assert transport.call_count == 1
     assert adapter.dispatch_count == 1
 
-    # -- Re-confirming facts (a fresh binding) again requires a fresh
-    # legal-switch confirmation before another send is even possible --
-    # never a second dispatch as a side effect of any confirm click. --
+    # -- Re-confirming facts (a fresh binding) auto-resolves that fresh
+    # binding's own legal switches the same way, but confirming facts is
+    # never itself a dispatch -- only the separate explicit send action ever
+    # reaches the transport. --
     window.confirm_turn_facts_button.click()
     assert transport.call_count == 1
     assert adapter.dispatch_count == 1

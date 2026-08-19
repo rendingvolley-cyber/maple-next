@@ -99,8 +99,8 @@ from maple_next.ui.controller import OperatorView
 from maple_next.ui.move_autocomplete import MoveAutocompletePopup
 from maple_next.ui.opponent_intel_charts import (
     BarChartWidget,
-    DonutChartWidget,
     render_entries_as_text,
+    top_ranked_entries,
 )
 from maple_next.ui.turn_snapshot_official_window import TurnSnapshotMatchFlowWindow
 from maple_next.ui.turn_state_flow import TurnStateFlowController, TurnStateSummaryView
@@ -108,6 +108,59 @@ from maple_next.ui.turn_state_flow import TurnStateFlowController, TurnStateSumm
 
 def _normalize_move_name(name: str) -> str:
     return normalize_move_query(name)
+
+
+#: Opponent INTEL chart visible limits -- tail data remains available in the
+#: INTEL detail dialog, which reads the full unranked lists separately.
+_CHART_MOVES_LIMIT = 5
+_CHART_ABILITIES_LIMIT = 3
+_CHART_ITEMS_LIMIT = 5
+
+_RankedChartEntries = tuple[
+    list[tuple[str, float | None, bool]],
+    list[tuple[str, float | None, bool]],
+    list[tuple[str, float | None, bool]],
+]
+
+
+def _ranked_chart_entries(view: OpponentIntelView) -> _RankedChartEntries:
+    """Sorted, top-N, observed-flagged entries for the moves/abilities/items
+    bar charts -- the one place visible-limit truncation happens, shared by
+    the real chart build and its plain-text fail-soft fallback. A move is
+    "observed" when actually used this match; an ability/item is "observed"
+    when it is this match's human-confirmed one -- the same badge the bar
+    chart already draws for moves, now applied consistently to all three."""
+
+    meta = view.meta
+    if meta is None:
+        return [], [], []
+    observed_moves = {_normalize_move_name(name) for name in view.observed_moves}
+    move_entries = top_ranked_entries(
+        [
+            (entry.name, entry.percentage, _normalize_move_name(entry.name) in observed_moves)
+            for entry in meta.moves
+        ],
+        _CHART_MOVES_LIMIT,
+    )
+    ability_entries = top_ranked_entries(
+        [
+            (
+                entry.name,
+                entry.percentage,
+                view.ability != "不明" and entry.name == view.ability,
+            )
+            for entry in meta.abilities
+        ],
+        _CHART_ABILITIES_LIMIT,
+    )
+    item_entries = top_ranked_entries(
+        [
+            (entry.name, entry.percentage, view.item != "不明" and entry.name == view.item)
+            for entry in meta.items
+        ],
+        _CHART_ITEMS_LIMIT,
+    )
+    return move_entries, ability_entries, item_entries
 
 
 def _looks_stale(date_text: str | None) -> bool:
@@ -982,13 +1035,7 @@ class _OpponentIntelWidget(QGroupBox):
         meta = view.meta
         if meta is None:
             return "データなし"
-        observed = {_normalize_move_name(name) for name in view.observed_moves}
-        move_entries = [
-            (entry.name, entry.percentage, _normalize_move_name(entry.name) in observed)
-            for entry in meta.moves[:8]
-        ]
-        ability_entries = [(entry.name, entry.percentage) for entry in meta.abilities]
-        item_entries = [(entry.name, entry.percentage) for entry in meta.items]
+        move_entries, ability_entries, item_entries = _ranked_chart_entries(view)
         return "\n\n".join(
             (
                 "採用技:\n" + render_entries_as_text(move_entries),
@@ -998,49 +1045,19 @@ class _OpponentIntelWidget(QGroupBox):
         )
 
     def _build_charts(self, view: OpponentIntelView) -> None:
-        meta = view.meta
-        observed = {_normalize_move_name(name) for name in view.observed_moves}
+        move_entries, ability_entries, item_entries = _ranked_chart_entries(view)
 
-        moves_group = QGroupBox("採用技")
-        moves_layout = QVBoxLayout(moves_group)
-        moves_chart = BarChartWidget()
-        if meta is not None:
-            entries = [
-                (entry.name, entry.percentage, _normalize_move_name(entry.name) in observed)
-                for entry in meta.moves[:8]
-            ]
-        else:
-            entries = []
-        moves_chart.set_entries(entries)
-        moves_layout.addWidget(moves_chart)
-        self.chart_layout.addWidget(moves_group, 1)
-
-        abilities_group = QGroupBox("特性")
-        abilities_layout = QVBoxLayout(abilities_group)
-        abilities_chart = DonutChartWidget()
-        abilities_chart.set_center_text(
-            f"確認済み: {view.ability}" if view.ability != "不明" else "候補"
-        )
-        abilities_chart.set_entries(
-            [(entry.name, entry.percentage) for entry in meta.abilities] if meta else []
-        )
-        abilities_layout.addWidget(abilities_chart)
-        self.chart_layout.addWidget(abilities_group, 1)
-
-        items_group = QGroupBox("持ち物")
-        items_layout = QVBoxLayout(items_group)
-        item_entries = list(meta.items) if meta else []
-        items_chart: DonutChartWidget | BarChartWidget
-        if len(item_entries) <= 5:
-            items_chart = DonutChartWidget()
-            items_chart.set_entries([(entry.name, entry.percentage) for entry in item_entries])
-        else:
-            items_chart = BarChartWidget()
-            items_chart.set_entries(
-                [(entry.name, entry.percentage, False) for entry in item_entries[:8]]
-            )
-        items_layout.addWidget(items_chart)
-        self.chart_layout.addWidget(items_group, 1)
+        for title, entries in (
+            ("採用技", move_entries),
+            ("特性", ability_entries),
+            ("持ち物", item_entries),
+        ):
+            group = QGroupBox(title)
+            layout = QVBoxLayout(group)
+            chart = BarChartWidget()
+            chart.set_entries(entries)
+            layout.addWidget(chart)
+            self.chart_layout.addWidget(group, 1)
 
     def _render_footer(self, view: OpponentIntelView) -> None:
         meta = view.meta
@@ -1375,6 +1392,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # mechanics inference. An empty selection alone is never
         # CONFIRMED_NONE; that requires the separate explicit button below.
         self.legal_switch_group = QGroupBox("交代可能なポケモン（Legal Switches）")
+        self.legal_switch_group.setToolTip(
+            "CONFIRM TURN FACTSを押すと、選出した3体からactiveと確定ひんし"
+            "を除いた交代先が自動的に確定されます。誤りがあれば下のリストと"
+            "ボタンで修正してください。"
+        )
         legal_switch_layout = QVBoxLayout(self.legal_switch_group)
         legal_switch_layout.setContentsMargins(2, 2, 2, 2)
         legal_switch_layout.setSpacing(2)
@@ -1539,6 +1561,15 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # laid out 2-per-row instead of 1-per-row so the fixed,
         # non-scrolling center column can fit 1280x720/1440x900.
         switch_widget = self.switch_checkboxes[0].parentWidget()
+        # These 3 boxes only feed the legacy Turn-facts memo field, not the
+        # actual send gate below -- label them as such so they never read as
+        # unexplained blank/undifferentiated boxes next to the real,
+        # CONFIRM TURN FACTS-driven "Legal Switches" workbench.
+        for checkbox in self.switch_checkboxes:
+            checkbox.setToolTip(
+                "記録用メモのみ。実際の送信可否は下部の「Legal Switches」欄"
+                "（CONFIRM TURN FACTSで自動確定）で判定されます。"
+            )
         turn_facts_form = self.turn_facts_group.layout()
         if isinstance(turn_facts_form, QFormLayout) and switch_widget is not None:
             self._reflow_form_into_grid(

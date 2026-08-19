@@ -22,17 +22,35 @@ from test_issue31_action_result_lifecycle_r2 import (
     _submit_turn_advice as _lifecycle_submit_turn_advice,
 )
 from test_issue31_turn_state_ui_bundle_c import (
+    OPPONENT_TEAM,
+    SELECTED_THREE,
+    SyncDispatch,
     _advance_to_turn_capture_pending,
     _fill_minimal_current_state,
     build_production_compatible_window,
     build_window,
+    qt_application,
 )
 
+from maple_next.application.match_service import MatchApplication
+from maple_next.domain.enums import HpBucket
 from maple_next.domain.legal_switches import LegalSwitchStatus
-from maple_next.domain.turn_state import ConfirmationMeta, TurnIdentity
+from maple_next.domain.turn_state import (
+    ConfirmationMeta,
+    Known,
+    PokemonLocalMemory,
+    ProvenanceStep,
+    SideState,
+    TurnIdentity,
+)
 from maple_next.persistence.sqlite import SQLiteRepository
+from maple_next.providers.turn_transport import load_authorized_turn_provider_config_from_env
+from maple_next.ui.battle_record_ui import BattleRecordUiWindow
+from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
+from maple_next.ui.turn_state_flow import GeminiRichTurnAdviceAdapter, TurnStateFlowController
 
 _CONFIRMED_AT = "2026-08-15T00:00:00+00:00"
+_HUMAN = (ProvenanceStep.HUMAN_INPUT,)
 
 
 def _r3_confirmation() -> ConfirmationMeta:
@@ -41,7 +59,37 @@ def _r3_confirmation() -> ConfirmationMeta:
     )
 
 
-def test_1_confirm_facts_with_legal_switches_unresolved(tmp_path: Path) -> None:
+def _full_side_state(*, active: Known[str]) -> SideState:
+    """A fully-specified SideState, with only ``active`` varying by caller.
+
+    Lets a test drive :meth:`TurnStateFlowController.confirm_turn_facts`
+    directly with a genuinely-unknown active Pokemon (impossible via the
+    real widgets, which always couple the legacy and rich ``active`` fields
+    to the same combo box) while every other field stays validly confirmed.
+    """
+
+    return SideState(
+        active=active,
+        hp_bucket=Known.confirmed(HpBucket.FULL, provenance_chain=_HUMAN),
+        status=Known.confirmed("NONE", provenance_chain=_HUMAN),
+        attack_stage=Known.confirmed(0, provenance_chain=_HUMAN),
+        defense_stage=Known.confirmed(0, provenance_chain=_HUMAN),
+        special_attack_stage=Known.confirmed(0, provenance_chain=_HUMAN),
+        special_defense_stage=Known.confirmed(0, provenance_chain=_HUMAN),
+        speed_stage=Known.confirmed(0, provenance_chain=_HUMAN),
+        accuracy_stage=Known.confirmed(0, provenance_chain=_HUMAN),
+        evasion_stage=Known.confirmed(0, provenance_chain=_HUMAN),
+        side_effects=Known.confirmed((), provenance_chain=_HUMAN),
+    )
+
+
+def test_1_confirm_facts_auto_resolves_legal_switches_when_deterministic(
+    tmp_path: Path,
+) -> None:
+    """R3: CONFIRM TURN FACTS itself persists the deterministic legal-switch
+    set (selected_three - active - confirmed_fainted) as CONFIRMED_NONEMPTY,
+    the same human confirmation action, no second click required."""
+
     repository, controller, window, transport = build_window(tmp_path)
     _advance_to_turn_capture_pending(controller)
     window.render_view()
@@ -52,14 +100,201 @@ def test_1_confirm_facts_with_legal_switches_unresolved(tmp_path: Path) -> None:
     summary = controller.turn_state_summary()
     assert summary.confirmed_state is not None
     assert summary.legal_switch_candidates == ("Gholdengo", "Dragonite")
-    assert summary.legal_switch_confirmation is None
-    assert summary.provider_ready is False
-    assert "LEGAL_SWITCHES_UNRESOLVED" in summary.provider_ready_denial_reasons
-    assert window.legal_switch_status_label.text() == "未確認 (UNRESOLVED)"
+    assert summary.legal_switch_confirmation is not None
+    assert summary.legal_switch_confirmation.status is LegalSwitchStatus.CONFIRMED_NONEMPTY
+    assert summary.legal_switch_confirmation.legal_switches == ("Gholdengo", "Dragonite")
+    assert "LEGAL_SWITCHES_UNRESOLVED" not in summary.provider_ready_denial_reasons
+    assert summary.provider_ready is True
+    assert (
+        window.legal_switch_status_label.text()
+        == "確定 (CONFIRMED_NONEMPTY): Gholdengo、Dragonite"
+    )
     assert {
         window.legal_switch_list.item(i).text() for i in range(window.legal_switch_list.count())
     } == {"Gholdengo", "Dragonite"}
+    assert all(
+        window.legal_switch_list.item(i).isSelected()
+        for i in range(window.legal_switch_list.count())
+    )
+    # Confirming facts never itself dispatches -- only an explicit send does.
     assert transport.call_count == 0
+    repository.close()
+
+
+def test_1b_confirm_facts_with_active_unknown_stays_unresolved(tmp_path: Path) -> None:
+    """R3: genuinely incomplete facts (active Pokemon not yet confirmed) must
+    never be guessed into a legal-switch confirmation -- the binding stays
+    NOT_CAPTURED_OR_UNRESOLVED, exactly as before this feature existed."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+
+    view = controller.confirm_turn_facts(
+        self_active=SELECTED_THREE[0],
+        opponent_active=OPPONENT_TEAM[0],
+        self_hp="100",
+        opponent_hp="100",
+        legal_moves=["Flower Trick", "Knock Off"],
+        legal_switches=[],
+        human_note="",
+        human_confirmed=True,
+        self_side=_full_side_state(active=Known.unknown()),
+        opponent_side=_full_side_state(
+            active=Known.confirmed(OPPONENT_TEAM[0], provenance_chain=_HUMAN)
+        ),
+        weather=Known.confirmed("NONE", provenance_chain=_HUMAN),
+        terrain=Known.confirmed("NONE", provenance_chain=_HUMAN),
+    )
+    assert view.error_message is None
+
+    summary = controller.turn_state_summary()
+    assert summary.confirmed_state is not None
+    assert summary.legal_switch_confirmation is None
+    assert summary.legal_switch_candidates == ()
+    assert "LEGAL_SWITCHES_UNRESOLVED" in summary.provider_ready_denial_reasons
+    window.render_view()
+    assert window.legal_switch_status_label.text() == "未確認 (UNRESOLVED)"
+    assert transport.call_count == 0
+    repository.close()
+
+
+def test_1c_confirm_facts_excludes_confirmed_fainted_backline_member(
+    tmp_path: Path,
+) -> None:
+    """Faint exclusion: a selected member with match-local confirmed HP=0
+    must never appear in the auto-confirmed legal-switch set, even though it
+    is neither the current active Pokemon nor otherwise disqualified."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    session = repository.load_active_session()
+    assert session is not None
+    with repository.transaction():
+        repository.upsert_pokemon_local_state(
+            session_id=session.session_id,
+            match_id=session.match_id,
+            generation=session.generation,
+            side="SELF",
+            memory=PokemonLocalMemory(
+                pokemon_name="Dragonite",
+                hp_bucket=Known.confirmed(HpBucket.ZERO, provenance_chain=_HUMAN),
+                status=Known.confirmed("NONE", provenance_chain=_HUMAN),
+            ),
+        )
+    _fill_minimal_current_state(window)
+
+    window._on_confirm_turn_facts()  # noqa: SLF001
+
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_candidates == ("Gholdengo",)
+    assert summary.legal_switch_confirmation is not None
+    assert summary.legal_switch_confirmation.status is LegalSwitchStatus.CONFIRMED_NONEMPTY
+    assert summary.legal_switch_confirmation.legal_switches == ("Gholdengo",)
+    assert transport.call_count == 0
+    repository.close()
+
+
+def test_1d_confirm_facts_all_backline_fainted_is_confirmed_none(tmp_path: Path) -> None:
+    """Every non-active selected member confirmed-fainted -> CONFIRMED_NONE,
+    the explicit "definitely zero legal switches" status, never merely an
+    empty tuple with no status at all."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    session = repository.load_active_session()
+    assert session is not None
+    with repository.transaction():
+        for name in ("Gholdengo", "Dragonite"):
+            repository.upsert_pokemon_local_state(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                side="SELF",
+                memory=PokemonLocalMemory(
+                    pokemon_name=name,
+                    hp_bucket=Known.confirmed(HpBucket.ZERO, provenance_chain=_HUMAN),
+                    status=Known.confirmed("NONE", provenance_chain=_HUMAN),
+                ),
+            )
+    _fill_minimal_current_state(window)
+
+    window._on_confirm_turn_facts()  # noqa: SLF001
+
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_candidates == ()
+    assert summary.legal_switch_confirmation is not None
+    assert summary.legal_switch_confirmation.status is LegalSwitchStatus.CONFIRMED_NONE
+    assert summary.legal_switch_confirmation.legal_switches == ()
+    assert "LEGAL_SWITCHES_UNRESOLVED" not in summary.provider_ready_denial_reasons
+    assert window.legal_switch_status_label.text() == "確定: 交代先なし (CONFIRMED_NONE)"
+    assert transport.call_count == 0
+    repository.close()
+
+
+def test_1e_provider_authorization_off_still_fails_closed_after_auto_resolve(
+    tmp_path: Path,
+) -> None:
+    """R3: auto-resolving legal switches must never weaken the independent,
+    downstream MAPLE_NEXT_GEMINI_TURN_AUTHORIZED gate -- reaching
+    provider_ready faster/automatically changes nothing about that."""
+
+    qt_application()
+    repository = SQLiteRepository(tmp_path / "auth-gate.db")
+    export_dir = tmp_path / "auth-gate-export"
+    export_dir.mkdir()
+    application = MatchApplication(repository, export_dir)
+
+    class _NeverCalledTransport:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def send(self, request: object, config: object) -> None:
+            self.call_count += 1
+            raise AssertionError("transport must not be called when unauthorized")
+
+    transport = _NeverCalledTransport()
+    rich_adapter = GeminiRichTurnAdviceAdapter(
+        transport,  # type: ignore[arg-type]
+        load_authorized_turn_provider_config_from_env,
+        dispatch_factory=SyncDispatch,
+    )
+    controller = TurnStateFlowController(
+        application,
+        repository,
+        MockSelectionAdviceAdapter(),
+        MockTurnAdviceAdapter(),
+        None,
+        None,
+        rich_adapter,
+    )
+    ocr_dir = tmp_path / "auth-gate-ocr"
+    ocr_dir.mkdir()
+    window = BattleRecordUiWindow(
+        controller, ocr_data_directory=ocr_dir, auto_start_capture=False
+    )
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+    window._on_confirm_turn_facts()  # noqa: SLF001
+
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is not None
+    assert summary.provider_ready is True
+
+    view = controller.send_rich_turn_advice_to_gemini(
+        action_type="MOVE",
+        action_name="Flower Trick",
+        opponent_prediction="",
+        rationale="",
+        warnings=(),
+        on_result=lambda _view: None,
+    )
+
+    assert transport.call_count == 0
+    assert view.error_message is not None
     repository.close()
 
 
@@ -111,14 +346,22 @@ def test_2b_confirm_none_via_direct_controller_call_makes_no_dispatch(tmp_path: 
     repository.close()
 
 
-def test_3_explicit_confirm_none_is_visually_distinct_from_unresolved(tmp_path: Path) -> None:
+def test_3_explicit_confirm_none_is_visually_distinct_from_auto_confirmed(
+    tmp_path: Path,
+) -> None:
+    """An explicit operator override (CONFIRMED_NONE) must render visibly
+    differently from whatever CONFIRM TURN FACTS auto-resolved -- an
+    operator correction is never silently indistinguishable from the
+    deterministic default it replaces."""
+
     repository, controller, window, transport = build_window(tmp_path)
     _advance_to_turn_capture_pending(controller)
     window.render_view()
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
 
-    unresolved_label = window.legal_switch_status_label.text()
+    auto_confirmed_label = window.legal_switch_status_label.text()
+    assert "CONFIRMED_NONEMPTY" in auto_confirmed_label
 
     window._on_confirm_legal_switches_none()  # noqa: SLF001
 
@@ -127,7 +370,7 @@ def test_3_explicit_confirm_none_is_visually_distinct_from_unresolved(tmp_path: 
     assert summary.legal_switch_confirmation.status is LegalSwitchStatus.CONFIRMED_NONE
     assert summary.legal_switch_confirmation.legal_switches == ()
     confirmed_none_label = window.legal_switch_status_label.text()
-    assert confirmed_none_label != unresolved_label
+    assert confirmed_none_label != auto_confirmed_label
     assert "CONFIRMED_NONE" in confirmed_none_label
     assert transport.call_count == 0  # not yet provider-ready overall (no legal move confirmed)
     repository.close()
@@ -202,21 +445,36 @@ def test_4_new_turn_identity_invalidates_previous_ui_confirmation(tmp_path: Path
     repository.close()
 
 
-def test_5_same_binding_render_preserves_unfinished_selection(tmp_path: Path) -> None:
+def test_5_same_binding_render_keeps_confirmed_selection_over_unsaved_edit(
+    tmp_path: Path,
+) -> None:
+    """R3: since CONFIRM TURN FACTS now auto-confirms a binding's legal
+    switches in the same click, a populated-but-unconfirmed candidate list no
+    longer exists as a reachable state -- there is always either an
+    unresolved binding with zero candidates (see test_1b) or an already-
+    confirmed one. This proves the confirmed selection stays authoritative:
+    a same-binding re-render (e.g. editing an unrelated field) restores it
+    rather than trusting a stray, never-confirmed widget edit."""
+
     repository, controller, window, _transport = build_window(tmp_path)
     _advance_to_turn_capture_pending(controller)
     window.render_view()
     _fill_minimal_current_state(window)
     window._on_confirm_turn_facts()  # noqa: SLF001
 
-    # Operator selects a candidate but has not yet clicked confirm.
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is not None
+    assert summary.legal_switch_confirmation.legal_switches == ("Gholdengo", "Dragonite")
+
+    # Operator deselects one item directly in the widget, without clicking
+    # either confirm button -- an unsaved, never-persisted edit.
     for index in range(window.legal_switch_list.count()):
         item = window.legal_switch_list.item(index)
-        if item.text() == "Gholdengo":
-            item.setSelected(True)
+        if item.text() == "Dragonite":
+            item.setSelected(False)
 
-    # An unrelated same-binding re-render (e.g. editing another field) must
-    # not discard the unfinished selection.
+    # An unrelated same-binding re-render must not silently promote that
+    # unsaved edit -- it must keep reflecting the actual confirmed record.
     window.render_view()
 
     selected_names = {
@@ -224,7 +482,7 @@ def test_5_same_binding_render_preserves_unfinished_selection(tmp_path: Path) ->
         for i in range(window.legal_switch_list.count())
         if window.legal_switch_list.item(i).isSelected()
     }
-    assert selected_names == {"Gholdengo"}
+    assert selected_names == {"Gholdengo", "Dragonite"}
     repository.close()
 
 

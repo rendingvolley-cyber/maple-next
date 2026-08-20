@@ -58,6 +58,7 @@ class _EnvelopeFactory(Protocol):
 
 _EXACT_FAILURE_CODES = frozenset(
     {
+        "GEMINI_SELECTION_NOT_AUTHORIZED",
         "GEMINI_API_KEY_MISSING",
         "GEMINI_MODEL_MISSING",
         "GEMINI_SELECTION_MODELS_NOT_DISTINCT",
@@ -89,6 +90,7 @@ _FALLBACK_REASONS = frozenset(
 )
 
 _FAILURE_MESSAGES = {
+    "GEMINI_SELECTION_NOT_AUTHORIZED": "Real Selection Adviceはまだ承認されていません。",
     "GEMINI_API_KEY_MISSING": "Gemini APIキーが設定されていないため送信できません。",
     "GEMINI_MODEL_MISSING": "Geminiのmodel設定が空です。",
     "GEMINI_SELECTION_MODELS_NOT_DISTINCT": (

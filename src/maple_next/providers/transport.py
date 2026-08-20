@@ -27,6 +27,12 @@ GEMINI_SOURCE_TYPE = "GEMINI"
 DEFAULT_SELECTION_PRIMARY_MODEL = "gemini-3.6-flash"
 DEFAULT_SELECTION_FALLBACK_MODEL = "gemini-3.5-flash"
 _DEFAULT_TIMEOUT_SECONDS = 30.0
+#: Deliberately separate from Turn Advice's own
+#: ``MAPLE_NEXT_GEMINI_TURN_AUTHORIZED`` flag in ``turn_transport.py``.
+#: Selection and Turn are independent human/provider lanes -- merely having
+#: an API key in the environment can never enable either lane's network
+#: access on its own.
+SELECTION_PROVIDER_AUTHORIZATION_ENV = "MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED"
 _API_KEY_ENV = "MAPLE_NEXT_GEMINI_API_KEY"
 _SELECTION_PRIMARY_MODEL_ENV = "MAPLE_NEXT_GEMINI_SELECTION_PRIMARY_MODEL"
 _SELECTION_FALLBACK_MODEL_ENV = "MAPLE_NEXT_GEMINI_SELECTION_FALLBACK_MODEL"
@@ -95,12 +101,16 @@ class SelectionProviderConfig:
 
 
 def load_selection_provider_config_from_env() -> SelectionProviderConfig:
-    """Read Selection-only model policy from the runtime environment.
+    """Fail closed unless real Selection Advice was explicitly authorized.
 
-    Raises :class:`ProviderConfigError` when the API key is unset so callers
-    can fail closed with zero network calls and a corrective Japanese message.
+    The flag is deliberately separate from the API key. Merely having a key
+    in the environment can never enable Selection Advice network access.
+    Checked before the API key so an unauthorized runtime never even reveals
+    whether a key is configured.
     """
 
+    if os.environ.get(SELECTION_PROVIDER_AUTHORIZATION_ENV, "").strip() != "1":
+        raise ProviderConfigError("GEMINI_SELECTION_NOT_AUTHORIZED")
     api_key = os.environ.get(_API_KEY_ENV, "").strip()
     if not api_key:
         raise ProviderConfigError("GEMINI_API_KEY_MISSING")

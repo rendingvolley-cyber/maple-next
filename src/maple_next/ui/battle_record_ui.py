@@ -84,6 +84,7 @@ from maple_next.domain.turn_state import (
     ProvenanceStep,
     SideDelta,
     SideState,
+    TurnIdentity,
 )
 from maple_next.opponent_intel_db.generation_store import GenerationStoreError
 from maple_next.opponent_intel_db.runtime_intel import (
@@ -1412,6 +1413,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # that confirmation has already landed.
         self._legal_switch_prefill_candidates: tuple[str, ...] = ()
         self._legal_switch_prefill_active_text: str | None = None
+        #: R3R2: the complete canonical TurnIdentity the current prefill/edit
+        #: was derived under. A new session/match/generation/turn/revision
+        #: must invalidate the prefill even when the active Pokemon name is
+        #: unchanged -- see ``_render_legal_switch_workbench``.
+        self._legal_switch_prefill_identity: TurnIdentity | None = None
         self.legal_switch_group = QGroupBox("交代可能なポケモン（Legal Switches）")
         self.legal_switch_group.setToolTip(
             "候補は自動で表示されますが、それ自体は確定ではありません。"
@@ -4435,9 +4441,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         the two buttons below to override) the actual persisted
         ``LegalSwitchConfirmation`` -- never re-derived candidates.
 
-        A new TurnIdentity/binding or a fresh active choice always replaces
-        whatever was shown before; an unrelated same-binding re-render
-        (e.g. editing another field) preserves the operator's own edit.
+        A new TurnIdentity/binding (session/match/generation/turn/revision --
+        even with the identical active Pokemon name) or a fresh active
+        choice always replaces whatever was shown before; an unrelated
+        same-identity, same-active re-render (e.g. editing another field)
+        preserves the operator's own edit.
         """
 
         confirmation = summary.legal_switch_confirmation
@@ -4445,8 +4453,12 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         pre_confirm_editable = confirmation is None and session_state == "TURN_CAPTURE_PENDING"
         active_prefill_changed = False
         if pre_confirm_editable:
+            current_identity = summary.identity
             active_text = self.self_active_box.currentText().strip()
-            if active_text != self._legal_switch_prefill_active_text:
+            identity_changed = current_identity != self._legal_switch_prefill_identity
+            active_changed = active_text != self._legal_switch_prefill_active_text
+            if identity_changed or active_changed:
+                self._legal_switch_prefill_identity = current_identity
                 self._legal_switch_prefill_active_text = active_text
                 active_prefill_changed = True
                 if not active_text or self.self_active_box.currentIndex() <= 0:
@@ -4463,8 +4475,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             candidates = self._legal_switch_prefill_candidates
         elif confirmation is not None:
             candidates = summary.legal_switch_candidates
+            self._legal_switch_prefill_identity = None
+            self._legal_switch_prefill_active_text = None
         else:
             candidates = ()
+            self._legal_switch_prefill_identity = None
             self._legal_switch_prefill_active_text = None
 
         previously_selected = {item.text() for item in self.legal_switch_list.selectedItems()}

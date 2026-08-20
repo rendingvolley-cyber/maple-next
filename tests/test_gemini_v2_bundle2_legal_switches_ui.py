@@ -834,3 +834,176 @@ def test_r3b_active_outside_selected_three_fails_closed() -> None:
         applied=applied, current_active_name="A", local_memory_by_name={}
     )
     assert candidates == ("B", "C")
+
+
+def test_8_operator_edited_prefill_next_turn_same_active_gets_fresh_candidates(
+    tmp_path: Path,
+) -> None:
+    """R3R2 mandatory regression 1: the pre-confirm PREFILL must be scoped
+    to the complete TurnIdentity, not merely the active-Pokemon text. Turn 1:
+    prefill B/C, operator removes B -> [C], CONFIRM. Turn 2: same active A
+    again -- despite the identical active text, this is a brand new
+    TurnIdentity, so the pre-confirm prefill must come back fresh as B/C
+    (all selected), never silently carrying forward Turn 1's [C] edit."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+    for index in range(window.legal_switch_list.count()):
+        item = window.legal_switch_list.item(index)
+        if item.text() == "Gholdengo":
+            item.setSelected(False)
+    window._on_confirm_turn_facts()  # noqa: SLF001
+
+    turn1_identity = controller.turn_state_summary().identity
+    assert turn1_identity is not None
+
+    _lifecycle_submit_turn_advice(window)
+    window.actual_action_type_box.setCurrentText("MOVE")
+    window.actual_action_name_box.setCurrentText("Flower Trick")
+    window.actual_action_confirm_checkbox.setChecked(True)
+    window.opponent_action_type_box.setCurrentText("選択してください")
+    window._on_record_action()  # noqa: SLF001
+    window._on_next_turn()  # noqa: SLF001
+    window.render_view()
+
+    turn2_identity = controller.turn_state_summary().identity
+    assert turn2_identity is not None
+    assert turn2_identity != turn1_identity
+
+    # Same active as Turn 1, re-entered fresh for Turn 2.
+    window.self_active_box.setCurrentText(SELECTED_THREE[0])
+
+    assert {
+        window.legal_switch_list.item(i).text() for i in range(window.legal_switch_list.count())
+    } == {"Gholdengo", "Dragonite"}
+    assert all(
+        window.legal_switch_list.item(i).isSelected()
+        for i in range(window.legal_switch_list.count())
+    )
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is None
+    assert "未確認" in window.legal_switch_status_label.text()
+    assert transport.call_count == 0
+    repository.close()
+
+
+def test_9_operator_edited_prefill_new_match_same_active_gets_fresh_candidates(
+    tmp_path: Path,
+) -> None:
+    """R3R2 decisive regression 2: identical to test_8 but across a NEW
+    MATCH (fresh session/match/generation, not merely a fresh turn). Match
+    1: prefill B/C, operator removes B -> [C], CONFIRM. Match 2: new
+    session/match/generation, same selected_three, same active A. The
+    visible pre-confirm selection must come back fresh as B/C -- an
+    immediate CONFIRM in Match 2 must never persist Match 1's stale [C]."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+    for index in range(window.legal_switch_list.count()):
+        item = window.legal_switch_list.item(index)
+        if item.text() == "Gholdengo":
+            item.setSelected(False)
+    window._on_confirm_turn_facts()  # noqa: SLF001
+
+    match1_identity = controller.turn_state_summary().identity
+    assert match1_identity is not None
+    assert controller.turn_state_summary().legal_switch_confirmation is not None
+
+    # NEW MATCH: release the active session slot (mirrors the real
+    # abort/new-match lifecycle -- ``new_match()`` refuses to create a
+    # second session while one is still active) and start a genuinely new
+    # session/match/generation binding, same selected_three/active as
+    # before.
+    controller.abort_match(human_confirmed=True)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+
+    match2_identity = controller.turn_state_summary().identity
+    assert match2_identity is not None
+    assert match2_identity != match1_identity
+    assert controller.turn_state_summary().legal_switch_confirmation is None
+
+    window.self_active_box.setCurrentText(SELECTED_THREE[0])
+
+    assert {
+        window.legal_switch_list.item(i).text() for i in range(window.legal_switch_list.count())
+    } == {"Gholdengo", "Dragonite"}
+    assert all(
+        window.legal_switch_list.item(i).isSelected()
+        for i in range(window.legal_switch_list.count())
+    )
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is None
+    assert "未確認" in window.legal_switch_status_label.text()
+    assert transport.call_count == 0
+    repository.close()
+
+
+def test_10_prefill_edit_survives_unrelated_same_identity_rerender(tmp_path: Path) -> None:
+    """R3R2 mandatory regression 3: same TurnIdentity, same active, operator
+    edits the prefill, then an unrelated field changes and the workbench
+    re-renders -- the operator's edit must be preserved, not reset. The UI
+    must not become annoying by discarding edits on every render."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    window.self_active_box.setCurrentText(SELECTED_THREE[0])
+    assert {
+        window.legal_switch_list.item(i).text() for i in range(window.legal_switch_list.count())
+    } == {"Gholdengo", "Dragonite"}
+
+    for index in range(window.legal_switch_list.count()):
+        item = window.legal_switch_list.item(index)
+        if item.text() == "Gholdengo":
+            item.setSelected(False)
+
+    # Unrelated field edit -> re-render via the same active-changed hook
+    # (identity unchanged, active text unchanged).
+    window.opponent_hp_box.setCurrentText("50")
+    window._on_self_active_changed_for_legal_switches()  # noqa: SLF001
+
+    selected_names = {
+        window.legal_switch_list.item(i).text()
+        for i in range(window.legal_switch_list.count())
+        if window.legal_switch_list.item(i).isSelected()
+    }
+    assert selected_names == {"Dragonite"}
+    assert transport.call_count == 0
+    repository.close()
+
+
+def test_11_active_change_same_identity_discards_old_selection(tmp_path: Path) -> None:
+    """R3R2 mandatory regression 4: same TurnIdentity, active changes from A
+    to B -- the previous active's edited selection must never leak into B's
+    fresh candidate set."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    window.self_active_box.setCurrentText(SELECTED_THREE[0])
+    for index in range(window.legal_switch_list.count()):
+        item = window.legal_switch_list.item(index)
+        if item.text() == "Gholdengo":
+            item.setSelected(False)
+    assert {
+        window.legal_switch_list.item(i).text()
+        for i in range(window.legal_switch_list.count())
+        if window.legal_switch_list.item(i).isSelected()
+    } == {"Dragonite"}
+
+    window.self_active_box.setCurrentText(SELECTED_THREE[1])
+
+    assert {
+        window.legal_switch_list.item(i).text() for i in range(window.legal_switch_list.count())
+    } == {SELECTED_THREE[0], "Dragonite"}
+    assert all(
+        window.legal_switch_list.item(i).isSelected()
+        for i in range(window.legal_switch_list.count())
+    )
+    assert transport.call_count == 0
+    repository.close()

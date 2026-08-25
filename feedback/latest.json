@@ -1,0 +1,9 @@
+{
+  "ended_at_utc": "2026-08-25T09:12:10.955489+00:00",
+  "match_id": "9a9b54db-2344-4ed9-a61d-7dc96108f2b8",
+  "match_path": "feedback/matches/2026/08/25/2026-08-25T09-12-10.955489_00-00_9a9b54db-2344-4ed9-a61d-7dc96108f2b8.json",
+  "outcome": "WIN",
+  "schema_version": "maple-feedback-index.v1",
+  "sha256": "fae3d403168651ecb280ebc97dd11a31e19be54cb79ac63387d2831648b11290",
+  "source_schema_version": "maple-match.v2"
+}

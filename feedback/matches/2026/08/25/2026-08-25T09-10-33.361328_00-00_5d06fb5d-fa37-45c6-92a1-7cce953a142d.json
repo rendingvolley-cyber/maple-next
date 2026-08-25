@@ -1,0 +1,35 @@
+{
+  "action_history": [],
+  "ended_at_utc": "2026-08-25T09:10:33.361328+00:00",
+  "final_battle_revision": 5,
+  "generation": 1,
+  "match_id": "5d06fb5d-fa37-45c6-92a1-7cce953a142d",
+  "outcome": "WIN",
+  "schema_version": "maple-match.v2",
+  "selection": {
+    "lead": "Dondozo",
+    "opponent_team": [
+      "Garchomp",
+      "Gholdengo",
+      "Dragonite",
+      "Flutter Mane",
+      "Garganacl",
+      "Iron Bundle"
+    ],
+    "selected_three": [
+      "Dondozo",
+      "Flutter Mane",
+      "Urshifu"
+    ],
+    "self_team": [
+      "Meowscarada",
+      "Gholdengo",
+      "Dragonite",
+      "Dondozo",
+      "Flutter Mane",
+      "Urshifu"
+    ]
+  },
+  "session_id": "7decdc52-770b-4dc9-8a4a-9c2d893c066a",
+  "turns": []
+}

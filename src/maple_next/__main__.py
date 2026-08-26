@@ -11,7 +11,7 @@ from typing import cast
 
 from PySide6.QtWidgets import QApplication
 
-from maple_next.application.match_service import MatchApplication
+from maple_next.application.operator_match_service import OperatorMatchApplication
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers.transport import (
     GeminiSelectionAdviceTransport,
@@ -109,7 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     qt_application = QApplication([sys.argv[0]])
     repository = SQLiteRepository(database_path)
     try:
-        battle_application = MatchApplication(repository, export_directory)
+        battle_application = OperatorMatchApplication(repository, export_directory)
         battle_application.recover_after_restart()
         controller = TurnStateFlowController(
             battle_application,

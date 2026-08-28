@@ -15,11 +15,16 @@ Operator flow for RECORD_ACTUAL_ACTION:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QScrollArea
 
+from maple_next.capture.contracts import VideoCaptureBackend
 from maple_next.domain.enums import HpBucket
+from maple_next.domain.opponent_intel import OpponentMetaProvider
 from maple_next.ui.battle_record_ui import BattleRecordUiWindow
 from maple_next.ui.controller import OperatorView
+from maple_next.ui.turn_state_flow import TurnStateFlowController
 
 _NO_ACTIVE_CHANGE = "変化なし"
 
@@ -27,13 +32,27 @@ _NO_ACTIVE_CHANGE = "変化なし"
 class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
     """Battle Record UI with a local two-step action/result workbench."""
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
+    def __init__(
+        self,
+        controller: TurnStateFlowController,
+        *,
+        ocr_data_directory: Path,
+        opponent_meta_provider: OpponentMetaProvider | None = None,
+        capture_backend: VideoCaptureBackend | None = None,
+        auto_start_capture: bool = True,
+    ) -> None:
         # ``BattleRecordUiWindow.__init__`` renders before returning. These
         # fields must therefore exist before ``super().__init__`` so our
         # render override can safely run during base construction.
         self._two_step_result_entry = False
         self._two_step_identity: tuple[object, ...] | None = None
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            controller,
+            ocr_data_directory=ocr_data_directory,
+            opponent_meta_provider=opponent_meta_provider,
+            capture_backend=capture_backend,
+            auto_start_capture=auto_start_capture,
+        )
 
         self.result_entry_workbench_page = self._build_two_step_result_page()
         self.workbench_stack.addWidget(self.result_entry_workbench_page)

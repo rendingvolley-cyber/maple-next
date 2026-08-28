@@ -1,16 +1,10 @@
 """Two-step operator flow for actual action -> turn result -> NEXT TURN.
 
-This is intentionally a UI-only orchestration layer on top of the existing
-BattleRecordUiWindow / ActionResultDelta contract. It does not add a new
-canonical battle state and does not change provider or persistence semantics.
+The canonical Battle Record state model remains unchanged. This class only
+splits the existing action/result workbench into two explicit operator steps:
 
-Operator flow for RECORD_ACTUAL_ACTION:
-
-1. enter actual self/opponent action + order
-2. press 「結果記録」 to move to the result-entry page (no durable write)
-3. enter HP/faint/active-switch/status/stat-stage/weather/terrain deltas
-4. press NEXT TURN; the existing rich action+delta write runs once, and only
-   after that succeeds does the existing next_turn command run
+1. enter actual actions/order and press 「結果記録」 (navigation only)
+2. enter result deltas and press NEXT TURN (atomic write, then one Turn advance)
 """
 
 from __future__ import annotations
@@ -33,7 +27,7 @@ _T = TypeVar("_T")
 
 
 class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
-    """Battle Record UI with a local two-step action/result workbench."""
+    """Battle Record UI with explicit action-entry and result-entry steps."""
 
     def __init__(
         self,
@@ -44,6 +38,8 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
         capture_backend: VideoCaptureBackend | None = None,
         auto_start_capture: bool = True,
     ) -> None:
+        # Base construction renders before returning, so these local fields
+        # must exist before super().__init__ invokes our render override.
         self._two_step_result_entry = False
         self._two_step_identity: tuple[object, ...] | None = None
         super().__init__(
@@ -62,6 +58,7 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
             "結果記録",
             "ターン終了後に変わった事実だけ入力。入力完了後は NEXT TURN。",
         )
+
         summary_card, summary_layout = self._parity_card("このTurnの実行行動")
         self.two_step_action_summary = QLabel("—")
         self.two_step_action_summary.setWordWrap(True)
@@ -73,7 +70,7 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
             subtitle=(
                 "ひんしは canonical HP=0。通常の交代は前画面のSWITCHから自動反映。"
                 "とんぼがえり等の技後交代はターン後Activeで指定します。"
-                "ターン後Activeを変えた場合、HP・状態・能力ランクは交代後の最終状態として記録します。"
+                "Active変更時のHP・状態・能力ランクは交代後の最終状態です。"
             ),
         )
         faint_row = QHBoxLayout()
@@ -100,15 +97,24 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
         self.result_opponent_active_box.addItem(_NO_ACTIVE_CHANGE)
         active_row.addWidget(self.result_opponent_active_box, 1)
         quick_layout.addLayout(active_row)
+
         self.two_step_result_error_label = QLabel("")
         self.two_step_result_error_label.setWordWrap(True)
         self.two_step_result_error_label.setStyleSheet("color: #dc2626; font-weight: 600;")
         quick_layout.addWidget(self.two_step_result_error_label)
         layout.addWidget(quick_card)
 
+        # Reuse the accepted ActionResultDelta widgets. The base v5 surface
+        # intentionally hid per-stage manual editing; result entry needs an
+        # explicit human escape hatch, so expose the existing collapsed
+        # detail sections here without creating parallel stage state.
+        self.self_delta_editor.detail_section.setVisible(True)
+        self.opponent_delta_editor.detail_section.setVisible(True)
+
         self._detach_from_parent_layout(self.result_effect_candidate)
         self.result_effect_candidate.setProperty("candidateArea", True)
         layout.addWidget(self.result_effect_candidate)
+
         self._detach_from_parent_layout(self.action_result_delta_group)
         self.action_result_delta_group.setTitle("ターン終了後の変化")
         layout.addWidget(self.action_result_delta_group)
@@ -155,7 +161,8 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
     def _overlay_result_delta_on_switch_base(
         cls, base: SideDelta, manual: SideDelta
     ) -> SideDelta:
-        """Keep switch semantics while retaining explicit final-state edits."""
+        """Retain explicit final-state edits on top of canonical switch state."""
+
         return SideDelta(
             active=base.active,
             hp_bucket=cls._overlay_field(base.hp_bucket, manual.hp_bucket),
@@ -176,6 +183,8 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
 
     @staticmethod
     def _faint_and_active_change_conflict(destination: str | None, manual: SideDelta) -> bool:
+        # A single SideDelta describes the final active. Persisting active=B
+        # together with HP=0 intended for outgoing A would falsely faint B.
         return (
             destination is not None
             and manual.hp_bucket.observation is ChangeObservation.CHANGED
@@ -191,6 +200,7 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
                 self_active = summary.confirmed_state.self_side.active.value
             if summary.confirmed_state.opponent_side.active.is_confirmed:
                 opponent_active = summary.confirmed_state.opponent_side.active.value
+
         self_candidates = (
             current.applied_selection.selected_three
             if current.applied_selection is not None
@@ -223,6 +233,8 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
         )
 
     def _on_record_action(self, _checked: bool = False) -> None:
+        """Navigate to result entry. No action/result row is written here."""
+
         if not self._mutation_slots_allowed():
             return
         self._two_step_result_entry = True
@@ -242,6 +254,7 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
         action_type = self.actual_action_type_box.currentText()
         action_name = self.actual_action_name_box.currentText().strip()
         opponent_name = self.opponent_action_name_input.text().strip()
+
         self_destination = (
             action_name
             if action_type == "SWITCH" and action_name
@@ -282,6 +295,7 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
             )
         else:
             self_side_delta = manual_self_delta
+
         if opponent_destination:
             switch_base = self._bundle_c_controller.compute_confirmed_switch_side_delta(
                 side="opponent", destination_pokemon_name=opponent_destination
@@ -306,6 +320,8 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
         )
 
     def _on_next_turn(self, _checked: bool = False) -> None:
+        """Commit action+result once; only a successful commit advances Turn."""
+
         current = self._bundle_c_controller.refresh()
         if (
             current.projection.primary_cta == "RECORD_ACTUAL_ACTION"
@@ -316,23 +332,28 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
                 self._two_step_result_entry = True
                 self.workbench_stack.setCurrentWidget(self.result_entry_workbench_page)
                 return
+
             self.render_view(recorded)
             after_record = self._bundle_c_controller.refresh()
             if after_record.projection.primary_cta != "NEXT_TURN":
                 self._two_step_result_entry = True
                 self.render_view(after_record)
                 return
+
             self._two_step_result_entry = False
             self.two_step_result_error_label.clear()
             advanced = self._bundle_c_controller.next_turn()
             self.render_view(advanced)
             return
+
+        # Restart recovery may legitimately resume from canonical NEXT_TURN.
         super()._on_next_turn(_checked)
 
     def render_view(self, view: OperatorView | None = None) -> None:
         super().render_view(view)
         if not hasattr(self, "result_entry_workbench_page"):
             return
+
         current = view if view is not None else self._bundle_c_controller.refresh()
         projection = current.projection
         identity = (
@@ -348,10 +369,12 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
             self.result_self_active_box.setCurrentIndex(0)
             self.result_opponent_active_box.setCurrentIndex(0)
             self.two_step_result_error_label.clear()
+
         in_action_phase = projection.primary_cta == "RECORD_ACTUAL_ACTION"
         if not in_action_phase:
             self._two_step_result_entry = False
             return
+
         self._refresh_result_active_options(current)
         if self._two_step_result_entry:
             self.two_step_action_summary.setText(self._action_summary_text())

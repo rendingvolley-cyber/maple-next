@@ -82,7 +82,11 @@ def advance_to_action_phase(
     controller: TurnStateFlowController,
     window: TwoStepBattleRecordUiWindow,
 ) -> None:
-    controller.new_match()
+    view = controller.new_match()
+    assert view.error_message is None, (
+        f"new_match failed: {view.error_message}; "
+        f"mode={view.projection.application_mode}; state={view.projection.session_state}"
+    )
     _assert_active(repository, "new_match")
     controller.confirm_selection_facts(list(SELF_TEAM), list(OPPONENT_TEAM))
     _assert_active(repository, "confirm_selection_facts")

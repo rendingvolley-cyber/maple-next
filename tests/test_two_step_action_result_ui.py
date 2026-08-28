@@ -27,12 +27,24 @@ SELF_TEAM = ("Meowscarada", "Gholdengo", "Dragonite", "Dondozo", "Flutter Mane",
 OPPONENT_TEAM = ("Garchomp", "Gholdengo", "Dragonite", "Flutter Mane", "Garganacl", "Iron Bundle")
 SELECTED_THREE = (SELF_TEAM[0], SELF_TEAM[1], SELF_TEAM[2])
 
+# Keep a Python-side strong reference for targeted/single-file Windows runs.
+# Full-suite runs often already have a QApplication alive from earlier UI
+# modules, which can otherwise hide this lifetime requirement.
+_QT_APP: QApplication | None = None
+
 
 def qt_application() -> QApplication:
+    global _QT_APP
     existing = QApplication.instance()
     if existing is not None:
-        return cast(QApplication, existing)
-    return QApplication([])
+        _QT_APP = cast(QApplication, existing)
+    elif _QT_APP is None:
+        _QT_APP = QApplication([])
+    return _QT_APP
+
+
+def _assert_active(repository: SQLiteRepository, step: str) -> None:
+    assert repository.load_active_session() is not None, f"active match lost after {step}"
 
 
 def build_window(tmp_path: Path) -> tuple[
@@ -41,7 +53,8 @@ def build_window(tmp_path: Path) -> tuple[
     TwoStepBattleRecordUiWindow,
     FakeTurnAdviceTransport,
 ]:
-    qt_application()
+    app = qt_application()
+    assert app is not None
     repository = SQLiteRepository(tmp_path / "two-step.db")
     export_dir = tmp_path / "exports"
     export_dir.mkdir()
@@ -65,14 +78,22 @@ def build_window(tmp_path: Path) -> tuple[
 
 
 def advance_to_action_phase(
-    controller: TurnStateFlowController, window: TwoStepBattleRecordUiWindow
+    repository: SQLiteRepository,
+    controller: TurnStateFlowController,
+    window: TwoStepBattleRecordUiWindow,
 ) -> None:
     controller.new_match()
+    _assert_active(repository, "new_match")
     controller.confirm_selection_facts(list(SELF_TEAM), list(OPPONENT_TEAM))
+    _assert_active(repository, "confirm_selection_facts")
     controller.submit_mock_advice(list(SELECTED_THREE), SELECTED_THREE[0])
+    _assert_active(repository, "submit_mock_advice")
     controller.apply_selection(list(SELECTED_THREE), SELECTED_THREE[0], human_confirmed=True)
+    _assert_active(repository, "apply_selection")
     controller.start_turn_capture()
+    _assert_active(repository, "start_turn_capture")
     window.render_view()
+    _assert_active(repository, "window.render_view before turn facts")
 
     window.self_active_box.setCurrentText(SELECTED_THREE[0])
     window.opponent_active_input.setText(OPPONENT_TEAM[0])
@@ -90,6 +111,7 @@ def advance_to_action_phase(
     window.terrain_field.unknown_box.setChecked(False)
     window.terrain_field.line.setText("NONE")
     window._on_confirm_turn_facts()  # noqa: SLF001
+    _assert_active(repository, "confirm_turn_facts")
 
     candidates = controller.derive_legal_switch_candidates()
     controller.confirm_legal_switches(
@@ -100,13 +122,16 @@ def advance_to_action_phase(
             else LegalSwitchStatus.CONFIRMED_NONE
         ),
     )
+    _assert_active(repository, "confirm_legal_switches")
 
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
     window.mock_turn_prediction_input.setText("opponent move")
     window.mock_turn_rationale_input.setText("test")
     window._on_submit_mock_turn()  # noqa: SLF001
+    _assert_active(repository, "submit_mock_turn")
     window.render_view()
+    _assert_active(repository, "window.render_view after mock turn")
 
     assert controller.refresh().projection.primary_cta == "RECORD_ACTUAL_ACTION"
 
@@ -123,7 +148,7 @@ def test_result_button_only_navigates_then_next_turn_commits_faint_and_stage_cha
     tmp_path: Path,
 ) -> None:
     repository, controller, window, transport = build_window(tmp_path)
-    advance_to_action_phase(controller, window)
+    advance_to_action_phase(repository, controller, window)
     fill_action(window)
 
     before = controller.turn_state_summary()
@@ -159,7 +184,7 @@ def test_result_button_only_navigates_then_next_turn_commits_faint_and_stage_cha
 
 def test_move_result_can_record_post_move_active_change(tmp_path: Path) -> None:
     repository, controller, window, transport = build_window(tmp_path)
-    advance_to_action_phase(controller, window)
+    advance_to_action_phase(repository, controller, window)
     fill_action(window)
 
     window._on_record_action()  # noqa: SLF001
@@ -177,7 +202,7 @@ def test_move_result_can_record_post_move_active_change(tmp_path: Path) -> None:
 
 def test_invalid_action_confirmation_does_not_advance_from_result_page(tmp_path: Path) -> None:
     repository, controller, window, transport = build_window(tmp_path)
-    advance_to_action_phase(controller, window)
+    advance_to_action_phase(repository, controller, window)
     fill_action(window, confirmed=False)
 
     identity_before = controller.turn_state_summary().identity

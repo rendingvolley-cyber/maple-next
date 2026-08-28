@@ -413,18 +413,15 @@ class BattleApplication:
         return job
 
     def reserve_gemini_selection_attempt(self, command_id: str) -> JobEnvelope:
-        """Atomically reserve and create the one durable production Gemini job.
+        """Atomically reserve and create a human-authorized production job.
 
         Distinct from :meth:`request_selection_advice` (still used by the
         mock/dev Selection Advice lane): for the production Gemini lane,
-        once this reservation succeeds for a Selection identity (session,
-        match, generation, battle_revision, reviewed_selection_id), no
-        further production Gemini job may ever be created for that same
-        identity, regardless of how the reserved job resolves (success,
-        failure, timeout, crash) or whether the process restarts. Local
-        validation failures before the reservation point (no active
-        session, wrong state, missing reviewed selection) never write a
-        ledger row and never create a job.
+        the first reservation is unique for a Selection identity. The only
+        replacement is a new command/job created by another human activation
+        after the current job durably ended in an allowlisted transient
+        failure. Local validation failures before the reservation point never
+        write a ledger row or create a job.
         """
 
         job_id = str(uuid4())
@@ -440,13 +437,28 @@ class BattleApplication:
                 reviewed_selection_id=session.current_reviewed_selection_id,
                 job_id=job_id,
             )
-            if not reserved:
-                raise DomainError("GEMINI_SELECTION_ATTEMPT_CONSUMED")
-
             latest_job = self.repository.latest_job_by_type(
                 session.session_id, JobType.SELECTION_ADVICE
             )
-            self._guard_provider_request(latest_job)
+            if not reserved:
+                resend_reason = self._gemini_selection_failure_reason(
+                    session, latest_job, transient_only=True
+                )
+                if resend_reason is None or latest_job is None:
+                    raise DomainError("GEMINI_SELECTION_ATTEMPT_CONSUMED")
+                replaced = self.repository.replace_gemini_selection_attempt_reservation(
+                    session_id=session.session_id,
+                    match_id=session.match_id,
+                    generation=session.generation,
+                    battle_revision=session.battle_revision,
+                    reviewed_selection_id=session.current_reviewed_selection_id,
+                    expected_job_id=latest_job.job_id,
+                    new_job_id=job_id,
+                )
+                if not replaced:
+                    raise DomainError("GEMINI_SELECTION_ATTEMPT_CONSUMED")
+            else:
+                self._guard_provider_request(latest_job)
             selection_facts = self.repository.get_selection_facts(
                 session.current_reviewed_selection_id
             )
@@ -496,6 +508,74 @@ class BattleApplication:
             generation=session.generation,
             reviewed_selection_id=session.current_reviewed_selection_id,
         )
+
+    def gemini_selection_resend_eligible(self) -> bool:
+        """Whether the current identity permits a new human-explicit send."""
+
+        session = self.repository.load_active_session()
+        if session is None or session.current_reviewed_selection_id is None:
+            return False
+        latest_job = self.repository.latest_job_by_type(
+            session.session_id, JobType.SELECTION_ADVICE
+        )
+        return (
+            self._gemini_selection_failure_reason(
+                session, latest_job, transient_only=True
+            )
+            is not None
+        )
+
+    def gemini_selection_last_failure_reason(self) -> str | None:
+        """Restore the current Selection job's sanitized failure after restart."""
+
+        session = self.repository.load_active_session()
+        if session is None or session.current_reviewed_selection_id is None:
+            return None
+        latest_job = self.repository.latest_job_by_type(
+            session.session_id, JobType.SELECTION_ADVICE
+        )
+        return self._gemini_selection_failure_reason(
+            session, latest_job, transient_only=False
+        )
+
+    def _gemini_selection_failure_reason(
+        self,
+        session: BattleSession,
+        latest_job: JobEnvelope | None,
+        *,
+        transient_only: bool,
+    ) -> str | None:
+        if (
+            latest_job is None
+            or latest_job.session_id != session.session_id
+            or latest_job.match_id != session.match_id
+            or latest_job.generation != session.generation
+            or latest_job.base_battle_revision != session.battle_revision
+            or latest_job.input_snapshot_id != session.current_reviewed_selection_id
+            or latest_job.status not in {JobStatus.FAILED, JobStatus.TIMED_OUT}
+        ):
+            return None
+        audits = self.repository.selection_provider_attempt_audits(latest_job.job_id)
+        if not audits:
+            return None
+        _ordinal, _model, outcome, reason = audits[-1]
+        if outcome != "FAILED" or not reason:
+            return None
+        if transient_only and not self._is_transient_selection_failure(reason):
+            return None
+        return reason
+
+    @staticmethod
+    def _is_transient_selection_failure(reason: str) -> bool:
+        if reason == "GEMINI_TIMEOUT" or reason.startswith("GEMINI_NETWORK_ERROR"):
+            return True
+        if not reason.startswith("GEMINI_HTTP_ERROR:"):
+            return False
+        try:
+            status = int(reason.split(":", 1)[1].split("|", 1)[0])
+        except ValueError:
+            return False
+        return status in {408, 425, 429, 500, 502, 503, 504}
 
     def build_selection_advice_transport_request(
         self, job: JobEnvelope

@@ -650,6 +650,11 @@ class SelectionFlowController:
 
         return self._application.gemini_selection_attempt_consumed()
 
+    def gemini_selection_resend_eligible(self) -> bool:
+        """Restart-safe permission for one new human-explicit transient retry."""
+
+        return self._application.gemini_selection_resend_eligible()
+
     def send_selection_advice_to_gemini(
         self,
         *,
@@ -674,7 +679,10 @@ class SelectionFlowController:
         if not current.projection.provider_send_enabled:
             self._error_message = "現在はGeminiへ送信できません。"
             return self.refresh()
-        if self.gemini_selection_attempt_consumed():
+        if (
+            self.gemini_selection_attempt_consumed()
+            and not self.gemini_selection_resend_eligible()
+        ):
             self._error_message = _domain_message(DomainError("GEMINI_SELECTION_ATTEMPT_CONSUMED"))
             return self.refresh()
 

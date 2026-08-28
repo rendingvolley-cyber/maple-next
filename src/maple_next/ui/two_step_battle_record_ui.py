@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QScro
 from maple_next.capture.contracts import VideoCaptureBackend
 from maple_next.domain.enums import HpBucket
 from maple_next.domain.opponent_intel import OpponentMetaProvider
+from maple_next.domain.turn_state import ChangeObservation, FieldDelta, SideDelta
 from maple_next.ui.battle_record_ui import BattleRecordUiWindow
 from maple_next.ui.controller import OperatorView
 from maple_next.ui.turn_state_flow import TurnStateFlowController
@@ -75,6 +76,7 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
             subtitle=(
                 "ひんしは canonical HP=0。通常の交代は前画面のSWITCHから自動反映。"
                 "とんぼがえり等の技後交代はターン後Activeで指定します。"
+                "ターン後Activeを変えた場合、HP・状態・能力ランクは交代後の最終状態として記録します。"
             ),
         )
         faint_row = QHBoxLayout()
@@ -101,6 +103,10 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
         self.result_opponent_active_box.addItem(_NO_ACTIVE_CHANGE)
         active_row.addWidget(self.result_opponent_active_box, 1)
         quick_layout.addLayout(active_row)
+        self.two_step_result_error_label = QLabel("")
+        self.two_step_result_error_label.setWordWrap(True)
+        self.two_step_result_error_label.setStyleSheet("color: #dc2626; font-weight: 600;")
+        quick_layout.addWidget(self.two_step_result_error_label)
         layout.addWidget(quick_card)
 
         # These are the already-accepted ActionResultDelta inputs. Reparenting
@@ -148,6 +154,60 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
         finally:
             box.blockSignals(False)
 
+    @staticmethod
+    def _overlay_result_delta_on_switch_base(base: SideDelta, manual: SideDelta) -> SideDelta:
+        """Keep switch semantics while retaining explicit final-state edits.
+
+        ``compute_confirmed_switch_side_delta`` owns active identity, stage
+        reset, and destination HP/status memory. The result page may then
+        explicitly observe a different final value (for example switch-in
+        chip, status, Intimidate, or another post-switch stage change). Such
+        CHANGED/UNKNOWN observations must not be discarded merely because an
+        active change also occurred. UNCHANGED means keep the switch base.
+        """
+
+        def overlay(base_field: FieldDelta[object], manual_field: FieldDelta[object]):
+            return (
+                base_field
+                if manual_field.observation is ChangeObservation.UNCHANGED
+                else manual_field
+            )
+
+        return SideDelta(
+            active=base.active,
+            hp_bucket=overlay(base.hp_bucket, manual.hp_bucket),  # type: ignore[arg-type]
+            status=overlay(base.status, manual.status),  # type: ignore[arg-type]
+            attack_stage=overlay(base.attack_stage, manual.attack_stage),  # type: ignore[arg-type]
+            defense_stage=overlay(base.defense_stage, manual.defense_stage),  # type: ignore[arg-type]
+            special_attack_stage=overlay(
+                base.special_attack_stage, manual.special_attack_stage
+            ),  # type: ignore[arg-type]
+            special_defense_stage=overlay(
+                base.special_defense_stage, manual.special_defense_stage
+            ),  # type: ignore[arg-type]
+            speed_stage=overlay(base.speed_stage, manual.speed_stage),  # type: ignore[arg-type]
+            accuracy_stage=overlay(base.accuracy_stage, manual.accuracy_stage),  # type: ignore[arg-type]
+            evasion_stage=overlay(base.evasion_stage, manual.evasion_stage),  # type: ignore[arg-type]
+            side_effects=overlay(base.side_effects, manual.side_effects),  # type: ignore[arg-type]
+        )
+
+    @staticmethod
+    def _faint_and_active_change_conflict(destination: str | None, manual: SideDelta) -> bool:
+        """A single final SideDelta cannot mean both outgoing faint and replacement.
+
+        HP=0 is the final active's HP in the canonical delta. If the operator
+        also selects a different final active, persisting both would falsely
+        mark that replacement as fainted. Keep the result page open instead;
+        record the faint first and confirm the forced replacement as the next
+        Turn's current active.
+        """
+
+        return (
+            destination is not None
+            and manual.hp_bucket.observation is ChangeObservation.CHANGED
+            and manual.hp_bucket.after_value is HpBucket.ZERO
+        )
+
     def _refresh_result_active_options(self, current: OperatorView) -> None:
         summary = self._bundle_c_controller.turn_state_summary()
         self_active: str | None = None
@@ -174,6 +234,7 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
 
     def _back_to_action_entry(self, _checked: bool = False) -> None:
         self._two_step_result_entry = False
+        self.two_step_result_error_label.clear()
         self.render_view(self._bundle_c_controller.refresh())
 
     def _action_summary_text(self) -> str:
@@ -196,16 +257,17 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
         self._two_step_result_entry = True
         if hasattr(self, "two_step_action_summary"):
             self.two_step_action_summary.setText(self._action_summary_text())
+            self.two_step_result_error_label.clear()
         self.render_view(self._bundle_c_controller.refresh())
 
-    def _commit_action_and_result(self) -> OperatorView:
+    def _commit_action_and_result(self) -> OperatorView | None:
         """Use the accepted mandatory-rich write with optional result switch.
 
         Ordinary SWITCH actions use their already-confirmed destination. A
-        MOVE may additionally change active (U-turn / Flip Turn style); in
-        that case the explicit result-page destination is fed through the
-        existing confirmed-switch delta calculator so stage reset and local
-        Pokemon memory semantics stay exactly the same as an ordinary switch.
+        MOVE may additionally change active (U-turn / Flip Turn style). The
+        existing switch calculator supplies the destination memory + stage
+        reset, then any explicit final-state result observations are overlaid
+        rather than silently thrown away.
         """
 
         opponent_type = self.opponent_action_type_box.currentText()
@@ -230,19 +292,43 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
             else self._selected_active_change(self.result_opponent_active_box)
         )
 
+        manual_self_delta = self.self_delta_editor.to_side_delta()
+        manual_opponent_delta = self.opponent_delta_editor.to_side_delta()
+        if self._faint_and_active_change_conflict(self_destination, manual_self_delta):
+            self.two_step_result_error_label.setText(
+                "自分側で「ひんし(HP 0)」とターン後Active変更は同時確定できません。"
+                "ひんしを記録してNEXT TURNへ進み、次Turnの状態確認で交代後Activeを確定してください。"
+            )
+            return None
+        if self._faint_and_active_change_conflict(
+            opponent_destination, manual_opponent_delta
+        ):
+            self.two_step_result_error_label.setText(
+                "相手側で「ひんし(HP 0)」とターン後Active変更は同時確定できません。"
+                "ひんしを記録してNEXT TURNへ進み、次Turnの状態確認で交代後Activeを確定してください。"
+            )
+            return None
+        self.two_step_result_error_label.clear()
+
         if self_destination:
-            self_side_delta = self._bundle_c_controller.compute_confirmed_switch_side_delta(
+            switch_base = self._bundle_c_controller.compute_confirmed_switch_side_delta(
                 side="self", destination_pokemon_name=self_destination
             )
-        else:
-            self_side_delta = self.self_delta_editor.to_side_delta()
-
-        if opponent_destination:
-            opponent_side_delta = self._bundle_c_controller.compute_confirmed_switch_side_delta(
-                side="opponent", destination_pokemon_name=opponent_destination
+            self_side_delta = self._overlay_result_delta_on_switch_base(
+                switch_base, manual_self_delta
             )
         else:
-            opponent_side_delta = self.opponent_delta_editor.to_side_delta()
+            self_side_delta = manual_self_delta
+
+        if opponent_destination:
+            switch_base = self._bundle_c_controller.compute_confirmed_switch_side_delta(
+                side="opponent", destination_pokemon_name=opponent_destination
+            )
+            opponent_side_delta = self._overlay_result_delta_on_switch_base(
+                switch_base, manual_opponent_delta
+            )
+        else:
+            opponent_side_delta = manual_opponent_delta
 
         return self._bundle_c_controller.record_actual_action(
             action_type=action_type,
@@ -266,6 +352,10 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
             and self._two_step_result_entry
         ):
             recorded = self._commit_action_and_result()
+            if recorded is None:
+                self._two_step_result_entry = True
+                self.workbench_stack.setCurrentWidget(self.result_entry_workbench_page)
+                return
             self.render_view(recorded)
             after_record = self._bundle_c_controller.refresh()
             if after_record.projection.primary_cta != "NEXT_TURN":
@@ -277,6 +367,7 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
                 return
 
             self._two_step_result_entry = False
+            self.two_step_result_error_label.clear()
             advanced = self._bundle_c_controller.next_turn()
             self.render_view(advanced)
             return
@@ -304,6 +395,7 @@ class TwoStepBattleRecordUiWindow(BattleRecordUiWindow):
             self._two_step_result_entry = False
             self.result_self_active_box.setCurrentIndex(0)
             self.result_opponent_active_box.setCurrentIndex(0)
+            self.two_step_result_error_label.clear()
 
         in_action_phase = projection.primary_cta == "RECORD_ACTUAL_ACTION"
         if not in_action_phase:

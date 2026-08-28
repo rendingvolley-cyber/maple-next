@@ -1,9 +1,9 @@
 {
-  "ended_at_utc": "2026-08-25T11:20:36.210328+00:00",
-  "match_id": "f41311f1-6103-47d4-b21b-b0c08d4f283c",
-  "match_path": "feedback/matches/2026/08/25/2026-08-25T11-20-36.210328_00-00_f41311f1-6103-47d4-b21b-b0c08d4f283c.json",
+  "ended_at_utc": "2026-08-28T01:43:39.419568+00:00",
+  "match_id": "9d277910-ab67-4bcc-9030-5948d04c57c6",
+  "match_path": "feedback/matches/2026/08/28/2026-08-28T01-43-39.419568_00-00_9d277910-ab67-4bcc-9030-5948d04c57c6.json",
   "outcome": "WIN",
   "schema_version": "maple-feedback-index.v1",
-  "sha256": "1f843657386f7a92bbb4ffe03fb42cd482e0921e77d13c8db7c659e36e4229a1",
+  "sha256": "ca2e863125c7dc57e3f6cc0c38194035d48d740e1ae0b7612ad3febf3e55b626",
   "source_schema_version": "maple-match.v4"
 }

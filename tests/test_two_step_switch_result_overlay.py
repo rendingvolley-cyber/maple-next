@@ -13,6 +13,21 @@ from tests.test_two_step_action_result_ui import (
 )
 
 
+def test_result_page_exposes_manual_stage_editors(tmp_path: Path) -> None:
+    repository, controller, window, transport = build_window(tmp_path)
+    advance_to_action_phase(repository, controller, window)
+    fill_action(window)
+
+    window._on_record_action()  # noqa: SLF001
+
+    assert not window.self_delta_editor.detail_section.isHidden()
+    assert not window.opponent_delta_editor.detail_section.isHidden()
+    assert "能力ランク" in window.self_delta_editor.detail_section.toggle_button.text()
+    assert "能力ランク" in window.opponent_delta_editor.detail_section.toggle_button.text()
+    assert transport.call_count == 0
+    repository.close()
+
+
 def test_post_move_active_change_keeps_explicit_final_hp_status_and_stage(
     tmp_path: Path,
 ) -> None:

@@ -20,8 +20,8 @@ from maple_next.domain.legal_switches import LegalSwitchStatus
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers.turn_transport import FakeTurnAdviceTransport
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
-from maple_next.ui.two_step_battle_record_ui import TwoStepBattleRecordUiWindow
 from maple_next.ui.turn_state_flow import GeminiRichTurnAdviceAdapter, TurnStateFlowController
+from maple_next.ui.two_step_battle_record_ui import TwoStepBattleRecordUiWindow
 
 SELF_TEAM = ("Meowscarada", "Gholdengo", "Dragonite", "Dondozo", "Flutter Mane", "Urshifu")
 OPPONENT_TEAM = ("Garchomp", "Gholdengo", "Dragonite", "Flutter Mane", "Garganacl", "Iron Bundle")

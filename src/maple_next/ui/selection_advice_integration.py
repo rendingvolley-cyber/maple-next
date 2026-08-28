@@ -72,6 +72,18 @@ class SelectionAdviceIntegrationController(ExplicitTurnNumberController):
                 advice_id=None,
                 can_apply=False,
             )
+        durable_failure = self._application.gemini_selection_last_failure_reason()
+        if durable_failure is not None:
+            return SelectionAdviceStatusView(
+                status="FAILED",
+                source_type="GEMINI",
+                model="—",
+                binding_status="REJECTED",
+                legality_status="NOT_APPLICABLE",
+                sanitized_failure=durable_failure,
+                advice_id=None,
+                can_apply=False,
+            )
         if adapter.last_disposition is ResultDisposition.STALE_REJECTED:
             return SelectionAdviceStatusView(
                 status="STALE",
@@ -308,12 +320,19 @@ class SelectionAdviceIntegrationWindow(ExplicitTurnNumberWindow):
         self.gemini_group.setVisible(
             self._selection_gemini_controller.gemini_send_available and selection_scope
         )
+        resend_eligible = self._selection_gemini_controller.gemini_selection_resend_eligible()
+        self.gemini_send_button.setText(
+            "Gemini再送" if resend_eligible else "SEND SELECTION TO GEMINI"
+        )
         self.gemini_send_button.setEnabled(
             current.persistence_reads_allowed
             and current.primary_cta == "REQUEST_SELECTION_ADVICE"
             and current.projection.provider_send_enabled
             and status.status not in {"PENDING", "SUCCESS"}
-            and not self._selection_gemini_controller.gemini_selection_attempt_consumed()
+            and (
+                not self._selection_gemini_controller.gemini_selection_attempt_consumed()
+                or resend_eligible
+            )
         )
         self.gemini_status_label.setText(f"Status: {status.status}")
         self.gemini_failure_label.setText(

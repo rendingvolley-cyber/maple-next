@@ -1379,11 +1379,18 @@ class MapleMainWindow(QMainWindow):
             self._controller.gemini_send_available
             and projection.primary_cta == "REQUEST_SELECTION_ADVICE"
         )
+        resend_eligible = self._controller.gemini_selection_resend_eligible()
+        self.gemini_send_button.setText(
+            "Gemini再送" if resend_eligible else "SEND SELECTION TO GEMINI"
+        )
         self.gemini_send_button.setEnabled(
             current.persistence_reads_allowed
             and projection.primary_cta == "REQUEST_SELECTION_ADVICE"
             and projection.provider_send_enabled
-            and not self._controller.gemini_selection_attempt_consumed()
+            and (
+                not self._controller.gemini_selection_attempt_consumed()
+                or resend_eligible
+            )
         )
         self.advice_group.setVisible(projection.current_selection_advice_id is not None)
         if current.advice is not None:

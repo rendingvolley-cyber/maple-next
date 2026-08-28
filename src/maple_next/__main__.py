@@ -22,11 +22,11 @@ from maple_next.providers.turn_transport import (
     load_authorized_turn_provider_config_from_env,
 )
 from maple_next.runtime_env import bootstrap_repo_root_dotenv
-from maple_next.ui.battle_record_ui import BattleRecordUiWindow
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
 from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
 from maple_next.ui.gemini_turn_advice import GeminiTurnAdviceAdapter
 from maple_next.ui.turn_state_flow import GeminiRichTurnAdviceAdapter, TurnStateFlowController
+from maple_next.ui.two_step_battle_record_ui import TwoStepBattleRecordUiWindow
 
 
 def repository_root() -> Path:
@@ -122,7 +122,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             turn_gemini_adapter=build_turn_gemini_adapter(),
             rich_turn_gemini_adapter=build_rich_turn_gemini_adapter(),
         )
-        window = BattleRecordUiWindow(
+        window = TwoStepBattleRecordUiWindow(
             controller,
             ocr_data_directory=ocr_data_directory,
         )

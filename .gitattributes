@@ -6,3 +6,9 @@
 # that one path rather than normalizing its line endings, which would
 # rewrite unrelated pre-existing lines.
 tests/test_issue31_turn_state_bundle_b_second_remediation.py -whitespace
+
+# Champions rules evidence is integrity-checked byte-for-byte against hashes
+# stored in rules.snapshot.json. Never let Windows checkout/autocrlf rewrite
+# these archived evidence bytes, or NEW MATCH will correctly fail closed with
+# RULES_SNAPSHOT_EVIDENCE_HASH_MISMATCH on an otherwise clean checkout.
+src/maple_next/data/champions_rules/**/evidence/*.html -text

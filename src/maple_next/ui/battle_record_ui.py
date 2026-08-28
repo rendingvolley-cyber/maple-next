@@ -1456,7 +1456,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
     # -- layout restructuring ---------------------------------------------------
 
     def _restructure_battle_record_layout(self) -> None:
-        outer_layout = self.centralWidget().layout()
+        central_widget = self.centralWidget()
+        assert central_widget is not None
+        outer_layout = central_widget.layout()
         assert outer_layout is not None
         status_frame = self.application_mode_label.parentWidget()
         assert status_frame is not None
@@ -1489,6 +1491,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         left_container = self._left_column_layout.parentWidget()
         center_container = self._center_column_layout.parentWidget()
         right_container = self._right_column_layout.parentWidget()
+        assert left_container is not None
+        assert center_container is not None
+        assert right_container is not None
         self.history_group.setTitle("確定履歴 / Latest confirmed state")
         history_layout = self.history_group.layout()
         if isinstance(history_layout, QVBoxLayout):
@@ -2084,7 +2089,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # 58px persistent application header: brand / two tabs / utilities.
         page_layout.removeWidget(header_widget)
         header_widget.setVisible(False)
-        outer_layout = self.centralWidget().layout()
+        central_widget = self.centralWidget()
+        assert central_widget is not None
+        outer_layout = central_widget.layout()
         if outer_layout is not None:
             outer_layout.setContentsMargins(0, 0, 0, 0)
             outer_layout.setSpacing(0)

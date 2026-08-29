@@ -20,7 +20,7 @@ CONTRACT_VERSION_V1: Final[str] = "maple-selection-advice.v1"
 CONTRACT_VERSION_V2: Final[str] = "maple-selection-advice.v2"
 SELECTION_ADVICE_CONTRACT_VERSION_V1: Final[str] = CONTRACT_VERSION_V1
 SELECTION_ADVICE_CONTRACT_VERSION_V2: Final[str] = CONTRACT_VERSION_V2
-SELECTION_PROMPT_VERSION: Final[str] = "maple-selection-prompt.v1"
+SELECTION_PROMPT_VERSION: Final[str] = "maple-selection-prompt.v2"
 
 #: Fixed and deterministic. Never derived from a live provider schema.
 REQUESTED_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
@@ -47,6 +47,11 @@ The request contains canonical facts confirmed by Maple.
 Confirmed information may include self_team, opponent_team, and a detailed
 self_team_build. self_team_build may be absent.
 
+When self_team_build is present, it is the authoritative description of the
+player's six Pokémon. Use the exact moves, held items, abilities, natures, and
+stat allocations actively in the selection decision; do not reduce the team to
+species typing or generic roles.
+
 When self_team_build is absent, do not assume the player's moves, held items,
 abilities, natures, or stat allocations.
 
@@ -58,17 +63,35 @@ but unconfirmed opponent details must remain uncertainty.
 
 Before choosing, silently:
 1. Evaluate all six members of self_team.
-2. Consider the major threats represented by all six opponent names.
-3. Compare multiple possible three-Pokémon combinations.
-4. Prefer coherent and complementary purposes across the selected trio.
-5. Avoid unnecessary role duplication that leaves a major threat unanswered.
-6. Do not select only by input order, familiarity, apparent raw offense,
-   or one favorable matchup.
-7. Choose a lead useful against multiple plausible opponent leads.
-8. Consider whether the other two selected Pokémon provide continuation
-   when the lead matchup is unfavorable.
-9. Use only exact names in self_team.
-10. Select exactly three distinct Pokémon and one selected lead.
+2. Compare all 20 distinct three-Pokémon combinations rather than starting
+   from a favorite, familiar, or previously successful trio.
+3. For every serious trio candidate, compare plausible lead choices and judge
+   the worst reasonable lead matchup, not only the best-case opening.
+4. Consider the major threats represented by all six opponent names and reject
+   trios that leave a catastrophic threat with no practical response.
+5. Prefer coherent and complementary purposes across the selected trio while
+   preserving a concrete continuation plan if the lead matchup is unfavorable.
+6. Use exact self_team_build details to value priority, speed control, pivoting,
+   defensive utility, disruption, setup pressure, recovery, and endgame tools
+   when those tools are actually present.
+7. Treat synergy packages such as weather setter + weather beneficiary as
+   conditional, not automatic. Prefer them only when the opponent names do not
+   make the enabling condition unusually fragile or easy to deny.
+8. Prefer a trio that can still function when its primary synergy, setup path,
+   or preferred matchup is denied; avoid plans that require one exact opponent
+   lead or one uninterrupted sequence to work.
+9. Consider opportunity cost between mutually exclusive centerpiece choices
+   (including Mega-dependent plans when the confirmed build indicates them)
+   instead of selecting multiple members whose strongest plans cannot coexist.
+10. Avoid unnecessary role duplication that leaves a major threat unanswered.
+11. Do not select only by input order, familiarity, apparent raw offense,
+    one favorable matchup, or a fixed preset package.
+12. Choose a lead useful against multiple plausible opponent leads, balancing
+    immediate pressure with the cost of a disastrous wrong lead.
+13. Consider whether the other two selected Pokémon provide safe continuation,
+    revenge pressure, or a stable switch path when the lead is disadvantaged.
+14. Use only exact names in self_team.
+15. Select exactly three distinct Pokémon and one selected lead.
 
 Follow requested_output_schema exactly.
 Return strict JSON only. Do not add explanations, confidence, roles,
@@ -195,7 +218,7 @@ def request_payload_hash(request: SelectionAdviceRequest) -> str:
 
 
 def build_provider_prompt(request: SelectionAdviceRequest) -> str:
-    """Build the deterministic, secret-free Initial Prompt v1."""
+    """Build the deterministic, secret-free Initial Prompt v2."""
 
     canonical = json.dumps(
         canonical_request_dict(request),

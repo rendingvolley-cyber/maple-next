@@ -105,7 +105,7 @@ from maple_next.opponent_intel_db.runtime_paths import (
 from maple_next.selection_roi.contracts import SelectionSlotMatch
 from maple_next.selection_roi.input_policy import SelectionInputOrigin
 from maple_next.turn_ocr import TurnSnapshotStatus
-from maple_next.ui.controller import OperatorView
+from maple_next.ui.controller import OperatorView, TurnAdviceView
 from maple_next.ui.move_autocomplete import MoveAutocompletePopup
 from maple_next.ui.opponent_intel_charts import (
     ReadableRankedListWidget,
@@ -266,6 +266,24 @@ _RICH_STATUS_LABELS = {
 #: CONFIRM TURN FACTS already sends when provider-ready -- so this button
 #: only reappears (as a retry) when one of these is true.
 _TURN_ADVICE_FAILURE_STATUSES = frozenset({"FAILED", "STALE", "INVALID_PAYLOAD", "REJECTED"})
+
+
+_TURN_ADVICE_PLAYER_FAILURE_MESSAGES = {
+    "FAILED": "Gemini送信に失敗しました。再送してください。",
+    "STALE": "盤面が更新されたため、この提案は無効です。",
+    "INVALID_PAYLOAD": "Geminiの応答を使用できませんでした。再送してください。",
+    "REJECTED": "Geminiの提案を使用できませんでした。再送してください。",
+}
+
+_TECHNICAL_PREDICTION_TOKENS = frozenset(
+    {
+        "DAMAGING_MOVE",
+        "NON_DAMAGING_MOVE",
+        "POPULATION_PRIOR",
+        "support_basis",
+        "support_level",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -2341,8 +2359,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._detach_from_parent_layout(self.turn_advice_group)
         self._compose_turn_advice_hierarchy()
         self._rich_gemini_layout.addRow(self.turn_advice_group)
-        self.rich_gemini_status_audit = QWidget()
-        self.rich_gemini_status_audit.setProperty("audit", True)
+        # Keep the status/gate labels alive for the existing controller-bound
+        # display contract, but move them to an invisible owner. They are
+        # audit/operator diagnostics, not live player advice.
+        self.rich_gemini_status_audit = QWidget(self)
+        self.rich_gemini_status_audit.setVisible(False)
         status_audit_layout = QVBoxLayout(self.rich_gemini_status_audit)
         status_audit_layout.setContentsMargins(0, 2, 0, 0)
         status_audit_layout.setSpacing(1)
@@ -2350,8 +2371,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             old_label = self._rich_gemini_layout.labelForField(field)
             if old_label is not None:
                 old_label.setVisible(False)
+            self._rich_gemini_layout.setRowVisible(field, False)
             status_audit_layout.addWidget(field)
-        self._rich_gemini_layout.addRow(self.rich_gemini_status_audit)
         self._detach_from_parent_layout(self.rich_gemini_group)
         self._detach_from_parent_layout(self.opponent_intel_widget)
         self._right_column_layout.insertWidget(0, self.rich_gemini_group)
@@ -3074,7 +3095,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._apply_selection_v3_composition()
 
     def _compose_turn_advice_hierarchy(self) -> None:
-        """Reparent existing bound labels into an operator-first hierarchy."""
+        """Compose only the information needed during live play.
+
+        The labels for robustness, alternatives, and provenance remain
+        controller-bound objects so the existing read path and persistence
+        contract stay intact, but they are owned by an invisible holder and
+        are deliberately absent from the normal Battle Record composition.
+        """
 
         form = self.turn_advice_group.layout()
         assert isinstance(form, QFormLayout)
@@ -3091,10 +3118,27 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self.turn_advice_legality_label,
             self.turn_advice_schema_version_label,
         )
+        player_labels = (
+            self.turn_advice_action_label,
+            self.turn_advice_prediction_label,
+            self.turn_advice_rationale_label,
+            self.turn_advice_warnings_label,
+        )
+        hidden_labels = tuple(field for field in bound_labels if field not in player_labels)
         for field in bound_labels:
             row_label = form.labelForField(field)
             if row_label is not None:
                 row_label.setVisible(False)
+        for field in hidden_labels:
+            form.setRowVisible(field, False)
+
+        hidden_holder = QWidget(self)
+        hidden_holder.setVisible(False)
+        hidden_layout = QVBoxLayout(hidden_holder)
+        hidden_layout.setContentsMargins(0, 0, 0, 0)
+        for field in hidden_labels:
+            hidden_layout.addWidget(field)
+        self._turn_advice_hidden_labels = hidden_holder
 
         self.turn_advice_primary_card = QWidget()
         self.turn_advice_primary_card.setObjectName("advicePrimaryCard")
@@ -3115,23 +3159,6 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         primary_layout.addWidget(primary_heading)
         primary_layout.addWidget(self.turn_advice_action_label)
 
-        # Gemini V2 Bundle 6: additive, hidden by default (see the
-        # visibility toggle alongside ``turn_advice_warning_card`` below) --
-        # a legacy v1 row never shows this card, so v1 rendering is
-        # unchanged. recommendation_robustness is distinct from any
-        # prediction's support level; it modifies the recommended action
-        # above, so it sits directly beneath it.
-        self.turn_advice_robustness_card = QWidget()
-        self.turn_advice_robustness_card.setObjectName("adviceRobustnessCard")
-        robustness_layout = QVBoxLayout(self.turn_advice_robustness_card)
-        robustness_layout.setContentsMargins(10, 4, 10, 4)
-        robustness_layout.setSpacing(2)
-        robustness_heading = QLabel("推奨の頑健性")
-        robustness_heading.setProperty("muted", True)
-        self.turn_advice_robustness_label.setObjectName("adviceRobustness")
-        robustness_layout.addWidget(robustness_heading)
-        robustness_layout.addWidget(self.turn_advice_robustness_label)
-
         prediction_card = QWidget()
         prediction_card.setObjectName("advicePredictionCard")
         prediction_layout = QVBoxLayout(prediction_card)
@@ -3142,20 +3169,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.turn_advice_prediction_label.setObjectName("advicePrediction")
         prediction_layout.addWidget(prediction_heading)
         prediction_layout.addWidget(self.turn_advice_prediction_label)
-
-        # Additive, hidden by default (zero/one/two alternatives -- never a
-        # fabricated filler entry). Directly beneath the primary prediction
-        # it is an alternative to.
-        self.turn_advice_alternatives_card = QWidget()
-        self.turn_advice_alternatives_card.setObjectName("adviceAlternativesCard")
-        alternatives_layout = QVBoxLayout(self.turn_advice_alternatives_card)
-        alternatives_layout.setContentsMargins(10, 4, 10, 4)
-        alternatives_layout.setSpacing(2)
-        alternatives_heading = QLabel("代替の相手予測")
-        alternatives_heading.setProperty("muted", True)
-        self.turn_advice_alternatives_label.setObjectName("adviceAlternatives")
-        alternatives_layout.addWidget(alternatives_heading)
-        alternatives_layout.addWidget(self.turn_advice_alternatives_label)
+        prediction_card.setVisible(False)
+        self.turn_advice_prediction_card = prediction_card
 
         reasons_card = QWidget()
         reasons_layout = QVBoxLayout(reasons_card)
@@ -3177,45 +3192,15 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.turn_advice_warnings_label.setObjectName("adviceWarnings")
         warning_layout.addWidget(warning_heading)
         warning_layout.addWidget(self.turn_advice_warnings_label)
-
-        self.turn_advice_audit_group = QGroupBox("詳細 / AUDIT")
-        self.turn_advice_audit_group.setProperty("audit", True)
-        self.turn_advice_audit_group.setCheckable(True)
-        self.turn_advice_audit_group.setChecked(False)
-        audit_contents = QWidget()
-        audit_layout = QGridLayout(audit_contents)
-        audit_layout.setContentsMargins(2, 2, 2, 2)
-        audit_layout.setSpacing(3)
-        for index, (title, value) in enumerate(
-            (
-                ("Source", self.turn_advice_source_label),
-                ("Model", self.turn_advice_model_label),
-                ("Binding", self.turn_advice_binding_label),
-                ("Legality", self.turn_advice_legality_label),
-                ("Response Schema", self.turn_advice_schema_version_label),
-            )
-        ):
-            title_label = QLabel(title)
-            title_label.setProperty("muted", True)
-            value.setProperty("muted", True)
-            audit_layout.addWidget(title_label, index // 2, (index % 2) * 2)
-            audit_layout.addWidget(value, index // 2, (index % 2) * 2 + 1)
-        group_layout = QVBoxLayout(self.turn_advice_audit_group)
-        group_layout.setContentsMargins(7, 7, 7, 7)
-        group_layout.addWidget(audit_contents)
-        audit_contents.setVisible(False)
-        self.turn_advice_audit_group.toggled.connect(audit_contents.setVisible)
+        self.turn_advice_warning_card.setVisible(False)
 
         self.turn_advice_group.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
         form.addRow(self.turn_advice_primary_card)
-        form.addRow(self.turn_advice_robustness_card)
-        form.addRow(prediction_card)
-        form.addRow(self.turn_advice_alternatives_card)
         form.addRow(reasons_card)
+        form.addRow(prediction_card)
         form.addRow(self.turn_advice_warning_card)
-        form.addRow(self.turn_advice_audit_group)
 
     def _apply_selection_v3_composition(self) -> None:
         """Build the accepted Selection UX from the existing bound controls."""
@@ -4375,8 +4360,49 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         finally:
             self.self_switch_target_box.blockSignals(False)
 
-    def _refresh_self_switch_targets(self, current: OperatorView) -> None:
-        legal_switches = current.turn_facts.legal_switches if current.turn_facts is not None else ()
+    def _refresh_self_switch_targets(
+        self, current: OperatorView, summary: TurnStateSummaryView | None = None
+    ) -> None:
+        """Refresh the actual SELF action selector from the exact binding.
+
+        ``TurnFactsView.legal_switches`` is a legacy reviewed-facts field and
+        may be empty even after the human has confirmed the legal-switch set
+        in the Bundle 2 exact binding. An absent/mismatched confirmation is
+        deliberately kept distinct from ``CONFIRMED_NONE``.
+        """
+
+        if summary is None:
+            summary = self._bundle_c_controller.turn_state_summary()
+        confirmation = summary.legal_switch_confirmation
+        confirmation_is_current = bool(
+            confirmation is not None
+            and summary.identity is not None
+            and confirmation.identity == summary.identity
+            and summary.confirmed_state is not None
+            and confirmation.based_on_confirmed_state_id
+            == summary.confirmed_state.confirmed_state_id
+            and current.projection.current_applied_selection_id
+            == confirmation.applied_selection_id
+        )
+        if not confirmation_is_current:
+            confirmation = None
+
+        if confirmation is None:
+            legal_switches: tuple[str, ...] = ()
+            unavailable_message = "交代候補が未確認です"
+        elif confirmation.status is LegalSwitchStatus.CONFIRMED_NONE:
+            legal_switches = ()
+            unavailable_message = "交代できるポケモンはいません"
+        else:
+            # The exact confirmation is the source of truth. The current
+            # summary's derived candidates are used only as a safety filter
+            # for active/selected-three/confirmed-fainted invariants; they
+            # never fill or replace the confirmed set.
+            safe_candidates = set(summary.legal_switch_candidates)
+            legal_switches = tuple(
+                name for name in confirmation.legal_switches if name in safe_candidates
+            )
+            unavailable_message = "" if legal_switches else "交代候補を確認してください"
         selected = (
             self.actual_action_name_box.currentText()
             if self.actual_action_type_box.currentText() == "SWITCH"
@@ -4394,7 +4420,61 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self.self_switch_target_box.blockSignals(False)
         has_legal_switch = bool(legal_switches)
         self.self_switch_target_box.setEnabled(has_legal_switch)
+        self.self_switch_unavailable_label.setText(unavailable_message)
         self.self_switch_unavailable_label.setVisible(not has_legal_switch)
+
+    @staticmethod
+    def _player_turn_advice_action(advice: TurnAdviceView) -> str:
+        if advice.unavailable_reason is not None:
+            return "Geminiの応答を使用できませんでした。再送してください。"
+        if advice.action_type == "SWITCH":
+            return f"交代 → {advice.action_name}"
+        return advice.action_name
+
+    @staticmethod
+    def _player_turn_advice_prediction(advice: TurnAdviceView) -> str:
+        if advice.structured_v2 is not None:
+            line = advice.structured_v2.opponent_prediction.primary
+            if line.category == "UNKNOWN":
+                return ""
+            prediction = line.summary.strip()
+        else:
+            prediction = advice.opponent_prediction.strip()
+            if prediction.upper() in {"UNKNOWN", "—"}:
+                return ""
+        if not prediction or any(token in prediction for token in _TECHNICAL_PREDICTION_TOKENS):
+            return ""
+        return prediction
+
+    def _render_turn_advice_player_surface(
+        self, advice: TurnAdviceView, summary: TurnStateSummaryView
+    ) -> None:
+        """Render only live decision content; keep provenance out of view."""
+
+        if advice.unavailable_reason is not None:
+            self.turn_advice_action_label.setText(
+                "Geminiの応答を使用できませんでした。再送してください。"
+            )
+            self.turn_advice_rationale_label.setText("")
+            self.turn_advice_prediction_label.setText("")
+            self.turn_advice_prediction_card.setVisible(False)
+            self.turn_advice_warning_card.setVisible(False)
+            return
+
+        self.turn_advice_action_label.setText(self._player_turn_advice_action(advice))
+        self.turn_advice_rationale_label.setText(advice.rationale.strip())
+        prediction = self._player_turn_advice_prediction(advice)
+        self.turn_advice_prediction_label.setText(prediction)
+        self.turn_advice_prediction_card.setVisible(bool(prediction))
+
+        actionable_warning = ""
+        if (
+            advice.action_type == "SWITCH"
+            and summary.legal_switch_confirmation is None
+        ):
+            actionable_warning = "交代候補を確認してください"
+        self.turn_advice_warnings_label.setText(actionable_warning)
+        self.turn_advice_warning_card.setVisible(bool(actionable_warning))
 
     def _capture_action_result_draft(self) -> tuple[str, str, bool, str, str, str]:
         return (
@@ -4808,48 +4888,33 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
         # The v5 right rail never changes hierarchy: Gemini owns the upper
         # slot even while empty/waiting, with compact INTEL directly below.
+        status = self._bundle_c_controller.rich_turn_advice_gemini_status()
+        # Keep the existing controller-bound status values populated for the
+        # hidden audit owner, but never compose them into the live player
+        # panel. Success is represented by the advice itself; failures use
+        # one concise recovery message below.
+        status_text = _RICH_STATUS_LABELS.get(status.status, status.status)
+        self.rich_gemini_status_label.setText(f"送信状態: {status_text}")
+        self.rich_gemini_denial_label.setText("")
+        failure_message = _TURN_ADVICE_PLAYER_FAILURE_MESSAGES.get(status.status)
+        advice_visible = (
+            projection.primary_cta in {"RECORD_ACTUAL_ACTION", "NEXT_TURN"}
+            and current.turn_advice is not None
+        )
         self.rich_gemini_group.setVisible(True)
-        advice_visible = projection.primary_cta in {"RECORD_ACTUAL_ACTION", "NEXT_TURN"}
         self.gemini_empty_label.setVisible(not advice_visible)
         self.turn_advice_group.setVisible(advice_visible)
-        self.turn_advice_warning_card.setVisible(
-            current.turn_advice is not None and bool(current.turn_advice.warnings)
-        )
-        # Gemini V2 Bundle 6: additive cards, visible only for a row whose
-        # structured v2 detail actually decoded (never for a legacy v1 row,
-        # and never fabricated for a v2 row whose advice_json failed to
-        # decode -- see ``ui/controller.py``'s operator-view construction).
-        structured_v2 = current.turn_advice.structured_v2 if current.turn_advice else None
-        self.turn_advice_robustness_card.setVisible(structured_v2 is not None)
-        self.turn_advice_alternatives_card.setVisible(
-            structured_v2 is not None and bool(structured_v2.opponent_prediction.alternatives)
-        )
-        self.gemini_empty_label.setText(
-            "Turn撮影後に確認へ"
-            if projection.primary_cta == "START_TURN_CAPTURE"
-            else "SEND TURN TO GEMINI 待ち"
-        )
-        status = self._bundle_c_controller.rich_turn_advice_gemini_status()
-        status_text = _RICH_STATUS_LABELS.get(status.status, status.status)
-        # Surface the exact sanitized validator code instead of leaving the
-        # operator with only the generic INVALID_PAYLOAD bucket -- but only
-        # when a finer reason actually exists; the plain generic-marker case
-        # (no colon-suffixed detail) keeps the unchanged label as before.
-        if (
-            status.status == "INVALID_PAYLOAD"
-            and status.sanitized_failure
-            and status.sanitized_failure != "GEMINI_TURN_RESULT_INVALID_PAYLOAD"
-        ):
-            status_text = f"{status_text} ({status.sanitized_failure})"
-        self.rich_gemini_status_label.setText(f"送信状態: {status_text}")
-        if summary.provider_ready:
-            self.rich_gemini_denial_label.setText("Gate: provider-ready")
-        else:
-            reasons = ", ".join(
-                self._bundle_c_controller.denial_reason_message(code)
-                for code in summary.provider_ready_denial_reasons
+        if not advice_visible:
+            self.gemini_empty_label.setText(
+                failure_message
+                or (
+                    "Turn撮影後に確認へ"
+                    if projection.primary_cta == "START_TURN_CAPTURE"
+                    else "SEND TURN TO GEMINI 待ち"
+                )
             )
-            self.rich_gemini_denial_label.setText(f"Gate: {reasons or '確認中'}")
+        if current.turn_advice is not None:
+            self._render_turn_advice_player_surface(current.turn_advice, summary)
         self._refresh_turn_ocr_status_indicator()
 
         gemini_button = getattr(self, "_bundle_c_gemini_send_button", None)
@@ -4887,7 +4952,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._refresh_opponent_action_assist(
             current, species=species, match_facts=match_facts
         )
-        self._refresh_self_switch_targets(current)
+        self._refresh_self_switch_targets(current, summary)
         self._update_v5_action_disclosure()
         self._sync_parity_action_selection()
         self.live_current_state_label.setText(

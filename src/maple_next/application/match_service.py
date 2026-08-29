@@ -91,7 +91,11 @@ class MatchApplication(BattleApplication):
                 message="MATCH_EXPORTED",
                 provider_send_enabled=False,
             )
-        if session.state in {BattleState.BATTLE_READY, BattleState.TURN_RECORDED}:
+        if session.state in {
+            BattleState.BATTLE_READY,
+            BattleState.TURN_REVIEWED,
+            BattleState.TURN_RECORDED,
+        }:
             return replace(
                 projection,
                 secondary_actions=(*projection.secondary_actions, "END_MATCH"),
@@ -112,7 +116,11 @@ class MatchApplication(BattleApplication):
             existing = self.repository.get_match_outcome(session.session_id)
             if existing is not None:
                 raise DomainError("MATCH_OUTCOME_ALREADY_SET")
-            if session.state not in {BattleState.BATTLE_READY, BattleState.TURN_RECORDED}:
+            if session.state not in {
+                BattleState.BATTLE_READY,
+                BattleState.TURN_REVIEWED,
+                BattleState.TURN_RECORDED,
+            }:
                 raise DomainError("MATCH_END_NOT_ALLOWED_IN_CURRENT_STATE")
 
             final_revision = session.battle_revision + 1

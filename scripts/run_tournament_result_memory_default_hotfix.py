@@ -1,6 +1,6 @@
 """Run the prepared Result Memory Default hotfix against the real production checkout.
 
-This wrapper requires the real production cwd, reads the prepared V2 patcher
+This wrapper requires the real production cwd, reads the prepared V3 patcher
 from the dedicated tournament branch, overrides only the patcher's ROOT
 binding in memory, and executes it without writing the patcher into the repo.
 
@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 REMOTE_REF = "origin/tournament-production-20260829"
-PATCHER_PATH = "scripts/apply_tournament_result_memory_default_hotfix_v2.py"
+PATCHER_PATH = "scripts/apply_tournament_result_memory_default_hotfix_v3.py"
 EXPECTED_PRODUCTION_ROOT = Path(r"C:\work\maple-next")
 AUTHORIZED_TARGETS = (
     Path("src/maple_next/ui/battle_record_ui.py"),
@@ -54,7 +54,7 @@ def main() -> int:
     source = source.replace(ROOT_BINDING, f"ROOT = Path({str(root)!r})", 1)
 
     namespace: dict[str, object] = {
-        "__name__": "_maple_prepared_result_memory_hotfix_v2",
+        "__name__": "_maple_prepared_result_memory_hotfix_v3",
         "__file__": str(root / PATCHER_PATH),
     }
     exec(compile(source, PATCHER_PATH, "exec"), namespace)

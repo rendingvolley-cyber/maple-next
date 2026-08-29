@@ -51,8 +51,12 @@ def test_pre_v7_rich_contract_dispatches_to_v1_parser(historical_version: str) -
     assert select_response_parser_version(historical_version) == "v1"
 
 
-def test_v7_rich_contract_dispatches_to_v2_parser() -> None:
-    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v7"
+def test_historical_v7_rich_contract_dispatches_to_v2_parser() -> None:
+    assert select_response_parser_version("maple-turn-advice.v7") == "v2"
+
+
+def test_current_v8_rich_contract_dispatches_to_v2_parser() -> None:
+    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v8"
     assert select_response_parser_version(RICH_STATE_REQUEST_CONTRACT_VERSION) == "v2"
 
 

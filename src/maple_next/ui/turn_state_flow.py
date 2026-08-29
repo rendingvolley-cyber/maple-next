@@ -28,6 +28,7 @@ already-validated human confirmation supplied by the caller.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -45,7 +46,7 @@ from maple_next.domain.battle_events import (
     StageEventPreset,
     apply_stage_event,
 )
-from maple_next.domain.enums import ActionType, ResultDisposition
+from maple_next.domain.enums import ActionOrder, ActionType, ResultDisposition
 from maple_next.domain.legal_switches import (
     LegalSwitchConfirmation,
     LegalSwitchError,
@@ -53,6 +54,7 @@ from maple_next.domain.legal_switches import (
     derive_legal_switch_candidates,
     is_confirmed_fainted,
 )
+from maple_next.domain.mega_evolution import MegaBattleState, MegaSide
 from maple_next.domain.opponent_intel import (
     MatchOpponentFacts,
     possible_abilities_for_species,
@@ -451,6 +453,11 @@ class TurnStateFlowController(MatchFlowController):
             turn_gemini_adapter,
         )
         self._rich_turn_gemini_adapter = rich_turn_gemini_adapter
+
+    def mega_battle_state(self) -> MegaBattleState:
+        """Read the canonical persisted Mega state for the active match."""
+
+        return self._application.mega_battle_state()
 
     # -- Battle Record v5 match-scoped opponent ability memory ---------------
 
@@ -1225,6 +1232,7 @@ class TurnStateFlowController(MatchFlowController):
         opponent_side_delta: SideDelta | None = None,
         weather_delta: FieldDelta[str] | None = None,
         terrain_delta: FieldDelta[str] | None = None,
+        confirmed_mega_sides: tuple[MegaSide, ...] = (),
     ) -> OperatorView:
         """Atomically record the legacy action and the Bundle A result.
 
@@ -1292,6 +1300,47 @@ class TurnStateFlowController(MatchFlowController):
             return self.refresh()
 
         before_error = self._error_message
+        rich_transaction_id = str(uuid4())
+        if confirmed_mega_sides:
+            # The base UI controller owns the legacy rich boundary, but this
+            # narrow Mega extension stays in the allowed Bundle C flow file:
+            # validate the same typed action/order values and invoke the
+            # application boundary with the additional typed confirmations.
+            # No separate persistence command is introduced.
+            try:
+                typed_action = ActionType(action_type.strip())
+                normalized_opponent_type = opponent_action_type.strip()
+                typed_opponent_type = (
+                    ActionType(normalized_opponent_type)
+                    if normalized_opponent_type
+                    else None
+                )
+                typed_opponent_name = (
+                    opponent_action_name.strip()
+                    if typed_opponent_type is not None and opponent_action_name is not None
+                    else None
+                )
+                typed_order = ActionOrder(action_order.strip() or ActionOrder.UNKNOWN.value)
+                self._application.record_rich_actual_action(
+                    action_type=typed_action,
+                    action_name=action_name.strip(),
+                    human_confirmed=human_confirmed,
+                    opponent_action_type=typed_opponent_type,
+                    opponent_action_name=typed_opponent_name,
+                    action_order=typed_order,
+                    completion_identity=delta.identity,
+                    action_result_delta=delta,
+                    rich_transaction_id=rich_transaction_id,
+                    confirmed_mega_sides=confirmed_mega_sides,
+                )
+            except (ValueError, DomainError) as error:
+                self._error_message = f"行動結果を保存できません: {error}"
+            except (sqlite3.Error, RuntimeError):
+                self._error_message = "実際の行動の保存に失敗しました。履歴は変更されていません。"
+            else:
+                self._error_message = None
+            return self.refresh()
+
         view = super().record_rich_actual_action(
             action_type=action_type,
             action_name=action_name,
@@ -1301,7 +1350,7 @@ class TurnStateFlowController(MatchFlowController):
             action_order=action_order,
             completion_identity=delta.identity,
             action_result_delta=delta,
-            rich_transaction_id=str(uuid4()),
+            rich_transaction_id=rich_transaction_id,
         )
         if view.error_message is not None and view.error_message != before_error:
             return view
@@ -1543,8 +1592,8 @@ class TurnStateFlowController(MatchFlowController):
         # ConfirmedLegalActionSelection.confirmation_id) plus an exact
         # type/name match -- never a synthetic "TYPE:NAME" string.
         action_id = matching_selection.confirmation_id
-        # Gemini V2 Bundle 6: the rich lane's contract is now ``.v7``
-        # (response schema v2) -- this injected/mock payload must match that
+        # The rich lane's current contract is ``.v8`` (response schema v2)
+        # -- this injected/mock payload must match that
         # shape exactly, the same way it always matched whatever schema was
         # current for every prior bundle. ``UNKNOWN``/``NONE``/``LOW`` mirror
         # the old ``category="UNKNOWN"`` mock semantics exactly: this manual

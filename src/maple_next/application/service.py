@@ -938,6 +938,30 @@ class BattleApplication:
             if lead not in typed_three:
                 raise DomainError("LEAD_NOT_IN_SELECTED_THREE")
 
+            # Tournament P0 / maple-team.v3. Human APPLY may intentionally
+            # differ from Gemini advice, but it must still obey the bound
+            # human-authored Selection Profile. For fixed_packages with
+            # mixing_allowed=false, any cross-package trio is invalid battle
+            # state and must fail before the first durable applied-selection
+            # write. This is defense in depth in addition to provider-result
+            # validation; it also protects manual operator override paths.
+            selection_profile = (
+                selection_facts.self_team_build.selection_profile
+                if selection_facts.self_team_build is not None
+                else None
+            )
+            if selection_profile is not None and not selection_profile.mixing_allowed:
+                matching_package = next(
+                    (
+                        package
+                        for package in selection_profile.packages
+                        if set(typed_three) == set(package.members)
+                    ),
+                    None,
+                )
+                if matching_package is None:
+                    raise DomainError("SELECTION_MIXES_FIXED_PACKAGES")
+
             backline_values = tuple(name for name in typed_three if name != lead)
             backline = (backline_values[0], backline_values[1])
             snapshot = AppliedSelectionSnapshot(

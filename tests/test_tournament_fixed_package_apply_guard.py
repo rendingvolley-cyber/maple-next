@@ -116,7 +116,9 @@ def test_fixed_package_profile_rejects_mixed_human_apply_before_write(tmp_path: 
     assert count is not None and int(count[0]) == 0
 
 
-def test_fixed_package_profile_allows_either_complete_package_as_human_override(tmp_path: Path) -> None:
+def test_fixed_package_profile_allows_either_complete_package_as_human_override(
+    tmp_path: Path,
+) -> None:
     repo, app = _ready(tmp_path)
     snapshot = app.apply_selection(
         selected_three=P1,

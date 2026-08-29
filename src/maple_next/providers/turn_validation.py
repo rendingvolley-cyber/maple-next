@@ -133,6 +133,11 @@ _RICH_STATE_PRE_V7_CONTRACT_VERSIONS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# ``.v7`` was the immediately previous rich request contract and already
+# paired with the structured response parser v2. It remains a historical
+# contract after the current request moves to ``.v8``.
+_RICH_STATE_V7_CONTRACT_VERSION = "maple-turn-advice.v7"
+
 
 def select_response_parser_version(contract_version: str) -> Literal["v1", "v2"]:
     """Trusted response-parser selection, keyed on the REQUEST/job contract only.
@@ -143,8 +148,9 @@ def select_response_parser_version(contract_version: str) -> Literal["v1", "v2"]
     and every pre-``.v7`` rich contract resolve to the v1 parser
     (:func:`~maple_next.providers.turn_response.turn_advice_body_from_dict`);
     only the current rich contract
-    (:data:`~maple_next.providers.turn_advice_rich_state.RICH_STATE_REQUEST_CONTRACT_VERSION`,
-    ``.v7``) resolves to the v2 parser
+    (historical ``.v7`` and
+    :data:`~maple_next.providers.turn_advice_rich_state.RICH_STATE_REQUEST_CONTRACT_VERSION`,
+    current ``.v8``) resolve to the v2 parser
     (:func:`~maple_next.providers.turn_response_v2.turn_advice_body_v2_from_dict`).
     Any other contract version fails closed.
     """
@@ -153,7 +159,10 @@ def select_response_parser_version(contract_version: str) -> Literal["v1", "v2"]
         return "v1"
     if contract_version in _RICH_STATE_PRE_V7_CONTRACT_VERSIONS:
         return "v1"
-    if contract_version == RICH_STATE_REQUEST_CONTRACT_VERSION:
+    if contract_version in {
+        _RICH_STATE_V7_CONTRACT_VERSION,
+        RICH_STATE_REQUEST_CONTRACT_VERSION,
+    }:
         return "v2"
     raise TurnAdviceParseError("TURN_ADVICE_CONTRACT_VERSION_UNSUPPORTED")
 

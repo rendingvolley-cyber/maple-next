@@ -165,7 +165,7 @@ def _canonical_payload(prompt: str) -> dict[str, object]:
 
 
 def test_prompt_versions_are_fixed() -> None:
-    assert SELECTION_PROMPT_VERSION == "maple-selection-prompt.v1"
+    assert SELECTION_PROMPT_VERSION == "maple-selection-prompt.v2"
     assert TURN_PROMPT_VERSION == "maple-turn-prompt.v1"
 
 
@@ -184,7 +184,7 @@ def test_selection_names_only_prompt_has_v1_policy_and_unicode_request() -> None
     payload = _canonical_payload(prompt)
 
     assert "Evaluate all six members of self_team." in prompt
-    assert "Compare multiple possible three-Pokémon combinations." in prompt
+    assert "Compare all 20 distinct three-Pokémon combinations" in prompt
     assert "all six opponent names" in prompt
     assert "input order" in prompt
     assert "one favorable matchup" in prompt

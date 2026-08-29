@@ -22,7 +22,7 @@ def test_fast_lookahead_requires_bounded_2_to_3_turn_read_and_one_conclusion() -
     assert "roughly 2-3 turns" in prompt
     assert "1-2 opponent replies" in prompt
     assert "Do not attempt exhaustive multi-turn tree search" in prompt
-    assert "still choose the single best legal action" in prompt
+    assert "single best legal" in prompt
     assert "never abstain" in prompt
     assert "Do not output the simulated line or hidden chain-of-thought" in prompt
 

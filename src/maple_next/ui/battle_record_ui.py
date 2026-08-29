@@ -3546,14 +3546,21 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         advice_grid.addWidget(QLabel("Mega予定"), 5, 0)
         self.selection_v3_advice_intended_mega = QLabel("—")
         advice_grid.addWidget(self.selection_v3_advice_intended_mega, 5, 1)
-        advice_grid.addWidget(QLabel("理由"), 6, 0)
+        advice_grid.addWidget(QLabel("選出理由"), 6, 0)
         self.selection_v3_advice_reason = QLabel("—")
         self.selection_v3_advice_reason.setWordWrap(True)
+        self.selection_v3_advice_reason.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
         advice_grid.addWidget(self.selection_v3_advice_reason, 6, 1)
-        advice_grid.addWidget(QLabel("Source / validity"), 7, 0)
+        advice_grid.addWidget(QLabel("提供元 / モデル"), 7, 0)
+        self.selection_v3_advice_provider_model = QLabel("—")
+        self.selection_v3_advice_provider_model.setWordWrap(True)
+        advice_grid.addWidget(self.selection_v3_advice_provider_model, 7, 1)
+        advice_grid.addWidget(QLabel("Source / validity"), 8, 0)
         self.selection_v3_advice_validity = QLabel("WAITING")
         self.selection_v3_advice_validity.setProperty("muted", True)
-        advice_grid.addWidget(self.selection_v3_advice_validity, 7, 1)
+        advice_grid.addWidget(self.selection_v3_advice_validity, 8, 1)
         advice_layout.addLayout(advice_grid)
         layout.addWidget(advice_card)
 
@@ -3831,7 +3838,12 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self.selection_v3_advice_package.setText(package_label)
             self.selection_v3_advice_lead.setText(advice.lead)
             self.selection_v3_advice_intended_mega.setText(advice.intended_mega or "—")
-            self.selection_v3_advice_reason.setText(advice.selection_reason or "—")
+            self.selection_v3_advice_reason.setText(
+                advice.selection_reason or "（理由情報なし）"
+            )
+            self.selection_v3_advice_provider_model.setText(
+                f"{advice_status.source_type} · {advice_status.model}"
+            )
             self.selection_v3_advice_validity.setText(
                 f"{advice_status.source_type} · {display_binding} · {display_legality}"
             )
@@ -3847,7 +3859,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self.selection_v3_advice_package.setText("—")
             self.selection_v3_advice_lead.setText("—")
             self.selection_v3_advice_intended_mega.setText("—")
-            self.selection_v3_advice_reason.setText("—")
+            self.selection_v3_advice_reason.setText("（理由情報なし）")
+            self.selection_v3_advice_provider_model.setText("—")
             if advice_status is None:
                 self.selection_v3_advice_validity.setText(
                     "UNAVAILABLE · NOT_CHECKED · NOT_CHECKED"

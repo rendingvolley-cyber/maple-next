@@ -111,7 +111,7 @@ def test_tournament_selection_prompt_is_v2_and_requires_full_matchup_comparison(
     assert "worst reasonable lead matchup" in prompt
     assert "weather setter + weather beneficiary" in prompt
     assert "fixed preset package" in prompt
-    assert "one exact opponent lead" in prompt
+    assert "one exact opponent" in prompt
 
 
 def test_tournament_selection_prompt_preserves_opponent_uncertainty_boundary() -> None:

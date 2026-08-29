@@ -126,7 +126,7 @@ def test_prompt_and_requested_schema_state_the_same_unknown_fallback() -> None:
     assert "UNKNOWN must use LOW" in line_schema["properties"]["support"]["description"]
     assert "entire opponent_prediction block" in _TURN_INITIAL_PROMPT_V2
     assert "recommended_action complete and legal" in _TURN_INITIAL_PROMPT_V2
-    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v7"
+    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v8"
     assert RESPONSE_SCHEMA_VERSION_V2 == "maple-turn-advice-response.v2"
 
 

@@ -659,9 +659,10 @@ class _SideDeltaEditor(QGroupBox):
     active identity changes only via a human-confirmed actual SWITCH action,
     computed automatically by
     :meth:`~maple_next.ui.turn_state_flow.TurnStateFlowController.compute_confirmed_switch_side_delta`
-    and never read from here (:meth:`to_side_delta` always reports
-    ``active=UNCHANGED``; the caller substitutes the computed delta when a
-    switch was confirmed).
+    and never read from here. Legacy callers retain ``active=UNCHANGED``;
+    Result Entry requests ``active=UNKNOWN`` for its intentionally unobserved
+    event-only draft, while the caller still substitutes the computed delta
+    when an explicit switch was confirmed.
     """
 
     def __init__(
@@ -806,9 +807,9 @@ class _SideDeltaEditor(QGroupBox):
 
         self.hp_field.set_fainted()
 
-    def to_side_delta(self) -> SideDelta:
+    def to_side_delta(self, *, unobserved_as_unknown: bool = False) -> SideDelta:
         return SideDelta(
-            active=FieldDelta.unchanged(),
+            active=FieldDelta.unknown(),
             hp_bucket=self.hp_field.to_delta(),
             status=self.status_field.to_delta(),
             attack_stage=self.stage_fields["attack_stage"].to_delta(),
@@ -821,7 +822,7 @@ class _SideDeltaEditor(QGroupBox):
             side_effects=self.side_effects_field.to_delta(),
         )
 
-    def reset(self) -> None:
+    def reset(self, *, unobserved_as_unknown: bool = False) -> None:
         """Identity-bound reset (00 R2 lifecycle fix): every CHANGED/
         UNKNOWN value a human entered for one Turn's result must never
         survive into the next Turn's own result-delta draft. A confirmed
@@ -839,6 +840,12 @@ class _SideDeltaEditor(QGroupBox):
         self._pending_stage_preview = {}
         for field in self.stage_fields.values():
             field.reset()
+        if unobserved_as_unknown:
+            self.hp_field.mode_box.setCurrentText("UNKNOWN")
+            self.status_field.mode_box.setCurrentText("UNKNOWN")
+            self.side_effects_field.mode_box.setCurrentText("UNKNOWN")
+            for field in self.stage_fields.values():
+                field.mode_box.setCurrentText("UNKNOWN")
 
 
 class _CollapsibleSection(QWidget):
@@ -5038,6 +5045,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._result_validation_error = ""
         self._build_move_result_candidates()
         self._project_result_events()
+        self.weather_delta_field.mode_box.setCurrentText("UNKNOWN")
+        self.terrain_delta_field.mode_box.setCurrentText("UNKNOWN")
         self._show_result_entry_page()
 
     def _on_back_to_action_entry(self, _checked: bool = False) -> None:
@@ -5288,6 +5297,16 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._result_validation_error = ""
         self.self_delta_editor.reset()
         self.opponent_delta_editor.reset()
+
+        for editor in (self.self_delta_editor, self.opponent_delta_editor):
+            editor.hp_field.mode_box.setCurrentText("UNKNOWN")
+            editor.status_field.mode_box.setCurrentText("UNKNOWN")
+            editor.side_effects_field.mode_box.setCurrentText("UNKNOWN")
+            for field in editor.stage_fields.values():
+                field.mode_box.setCurrentText("UNKNOWN")
+        self.weather_delta_field.mode_box.setCurrentText("UNKNOWN")
+        self.terrain_delta_field.mode_box.setCurrentText("UNKNOWN")
+
         for (side, field_name), value in stage_values.items():
             editor = self.self_delta_editor if side == "self" else self.opponent_delta_editor
             field = editor.stage_fields[field_name]
@@ -5304,6 +5323,22 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 editor.status_field.line.setText(str(event.value))
             elif event.kind == "faint":
                 editor.mark_fainted()
+        for candidate in self._result_candidates:
+            if self._result_candidate_decisions.get(candidate.candidate_id) != "DID_NOT_OCCUR":
+                continue
+            editor = (
+                self.self_delta_editor
+                if candidate.target_side == "self"
+                else self.opponent_delta_editor
+            )
+            if candidate.kind == "stage":
+                field = editor.stage_fields[candidate.field_name]
+                if field.mode_box.currentText() != "CHANGED":
+                    field.mode_box.setCurrentText("UNCHANGED")
+            elif candidate.kind == "status" and (
+                editor.status_field.mode_box.currentText() != "CHANGED"
+            ):
+                editor.status_field.mode_box.setCurrentText("UNCHANGED")
         self.record_self_faint_button.setChecked(
             any(
                 event.kind == "faint" and event.target_side == "self"
@@ -5433,13 +5468,17 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 side="self", destination_pokemon_name=action_name
             )
         else:
-            self_side_delta = self.self_delta_editor.to_side_delta()
+            self_side_delta = self.self_delta_editor.to_side_delta(
+                unobserved_as_unknown=self._result_entry_active
+            )
         if opponent_type == "SWITCH" and opponent_name:
             opponent_side_delta = self._bundle_c_controller.compute_confirmed_switch_side_delta(
                 side="opponent", destination_pokemon_name=opponent_name
             )
         else:
-            opponent_side_delta = self.opponent_delta_editor.to_side_delta()
+            opponent_side_delta = self.opponent_delta_editor.to_side_delta(
+                unobserved_as_unknown=self._result_entry_active
+            )
 
         view = self._bundle_c_controller.record_actual_action(
             action_type=action_type,

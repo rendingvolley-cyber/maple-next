@@ -467,19 +467,20 @@ def test_provider_ready_request_fails_closed_for_unpinned_match(tmp_path: Path) 
 # =========================================================================
 
 
-def test_request_contract_still_carries_rules_context_after_v6() -> None:
-    """Bundle 5 advanced the contract to v6, Bundle 6 to v7; Bundle 4's field is unchanged.
+def test_request_contract_still_carries_rules_context_after_v8() -> None:
+    """Bundle 5 advanced to v6, Bundle 6 to v7, and Mega to v8.
 
-    The version constant moved (``.v5`` -> ``.v6`` -> ``.v7``) because Bundle
-    5 added exactly one new top-level field and Bundle 6 changed only the
-    response-side contract (prompt/schema version), never a request field.
+    Bundle 4's field is unchanged.
+
+    The version constant moved (``.v5`` -> ``.v6`` -> ``.v7`` -> ``.v8``)
+    because Bundle 5 added one top-level field and Mega added actual state.
     Bundle 4's ``rules_context`` -- its presence, its schema version, and
     its content -- is untouched, which the assertions below and
     ``test_canonical_request_carries_rules_context_and_
     all_bundle_1_to_3_fields`` continue to prove.
     """
 
-    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v7"
+    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v8"
 
 
 def test_canonical_request_carries_rules_context_and_all_bundle_1_to_3_fields(

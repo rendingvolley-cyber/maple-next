@@ -218,6 +218,13 @@ LOW support. A POPULATION_PRIOR line must never use HIGH support. Naming a
 support_basis, even CONFIRMED_MATCH, describes how well-supported your inference is --
 it never means the predicted future action itself is confirmed.
 
+Never attach NONE, blank, UNKNOWN, or an invented support_basis/support value to a
+concrete prediction category. If no allowed non-NONE basis and compatible support level
+actually supports the prediction, emit the entire opponent_prediction block as exactly
+one canonical UNKNOWN primary (specific_action null, support_basis NONE, support LOW,
+alternatives empty). Keep the independently chosen recommended_action complete and legal;
+prediction uncertainty is not a reason to omit or corrupt the primary recommendation.
+
 Set a line's specific_action to a concrete move or Pokémon name only when support is not
 LOW and the exact name is grounded either in confirmed current-match battle memory or in
 the pinned opponent_intel_context's matched move/species list -- never from general

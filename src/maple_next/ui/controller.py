@@ -35,6 +35,10 @@ class AdviceView:
     lead: str
     source_type: str = "MOCK"
     is_mock: bool = True
+    chosen_package: str | None = None
+    chosen_package_name: str | None = None
+    intended_mega: str | None = None
+    selection_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,6 +466,14 @@ class SelectionFlowController:
                 lead=cast(str, stored_advice["lead"]),
                 source_type=source_type,
                 is_mock=source_type != "GEMINI",
+                chosen_package=cast(str | None, stored_advice.get("chosen_package")),
+                chosen_package_name=cast(
+                    str | None, stored_advice.get("chosen_package_name")
+                ),
+                intended_mega=cast(str | None, stored_advice.get("intended_mega")),
+                selection_reason=cast(
+                    str | None, stored_advice.get("selection_reason")
+                ),
             )
         if projection.current_applied_selection_id is not None:
             stored_selection = self._repository.get_applied_selection(
@@ -555,10 +567,25 @@ class SelectionFlowController:
         )
 
     def new_match(self) -> OperatorView:
-        return self._run_domain_command(
+        view = self._run_domain_command(
             self._application.new_match,
             "対戦の作成に失敗しました。新しいsessionは作成されていません。",
         )
+        if view.projection.session_state == "SELECTION_OPEN" and view.error_message is None:
+            self.clear_gemini_operator_state()
+            return self.refresh()
+        return view
+
+    def clear_gemini_operator_state(self) -> None:
+        """Clear process-local Gemini display state at a New Match boundary.
+
+        Durable history stays untouched. Renderers additionally bind any
+        remaining adapter state to the active identity before displaying it.
+        """
+
+        for adapter in (self._gemini_adapter, getattr(self, "_turn_gemini_adapter", None)):
+            if adapter is not None:
+                adapter.clear_operator_state()
 
     def confirm_selection_facts(
         self,
@@ -655,15 +682,22 @@ class SelectionFlowController:
 
         return self._application.gemini_selection_resend_eligible()
 
+    def gemini_selection_progress(self) -> str:
+        """Current sanitized Selection cascade progress for operator display."""
+
+        return self._gemini_adapter.progress_message if self._gemini_adapter else ""
+
     def send_selection_advice_to_gemini(
         self,
         *,
         on_result: Callable[[OperatorView], None],
+        on_progress: Callable[[OperatorView], None] | None = None,
     ) -> OperatorView:
         """Human-only explicit send. Must only be invoked from a trusted gate.
 
         Creates exactly one immutable job and dispatches its bounded provider policy
-        call off the UI thread, and never auto-applies or auto-retries. The
+        cascade off the UI thread, and never auto-applies or creates a new
+        human command. The
         provider result — success or failure — arrives later via
         ``on_result`` once the strict binding contract has been applied (or
         rejected) on the UI thread.
@@ -691,7 +725,11 @@ class SelectionFlowController:
         def handle_applied(disposition: ResultDisposition) -> None:
             nonlocal callback_already_ran
             callback_already_ran = True
-            if disposition is not ResultDisposition.APPLIED:
+            if disposition is ResultDisposition.INVALID_REJECTED:
+                self._error_message = describe_gemini_failure("GEMINI_RESULT_INVALID")
+            elif disposition is ResultDisposition.STALE_REJECTED:
+                self._error_message = describe_gemini_failure("GEMINI_RESULT_STALE")
+            elif disposition is not ResultDisposition.APPLIED:
                 self._error_message = "Gemini Selection Adviceを適用できませんでした。"
             else:
                 self._error_message = None
@@ -703,11 +741,17 @@ class SelectionFlowController:
             self._error_message = describe_gemini_failure(reason)
             on_result(self.refresh())
 
+        def handle_progress() -> None:
+            self._error_message = None
+            if on_progress is not None:
+                on_progress(self.refresh())
+
         try:
             self._gemini_adapter.send(
                 self._application,
                 on_applied=handle_applied,
                 on_failed=handle_failed,
+                on_progress=handle_progress,
             )
         except DomainError as error:
             self._error_message = _domain_message(error)

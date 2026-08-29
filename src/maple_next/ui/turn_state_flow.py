@@ -220,10 +220,42 @@ class GeminiRichTurnAdviceAdapter:
         self.last_source_type: str | None = None
         self.last_disposition: ResultDisposition | None = None
         self.last_failure_reason: str | None = None
+        #: Sanitized reason from the just-persisted async_job_results audit
+        #: row (see BattleApplication.apply_rich_turn_advice_result), set
+        #: only for the INVALID_REJECTED disposition. May carry the exact
+        #: validator token beyond the generic "INVALID_PAYLOAD" marker --
+        #: it is always a fixed sanitized code the application layer itself
+        #: chose to persist, never anything read back from the raw provider
+        #: response.
+        self.last_invalid_payload_reason: str | None = None
+        self._operator_identity: tuple[str, str, int] | None = None
+        self._operator_state_invalidated = False
 
     @property
     def in_flight(self) -> bool:
         return self._in_flight
+
+    def clear_operator_state(self) -> None:
+        self.last_job_id = None
+        self.last_model = None
+        self.last_source_type = None
+        self.last_disposition = None
+        self.last_failure_reason = None
+        self.last_invalid_payload_reason = None
+        self._operator_identity = None
+        self._operator_state_invalidated = True
+
+    def operator_state_matches(
+        self, *, session_id: str | None, match_id: str | None, generation: int | None
+    ) -> bool:
+        if self._operator_state_invalidated:
+            return False
+        return self._operator_identity is None or (
+            session_id is not None
+            and match_id is not None
+            and generation is not None
+            and self._operator_identity == (session_id, match_id, generation)
+        )
 
     @property
     def uses_injected_transport(self) -> bool:
@@ -245,10 +277,19 @@ class GeminiRichTurnAdviceAdapter:
             on_failed("GEMINI_TURN_DISPATCH_ALREADY_IN_FLIGHT")
             return
 
-        self.last_model = None
-        self.last_source_type = None
-        self.last_disposition = None
-        self.last_failure_reason = None
+        self.clear_operator_state()
+        self._operator_state_invalidated = False
+        projection = application.projection()
+        if (
+            projection.session_id is not None
+            and projection.match_id is not None
+            and projection.generation is not None
+        ):
+            self._operator_identity = (
+                projection.session_id,
+                projection.match_id,
+                projection.generation,
+            )
 
         try:
             config = self._load_config()
@@ -313,6 +354,18 @@ class GeminiRichTurnAdviceAdapter:
             elif disposition is ResultDisposition.STALE_REJECTED:
                 application.fail_turn_advice_job(job.job_id, "GEMINI_TURN_RESULT_STALE")
             else:
+                if disposition is ResultDisposition.INVALID_REJECTED:
+                    # apply_rich_turn_advice_result already persisted a
+                    # sanitized reason (plain "INVALID_PAYLOAD" or, when the
+                    # rejection came from a known legality/semantic/schema
+                    # validator, "INVALID_PAYLOAD:<fixed sanitized token>")
+                    # into this same job's audit row. Read it back so the
+                    # operator sees the exact reason instead of only the
+                    # generic marker -- never anything derived from the raw
+                    # provider response itself.
+                    audits = application.repository.result_audits(job.job_id)
+                    if audits:
+                        self.last_invalid_payload_reason = audits[-1][1]
                 application.fail_turn_advice_job(job.job_id, "GEMINI_TURN_RESULT_INVALID")
             on_applied(disposition)
 
@@ -788,6 +841,7 @@ class TurnStateFlowController(MatchFlowController):
         opponent_side: SideState | None = None,
         weather: Known[str] | None = None,
         terrain: Known[str] | None = None,
+        legal_switch_selection: tuple[str, ...] | None = None,
     ) -> OperatorView:
         """Confirm legacy Turn facts, then persist the Bundle A rich state.
 
@@ -803,6 +857,16 @@ class TurnStateFlowController(MatchFlowController):
         switch, bound to that exact Turn identity. A failure in the legacy
         step (validation, staleness, missing applied selection) leaves
         every rich-state table untouched.
+
+        ``legal_switch_selection``, when supplied, is the EXACT set of
+        legal-switch names the operator had visibly selected in the UI at
+        the moment of this click (a candidate prefill the operator may have
+        edited) -- never re-derived here. This same click persists it as
+        the final ``CONFIRMED_NONEMPTY``/``CONFIRMED_NONE`` legal-switch
+        confirmation for the binding just created above, atomically with
+        the rest of this factual revision. ``None`` (every caller that
+        predates this parameter) leaves legal-switch confirmation
+        untouched, exactly as before.
         """
 
         before_error = self._error_message
@@ -893,8 +957,43 @@ class TurnStateFlowController(MatchFlowController):
                 self._repository.append_confirmed_legal_action_selection(selection)
             self._save_pokemon_local_memory(identity, "SELF", self_side)
             self._save_pokemon_local_memory(identity, "OPPONENT", opponent_side)
+        if legal_switch_selection is not None:
+            self._confirm_legal_switch_selection_for_new_state(legal_switch_selection)
         self._error_message = None
         return self.refresh()
+
+    def _confirm_legal_switch_selection_for_new_state(
+        self, legal_switch_selection: tuple[str, ...]
+    ) -> None:
+        """CONFIRM TURN FACTS also persists exactly the operator's visible
+        legal-switch selection for the ``ConfirmedTurnState`` binding just
+        created -- the same human confirmation action, no redundant second
+        click. Never re-derives a set of its own: an operator-facing
+        candidate PREFILL is not itself sufficient final confirmation
+        (unknown/absent HP must never be silently promoted to
+        CONFIRMED_NONEMPTY), so this only ever writes back what was already
+        displayed and possibly edited before the click.
+
+        Runs only after the state (and the fresh local-memory rows) are
+        durably committed, since the write path re-derives/validates the
+        exact same binding fresh through the repository. If this write
+        fails closed (stale binding, a selection outside selected_three, a
+        confirmed-fainted member, the active itself, ...), the binding
+        simply stays NOT_CAPTURED_OR_UNRESOLVED -- Turn facts remain
+        confirmed, but the revision is not presented as SEND-ready.
+        """
+
+        status = (
+            LegalSwitchStatus.CONFIRMED_NONEMPTY
+            if legal_switch_selection
+            else LegalSwitchStatus.CONFIRMED_NONE
+        )
+        try:
+            self._application.confirm_legal_switches(
+                legal_switches=legal_switch_selection, status=status, human_confirmed=True
+            )
+        except DomainError:
+            return
 
     def _build_opponent_entry_event(
         self,
@@ -988,6 +1087,23 @@ class TurnStateFlowController(MatchFlowController):
     def stage_event_presets() -> tuple[StageEventPreset, ...]:
         return STAGE_EVENT_PRESETS
 
+    def stage_known_values(self, *, side: str) -> dict[str, Known[int]]:
+        """Read-only: the raw current-confirmed ``Known[int]`` per stage
+        field, without collapsing UNKNOWN to 0 -- callers that must not
+        silently assume a baseline (the direct stage-rank editor) read this
+        instead of the internal ``_stage_value``-collapsed form used by
+        preset math."""
+
+        summary = self.turn_state_summary()
+        if summary.confirmed_state is None:
+            return dict.fromkeys(STAGE_FIELD_NAMES, Known.unknown())
+        side_state = (
+            summary.confirmed_state.self_side
+            if side == "self"
+            else summary.confirmed_state.opponent_side
+        )
+        return {name: getattr(side_state, name) for name in STAGE_FIELD_NAMES}
+
     def preview_stage_event(
         self, *, side: str, preset_key: str
     ) -> dict[str, tuple[int, int]]:
@@ -1064,6 +1180,16 @@ class TurnStateFlowController(MatchFlowController):
         workbench. Read-only; never itself a confirmation."""
 
         return self._application.derive_legal_switch_candidates_for_current_turn()
+
+    def derive_legal_switch_candidates_for_active(
+        self, candidate_active_name: str
+    ) -> tuple[str, ...]:
+        """Pre-confirmation prefill aid, usable before Turn facts are even
+        confirmed: candidates for whatever active Pokemon is currently
+        displayed/being edited. Read-only; never itself a confirmation --
+        see :meth:`confirm_turn_facts`'s ``legal_switch_selection``."""
+
+        return self._application.derive_legal_switch_candidates_for_active(candidate_active_name)
 
     def confirm_legal_switches(
         self, *, legal_switches: tuple[str, ...], status: LegalSwitchStatus
@@ -1278,6 +1404,18 @@ class TurnStateFlowController(MatchFlowController):
             return RichTurnAdviceGeminiStatusView(
                 status="UNAVAILABLE", source_type="—", model="—", sanitized_failure=""
             )
+        projection = self._application.projection()
+        if not adapter.operator_state_matches(
+            session_id=projection.session_id,
+            match_id=projection.match_id,
+            generation=projection.generation,
+        ):
+            return RichTurnAdviceGeminiStatusView(
+                status="IDLE",
+                source_type=FAKE_TURN_ADVICE_SOURCE_TYPE,
+                model="—",
+                sanitized_failure="",
+            )
         if adapter.in_flight:
             return RichTurnAdviceGeminiStatusView(
                 status="PENDING",
@@ -1299,16 +1437,49 @@ class TurnStateFlowController(MatchFlowController):
                 model=adapter.last_model or "—",
                 sanitized_failure="",
             )
-        if adapter.last_disposition is not None:
+        # Truthful, disposition-specific status instead of one collapsed
+        # "STALE_OR_INVALID" bucket -- the disposition already distinguishes
+        # these cases (see application/service.py's binding checks vs. its
+        # response-validation try/except), this just stops discarding that
+        # distinction before it reaches the operator.
+        if adapter.last_disposition is ResultDisposition.STALE_REJECTED:
             return RichTurnAdviceGeminiStatusView(
-                status="STALE_OR_INVALID",
+                status="STALE",
                 source_type=adapter.last_source_type or FAKE_TURN_ADVICE_SOURCE_TYPE,
                 model=adapter.last_model or "—",
                 sanitized_failure="GEMINI_TURN_RESULT_STALE",
             )
+        if adapter.last_disposition is ResultDisposition.INVALID_REJECTED:
+            return RichTurnAdviceGeminiStatusView(
+                status="INVALID_PAYLOAD",
+                source_type=adapter.last_source_type or FAKE_TURN_ADVICE_SOURCE_TYPE,
+                model=adapter.last_model or "—",
+                sanitized_failure=(
+                    adapter.last_invalid_payload_reason or "GEMINI_TURN_RESULT_INVALID_PAYLOAD"
+                ),
+            )
+        if adapter.last_disposition is ResultDisposition.DUPLICATE_IGNORED:
+            return RichTurnAdviceGeminiStatusView(
+                status="REJECTED",
+                source_type=adapter.last_source_type or FAKE_TURN_ADVICE_SOURCE_TYPE,
+                model=adapter.last_model or "—",
+                sanitized_failure="GEMINI_TURN_RESULT_DUPLICATE",
+            )
+        if adapter.last_disposition is not None:
+            return RichTurnAdviceGeminiStatusView(
+                status="REJECTED",
+                source_type=adapter.last_source_type or FAKE_TURN_ADVICE_SOURCE_TYPE,
+                model=adapter.last_model or "—",
+                sanitized_failure=str(adapter.last_disposition),
+            )
         return RichTurnAdviceGeminiStatusView(
             status="IDLE", source_type=FAKE_TURN_ADVICE_SOURCE_TYPE, model="—", sanitized_failure=""
         )
+
+    def clear_gemini_operator_state(self) -> None:
+        super().clear_gemini_operator_state()
+        if self._rich_turn_gemini_adapter is not None:
+            self._rich_turn_gemini_adapter.clear_operator_state()
 
     def send_rich_turn_advice_to_gemini(
         self,

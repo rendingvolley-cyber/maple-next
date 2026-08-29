@@ -12,6 +12,7 @@ and after that off-thread call.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Protocol
@@ -19,6 +20,7 @@ from uuid import uuid4
 
 from maple_next.application.service import BattleApplication, DomainError
 from maple_next.domain.enums import ResultDisposition
+from maple_next.domain.team_build import TeamSelectionProfile
 from maple_next.providers.selection_request import SelectionAdviceRequest
 from maple_next.providers.transport import (
     DEFAULT_SELECTION_FALLBACK_MODEL,
@@ -58,6 +60,7 @@ class _EnvelopeFactory(Protocol):
 
 _EXACT_FAILURE_CODES = frozenset(
     {
+        "GEMINI_SELECTION_NOT_AUTHORIZED",
         "GEMINI_API_KEY_MISSING",
         "GEMINI_MODEL_MISSING",
         "GEMINI_SELECTION_MODELS_NOT_DISTINCT",
@@ -87,8 +90,13 @@ _FALLBACK_REASONS = frozenset(
         "MODEL_CAPACITY_EXHAUSTED",
     }
 )
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+SELECTION_HARD_DEADLINE_MS = 20_000
+SELECTION_PER_ATTEMPT_TIMEOUT_MS = 7_500
 
 _FAILURE_MESSAGES = {
+    "GEMINI_SELECTION_NOT_AUTHORIZED": "Real Selection Adviceはまだ承認されていません。",
     "GEMINI_API_KEY_MISSING": "Gemini APIキーが設定されていないため送信できません。",
     "GEMINI_MODEL_MISSING": "Geminiのmodel設定が空です。",
     "GEMINI_SELECTION_MODELS_NOT_DISTINCT": (
@@ -100,7 +108,7 @@ _FAILURE_MESSAGES = {
     "FAKE_TRANSPORT_NO_RESPONSE_CONFIGURED": "テスト用transportに応答が設定されていません。",
     "GEMINI_DISPATCH_ALREADY_IN_FLIGHT": "Gemini Selection Adviceは処理中です。",
     "GEMINI_DISPATCH_BLOCKED": "現在のSelection identityでは送信を開始できません。",
-    "GEMINI_RESULT_INVALID": "Gemini Selection Adviceが合法性検証を通過しませんでした。",
+    "GEMINI_RESULT_INVALID": "Gemini推薦が現在の構築選出ルールと一致しませんでした。",
     "GEMINI_RESULT_STALE": "Gemini Selection Adviceは現在のSelection identityと一致しません。",
     "GEMINI_SELECTION_ATTEMPT_CONSUMED": (
         "このSelectionではGemini送信を実行済みです。再送できません。"
@@ -126,13 +134,19 @@ def sanitize_gemini_failure(reason: object) -> str:
 
 
 def is_selection_fallback_eligible(reason: object) -> bool:
-    """Narrowly classify positively identified quota/rate/capacity exhaustion."""
+    """Classify only tournament-safe transient failures for model fallback."""
 
     sanitized = sanitize_gemini_failure(reason)
+    if sanitized == "GEMINI_TIMEOUT" or sanitized.startswith("GEMINI_NETWORK_ERROR"):
+        return True
     if not sanitized.startswith("GEMINI_HTTP_ERROR:"):
         return False
     fields = sanitized.split("|")
-    if fields[0] == "GEMINI_HTTP_ERROR:429":
+    try:
+        status = int(fields[0].split(":", 1)[1])
+    except (IndexError, ValueError):
+        return False
+    if status in _TRANSIENT_HTTP_STATUSES:
         return True
     classifications = dict(field.split("=", 1) for field in fields[1:] if "=" in field)
     return (
@@ -163,12 +177,24 @@ def _safe_display_token(value: object) -> str:
 def _allowlisted_selection_payload(
     payload: object,
     self_team: tuple[str, ...],
+    selection_profile: TeamSelectionProfile | None = None,
 ) -> dict[str, object]:
     """Reject extra keys and discard arbitrary values before DB/UI handling."""
 
     if not isinstance(payload, dict):
         return {}
-    if set(payload) != {"selected_three", "lead"}:
+    expected_keys = (
+        {
+            "chosen_package",
+            "selected_three",
+            "lead",
+            "intended_mega",
+            "selection_reason",
+        }
+        if selection_profile is not None
+        else {"selected_three", "lead"}
+    )
+    if set(payload) != expected_keys:
         return {}
     safe: dict[str, object] = {}
     selected_three = payload.get("selected_three")
@@ -181,6 +207,19 @@ def _allowlisted_selection_payload(
     lead = payload.get("lead")
     if type(lead) is str and lead in self_team:
         safe["lead"] = lead
+    if selection_profile is not None:
+        chosen_package = payload.get("chosen_package")
+        package_ids = {package.package_id for package in selection_profile.packages}
+        if type(chosen_package) is str and chosen_package in package_ids:
+            safe["chosen_package"] = chosen_package
+        intended_mega = payload.get("intended_mega")
+        if intended_mega is None or (
+            type(intended_mega) is str and intended_mega in self_team
+        ):
+            safe["intended_mega"] = intended_mega
+        reason = payload.get("selection_reason")
+        if type(reason) is str and 1 <= len(reason.strip()) <= 500:
+            safe["selection_reason"] = reason.strip()
     return safe
 
 
@@ -218,11 +257,13 @@ class GeminiSelectionAdviceAdapter:
         *,
         dispatch_factory: _DispatchFactory = SelectionAdviceDispatch,
         envelope_factory: _EnvelopeFactory = _default_envelope_factory,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._transport = transport
         self._load_config = load_config
         self._dispatch_factory = dispatch_factory
         self._envelope_factory = envelope_factory
+        self._clock = clock
         self.network_call_count = 0
         self.dispatch_count = 0
         self._active_dispatch: _DispatchLike | None = None
@@ -232,10 +273,39 @@ class GeminiSelectionAdviceAdapter:
         self.last_source_type: str | None = None
         self.last_disposition: ResultDisposition | None = None
         self.last_failure_reason: str | None = None
+        self.progress_message = ""
+        self.model_chain: tuple[str, ...] = ()
+        self._operator_identity: tuple[str, str, int] | None = None
+        self._operator_state_invalidated = False
 
     @property
     def in_flight(self) -> bool:
         return self._in_flight
+
+    def clear_operator_state(self) -> None:
+        """Forget display-only state at an explicit New Match boundary."""
+
+        self.last_job_id = None
+        self.last_model = None
+        self.last_source_type = None
+        self.last_disposition = None
+        self.last_failure_reason = None
+        self.progress_message = ""
+        self.model_chain = ()
+        self._operator_identity = None
+        self._operator_state_invalidated = True
+
+    def operator_state_matches(
+        self, *, session_id: str | None, match_id: str | None, generation: int | None
+    ) -> bool:
+        if self._operator_state_invalidated:
+            return False
+        return self._operator_identity is None or (
+            session_id is not None
+            and match_id is not None
+            and generation is not None
+            and self._operator_identity == (session_id, match_id, generation)
+        )
 
     def send(
         self,
@@ -243,6 +313,7 @@ class GeminiSelectionAdviceAdapter:
         *,
         on_applied: Callable[[ResultDisposition], None],
         on_failed: Callable[[str], None],
+        on_progress: Callable[[], None] | None = None,
     ) -> None:
         """Create one immutable job and dispatch once from an explicit command."""
 
@@ -250,10 +321,21 @@ class GeminiSelectionAdviceAdapter:
             on_failed("GEMINI_DISPATCH_ALREADY_IN_FLIGHT")
             return
 
-        self.last_model = None
-        self.last_source_type = None
-        self.last_disposition = None
-        self.last_failure_reason = None
+        cascade_deadline = self._clock() + (SELECTION_HARD_DEADLINE_MS / 1000.0)
+
+        self.clear_operator_state()
+        self._operator_state_invalidated = False
+        projection = application.projection()
+        if (
+            projection.session_id is not None
+            and projection.match_id is not None
+            and projection.generation is not None
+        ):
+            self._operator_identity = (
+                projection.session_id,
+                projection.match_id,
+                projection.generation,
+            )
         try:
             loaded_config = self._load_config()
         except ProviderConfigError as exc:
@@ -263,15 +345,17 @@ class GeminiSelectionAdviceAdapter:
             return
 
         if isinstance(loaded_config, SelectionProviderConfig):
-            primary_config = loaded_config.primary()
-            fallback_config = loaded_config.fallback()
+            attempt_configs = loaded_config.chain()
         else:
-            primary_config = loaded_config
-            fallback_config = ProviderConfig(
-                api_key=loaded_config.api_key,
-                model=DEFAULT_SELECTION_FALLBACK_MODEL,
-                timeout_seconds=loaded_config.timeout_seconds,
+            attempt_configs = (
+                loaded_config,
+                ProviderConfig(
+                    api_key=loaded_config.api_key,
+                    model=DEFAULT_SELECTION_FALLBACK_MODEL,
+                    timeout_seconds=loaded_config.timeout_seconds,
+                ),
             )
+        self.model_chain = tuple(config.model for config in attempt_configs)
 
         try:
             job = application.reserve_gemini_selection_attempt(f"gemini-ui-{uuid4()}")
@@ -301,13 +385,29 @@ class GeminiSelectionAdviceAdapter:
             attempt_ordinal: int,
         ) -> None:
             self._in_flight = False
+            self.progress_message = ""
+            if self._clock() > cascade_deadline:
+                application.repository.finish_selection_provider_attempt(
+                    job_id=job.job_id,
+                    attempt_ordinal=attempt_ordinal,
+                    outcome="FAILED",
+                    reason="GEMINI_TIMEOUT",
+                )
+                self.last_failure_reason = "GEMINI_TIMEOUT"
+                application.fail_selection_advice_job(job.job_id, "GEMINI_TIMEOUT")
+                on_failed("GEMINI_TIMEOUT")
+                return
             application.repository.finish_selection_provider_attempt(
                 job_id=job.job_id,
                 attempt_ordinal=attempt_ordinal,
                 outcome="SUCCEEDED",
             )
             sanitized_result = SanitizedProviderResult(
-                payload=_allowlisted_selection_payload(result.payload, request.self_team),
+                payload=_allowlisted_selection_payload(
+                    result.payload,
+                    request.self_team,
+                    request.selection_profile,
+                ),
                 source_type=_safe_display_token(result.source_type),
                 model=_safe_display_token(config.model),
             )
@@ -338,15 +438,50 @@ class GeminiSelectionAdviceAdapter:
                 outcome="FAILED",
                 reason=sanitized,
             )
-            if attempt_ordinal == 1 and is_selection_fallback_eligible(sanitized):
-                dispatch_attempt(fallback_config, attempt_ordinal=2)
+            next_ordinal = attempt_ordinal + 1
+            if (
+                is_selection_fallback_eligible(sanitized)
+                and next_ordinal <= len(attempt_configs)
+                and self._clock() < cascade_deadline
+            ):
+                self.progress_message = (
+                    f"モデル切替中… {next_ordinal}/{len(attempt_configs)}"
+                )
+                if on_progress is not None:
+                    on_progress()
+                dispatch_attempt(next_ordinal)
                 return
             self._in_flight = False
+            self.progress_message = ""
             self.last_failure_reason = sanitized
             application.fail_selection_advice_job(job.job_id, sanitized)
             on_failed(sanitized)
 
-        def dispatch_attempt(config: ProviderConfig, *, attempt_ordinal: int) -> None:
+        def dispatch_attempt(attempt_ordinal: int) -> None:
+            remaining_seconds = cascade_deadline - self._clock()
+            if remaining_seconds <= 0:
+                self._in_flight = False
+                self.progress_message = ""
+                self.last_failure_reason = "GEMINI_TIMEOUT"
+                application.fail_selection_advice_job(job.job_id, "GEMINI_TIMEOUT")
+                on_failed("GEMINI_TIMEOUT")
+                return
+            base_config = attempt_configs[attempt_ordinal - 1]
+            config = replace(
+                base_config,
+                timeout_seconds=min(
+                    base_config.timeout_seconds,
+                    SELECTION_PER_ATTEMPT_TIMEOUT_MS / 1000.0,
+                    remaining_seconds,
+                ),
+            )
+            self.last_model = _safe_display_token(config.model)
+            self.progress_message = (
+                f"Gemini送信中… {attempt_ordinal}/{len(attempt_configs)}"
+            )
+            self._in_flight = True
+            if on_progress is not None:
+                on_progress()
             application.repository.start_selection_provider_attempt(
                 job_id=job.job_id,
                 attempt_ordinal=attempt_ordinal,
@@ -354,7 +489,6 @@ class GeminiSelectionAdviceAdapter:
             )
             self.network_call_count += 1
             self.dispatch_count += 1
-            self._in_flight = True
             dispatch = self._dispatch_factory(
                 self._transport,
                 request,
@@ -367,6 +501,11 @@ class GeminiSelectionAdviceAdapter:
                 ),
             )
             self._active_dispatch = dispatch
+            self.progress_message = (
+                f"Gemini応答待ち… {attempt_ordinal}/{len(attempt_configs)}"
+            )
+            if on_progress is not None:
+                on_progress()
             dispatch.start()
 
-        dispatch_attempt(primary_config, attempt_ordinal=1)
+        dispatch_attempt(1)

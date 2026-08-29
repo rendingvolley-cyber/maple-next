@@ -213,10 +213,33 @@ class GeminiTurnAdviceAdapter:
         self.last_source_type: str | None = None
         self.last_disposition: ResultDisposition | None = None
         self.last_failure_reason: str | None = None
+        self._operator_identity: tuple[str, str, int] | None = None
+        self._operator_state_invalidated = False
 
     @property
     def in_flight(self) -> bool:
         return self._in_flight
+
+    def clear_operator_state(self) -> None:
+        self.last_job_id = None
+        self.last_model = None
+        self.last_source_type = None
+        self.last_disposition = None
+        self.last_failure_reason = None
+        self._operator_identity = None
+        self._operator_state_invalidated = True
+
+    def operator_state_matches(
+        self, *, session_id: str | None, match_id: str | None, generation: int | None
+    ) -> bool:
+        if self._operator_state_invalidated:
+            return False
+        return self._operator_identity is None or (
+            session_id is not None
+            and match_id is not None
+            and generation is not None
+            and self._operator_identity == (session_id, match_id, generation)
+        )
 
     @property
     def uses_injected_transport(self) -> bool:
@@ -248,10 +271,19 @@ class GeminiTurnAdviceAdapter:
             on_failed("GEMINI_TURN_DISPATCH_ALREADY_IN_FLIGHT")
             return
 
-        self.last_model = None
-        self.last_source_type = None
-        self.last_disposition = None
-        self.last_failure_reason = None
+        self.clear_operator_state()
+        self._operator_state_invalidated = False
+        projection = application.projection()
+        if (
+            projection.session_id is not None
+            and projection.match_id is not None
+            and projection.generation is not None
+        ):
+            self._operator_identity = (
+                projection.session_id,
+                projection.match_id,
+                projection.generation,
+            )
 
         try:
             config = self._load_config()

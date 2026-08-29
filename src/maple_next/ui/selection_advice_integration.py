@@ -50,7 +50,12 @@ class SelectionAdviceIntegrationController(ExplicitTurnNumberController):
                 advice_id=None,
                 can_apply=False,
             )
-        if adapter.in_flight:
+        adapter_state_current = adapter.operator_state_matches(
+            session_id=projection.session_id,
+            match_id=projection.match_id,
+            generation=projection.generation,
+        )
+        if adapter_state_current and adapter.in_flight:
             return SelectionAdviceStatusView(
                 status="PENDING",
                 source_type="GEMINI",
@@ -61,7 +66,7 @@ class SelectionAdviceIntegrationController(ExplicitTurnNumberController):
                 advice_id=None,
                 can_apply=False,
             )
-        if adapter.last_failure_reason is not None:
+        if adapter_state_current and adapter.last_failure_reason is not None:
             return SelectionAdviceStatusView(
                 status="FAILED",
                 source_type="GEMINI",
@@ -84,7 +89,7 @@ class SelectionAdviceIntegrationController(ExplicitTurnNumberController):
                 advice_id=None,
                 can_apply=False,
             )
-        if adapter.last_disposition is ResultDisposition.STALE_REJECTED:
+        if adapter_state_current and adapter.last_disposition is ResultDisposition.STALE_REJECTED:
             return SelectionAdviceStatusView(
                 status="STALE",
                 source_type=adapter.last_source_type or "GEMINI",
@@ -95,7 +100,7 @@ class SelectionAdviceIntegrationController(ExplicitTurnNumberController):
                 advice_id=None,
                 can_apply=False,
             )
-        if adapter.last_disposition in {
+        if adapter_state_current and adapter.last_disposition in {
             ResultDisposition.INVALID_REJECTED,
             ResultDisposition.DUPLICATE_IGNORED,
         }:
@@ -334,7 +339,10 @@ class SelectionAdviceIntegrationWindow(ExplicitTurnNumberWindow):
                 or resend_eligible
             )
         )
-        self.gemini_status_label.setText(f"Status: {status.status}")
+        progress = self._selection_gemini_controller.gemini_selection_progress()
+        self.gemini_status_label.setText(
+            progress if status.status == "PENDING" and progress else f"Status: {status.status}"
+        )
         self.gemini_failure_label.setText(
             f"Sanitized failure: {status.sanitized_failure}"
             if status.sanitized_failure

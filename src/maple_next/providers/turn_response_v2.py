@@ -53,6 +53,7 @@ __all__ = [
     "OpponentPredictionV2",
     "TurnAdviceBodyV2",
     "TurnAdviceSchemaError",
+    "normalize_degradable_opponent_prediction_v2",
     "turn_advice_body_v2_from_dict",
     "turn_advice_body_v2_to_canonical_dict",
     "canonical_turn_advice_v2_json",
@@ -215,13 +216,119 @@ _PREDICTION_LINE_SCHEMA_V2: Final[dict[str, Any]] = {
         "support_basis": {
             "type": "string",
             "enum": sorted(ALLOWED_SUPPORT_BASIS),
+            "description": (
+                "Use NONE only with category UNKNOWN; a concrete category requires "
+                "a non-NONE evidentiary basis."
+            ),
         },
-        "support": {"type": "string", "enum": sorted(ALLOWED_SUPPORT_LEVELS)},
+        "support": {
+            "type": "string",
+            "enum": sorted(ALLOWED_SUPPORT_LEVELS),
+            "description": (
+                "UNKNOWN must use LOW; GENERAL_KNOWLEDGE must use LOW; "
+                "POPULATION_PRIOR must not use HIGH."
+            ),
+        },
         "summary": {"type": "string"},
     },
     "required": ["category", "specific_action", "support_basis", "support", "summary"],
     "additionalProperties": False,
 }
+
+_CANONICAL_UNKNOWN_PREDICTION_V2: Final[dict[str, Any]] = {
+    "primary": {
+        "category": "UNKNOWN",
+        "specific_action": None,
+        "support_basis": "NONE",
+        "support": "LOW",
+        "summary": "予測根拠が不足しているため、相手の行動は不明です",
+    },
+    "alternatives": [],
+}
+
+
+def normalize_degradable_opponent_prediction_v2(data: Any) -> tuple[Any, bool]:
+    """Discard only an evidentially unsupported concrete prediction block.
+
+    A provider may still supply a valid, legal primary recommendation while
+    pairing a concrete prediction category with an absent, malformed, or
+    insufficient ``support_basis``/``support`` pair.  Prediction is optional
+    epistemic detail, so that one narrow defect is recoverable by replacing
+    the *whole* prediction block with the canonical UNKNOWN line.
+
+    Everything outside that block remains byte-for-byte untouched. Unknown
+    keys, malformed category/summary/action fields, malformed container
+    shapes, and already-canonical UNKNOWN violations are deliberately not
+    repaired; the strict parser rejects them exactly as before.
+    """
+
+    if not isinstance(data, dict) or set(data) != TOP_LEVEL_ALLOWED_KEYS_V2:
+        return data, False
+    prediction = data.get("opponent_prediction")
+    if (
+        not isinstance(prediction, dict)
+        or set(prediction) != OPPONENT_PREDICTION_ALLOWED_KEYS_V2
+    ):
+        return data, False
+    alternatives = prediction.get("alternatives")
+    if not isinstance(alternatives, list) or len(alternatives) > ALTERNATIVES_MAX_V2:
+        return data, False
+    lines = [prediction.get("primary"), *alternatives]
+    recoverable_defect = False
+    required_non_support_keys = {"category", "specific_action", "summary"}
+    for line in lines:
+        if not isinstance(line, dict):
+            return data, False
+        if not set(line).issubset(PREDICTION_LINE_ALLOWED_KEYS_V2):
+            return data, False
+        if not required_non_support_keys.issubset(line):
+            return data, False
+        category = line["category"]
+        specific_action = line["specific_action"]
+        summary = line["summary"]
+        if not isinstance(category, str) or category not in ALLOWED_PREDICTION_CATEGORIES_V2:
+            return data, False
+        if (
+            not isinstance(summary, str)
+            or not summary.strip()
+            or len(summary) > SUMMARY_MAX_LENGTH_V2
+        ):
+            return data, False
+        if specific_action is not None and (
+            not isinstance(specific_action, str)
+            or not specific_action.strip()
+            or len(specific_action) > SPECIFIC_ACTION_MAX_LENGTH_V2
+        ):
+            return data, False
+
+        basis = line.get("support_basis")
+        support = line.get("support")
+        if category == "UNKNOWN":
+            # UNKNOWN has a strict canonical combination; do not use this
+            # recovery path to conceal a separate UNKNOWN-shape violation.
+            if specific_action is not None or basis != "NONE" or support != "LOW":
+                return data, False
+            continue
+
+        supported_pair = (
+            isinstance(basis, str)
+            and basis in ALLOWED_SUPPORT_BASIS - {"NONE"}
+            and isinstance(support, str)
+            and support in ALLOWED_SUPPORT_LEVELS
+            and not (basis == "GENERAL_KNOWLEDGE" and support != "LOW")
+            and not (basis == "POPULATION_PRIOR" and support == "HIGH")
+        )
+        if not supported_pair:
+            recoverable_defect = True
+
+    if not recoverable_defect:
+        return data, False
+    normalized = dict(data)
+    normalized["opponent_prediction"] = {
+        "primary": dict(_CANONICAL_UNKNOWN_PREDICTION_V2["primary"]),
+        "alternatives": [],
+    }
+    return normalized, True
 
 #: Fixed and deterministic, mirroring ``turn_request.REQUESTED_OUTPUT_SCHEMA``'s
 #: style. Never derived from a live provider schema.
@@ -325,6 +432,22 @@ def _prediction_line_from_dict(data: Any) -> PredictionLineV2:
     support = obj["support"]
     if not isinstance(support, str) or isinstance(support, bool):
         raise TurnAdviceSchemaError("support_must_be_string")
+
+    # Tournament-week hotfix: a LOW-support move/switch line naming a
+    # specific_action claims precision the support level does not justify.
+    # Canonicalize the unsupported specificity away here, before
+    # PredictionLineV2's own ``low_support_specific_action_must_be_null``
+    # invariant ever sees it, rather than rejecting an otherwise-valid
+    # response outright. Only ever removes specificity -- never invents or
+    # substitutes an action, and never touches any other field.
+    #
+    # Deliberately excludes ``category == "UNKNOWN"``: that category has its
+    # own, stricter, distinct invariant (``specific_action`` must ALWAYS be
+    # null for UNKNOWN, at any support level) -- silently normalizing here
+    # would mask a genuine violation of that separate rule instead of
+    # leaving it to be rejected as before.
+    if category != "UNKNOWN" and support == "LOW" and specific_action is not None:
+        specific_action = None
 
     summary = _require_non_empty_str(
         obj["summary"], what="summary", max_length=SUMMARY_MAX_LENGTH_V2

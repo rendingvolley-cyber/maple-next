@@ -258,10 +258,51 @@ def test_none_basis_on_non_unknown_rejected() -> None:
         turn_advice_body_v2_from_dict(data)
 
 
-def test_specific_action_with_low_support_rejected() -> None:
+def test_specific_action_with_low_support_normalized_to_null_and_accepted() -> None:
+    """Tournament-week hotfix: an otherwise-valid response whose LOW-support
+    line over-claims a ``specific_action`` is no longer rejected outright --
+    the unsupported specificity is canonicalized to ``null`` before the
+    ``low_support_specific_action_must_be_null`` invariant is ever checked,
+    and the response is accepted."""
+
     data = _valid()
     data["opponent_prediction"]["primary"]["support"] = "LOW"
     data["opponent_prediction"]["primary"]["specific_action"] = "れいとうビーム"
+    body = turn_advice_body_v2_from_dict(data)
+    assert body.opponent_prediction.primary.specific_action is None
+    assert body.opponent_prediction.primary.support == "LOW"
+
+
+def test_specific_action_with_low_support_normalized_on_alternative_too() -> None:
+    """The same normalization applies to an alternative line, not only the
+    primary -- every prediction line covered by the invariant is fixed up
+    uniformly."""
+
+    data = _valid()
+    data["opponent_prediction"]["primary"]["support"] = "MEDIUM"
+    data["opponent_prediction"]["primary"]["support_basis"] = "PINNED_RULES"
+    data["opponent_prediction"]["alternatives"] = [
+        {
+            "category": "SWITCH",
+            "specific_action": "ガブリアス",
+            "support_basis": "GENERAL_KNOWLEDGE",
+            "support": "LOW",
+            "summary": "交代の可能性も残る",
+        }
+    ]
+    body = turn_advice_body_v2_from_dict(data)
+    assert body.opponent_prediction.alternatives[0].specific_action is None
+
+
+def test_low_support_specific_action_normalization_never_masks_other_violations() -> None:
+    """The normalization only removes unsupported specificity -- it must
+    never cause an unrelated schema violation on the same payload to slip
+    through."""
+
+    data = _valid()
+    data["opponent_prediction"]["primary"]["support"] = "LOW"
+    data["opponent_prediction"]["primary"]["specific_action"] = "れいとうビーム"
+    data["unexpected_top_level_field"] = "should still be rejected"
     with pytest.raises(TurnAdviceSchemaError):
         turn_advice_body_v2_from_dict(data)
 

@@ -22,11 +22,15 @@ from maple_next.domain.team_build import (
     CHAMPIONS_BATTLE_FORMAT,
     CHAMPIONS_GAME,
     CHAMPIONS_SCHEMA_VERSION,
+    CHAMPIONS_SCHEMA_VERSION_V2,
+    CHAMPIONS_SCHEMA_VERSION_V3,
     CHAMPIONS_STAT_POINT_PER_STAT_MAX,
     CHAMPIONS_STAT_POINT_TOTAL_MAX,
     ChampionsPokemonBuild,
     ChampionsStatPoints,
     ChampionsTeamBuild,
+    SelectionPackage,
+    TeamSelectionProfile,
 )
 
 __all__ = [
@@ -47,9 +51,13 @@ __all__ = [
     "CHAMPIONS_BATTLE_FORMAT",
     "CHAMPIONS_GAME",
     "CHAMPIONS_SCHEMA_VERSION",
+    "CHAMPIONS_SCHEMA_VERSION_V2",
+    "CHAMPIONS_SCHEMA_VERSION_V3",
     "CHAMPIONS_STAT_POINT_PER_STAT_MAX",
     "CHAMPIONS_STAT_POINT_TOTAL_MAX",
     "ChampionsPokemonBuild",
     "ChampionsStatPoints",
     "ChampionsTeamBuild",
+    "SelectionPackage",
+    "TeamSelectionProfile",
 ]

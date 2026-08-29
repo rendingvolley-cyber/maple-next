@@ -82,8 +82,6 @@ _NEW_MATCH_AFTER_EXPORT_FAILURE_MESSAGE = (
 _PERSISTENCE_RESULT_UNKNOWN_MESSAGE = (
     "操作結果をデータベースから確認できません。復旧するまで操作を停止しています。"
 )
-
-
 def _match_message(error: DomainError) -> str:
     code = str(error)
     return _MATCH_ERROR_MESSAGES.get(code, f"操作を完了できませんでした: {code}")
@@ -296,6 +294,10 @@ class MatchFlowController(TurnAdviceIntegrationController):
         def command() -> None:
             self._match_application.new_match_after_export()
 
-        return self._run_match_persistence_command(
+        view = self._run_match_persistence_command(
             command, failure_message=_NEW_MATCH_AFTER_EXPORT_FAILURE_MESSAGE
         )
+        if view.projection.session_state == "SELECTION_OPEN" and view.error_message is None:
+            self.clear_gemini_operator_state()
+            return self.refresh()
+        return view

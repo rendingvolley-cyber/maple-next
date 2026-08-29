@@ -14,7 +14,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
-CHAMPIONS_SCHEMA_VERSION: Final[str] = "maple-team.v2"
+CHAMPIONS_SCHEMA_VERSION_V2: Final[str] = "maple-team.v2"
+CHAMPIONS_SCHEMA_VERSION_V3: Final[str] = "maple-team.v3"
+# Backward-compatible constructor default used throughout the existing v2
+# editor and tests.  V3 is opt-in and requires a Selection Profile.
+CHAMPIONS_SCHEMA_VERSION: Final[str] = CHAMPIONS_SCHEMA_VERSION_V2
 CHAMPIONS_GAME: Final[str] = "pokemon-champions"
 CHAMPIONS_BATTLE_FORMAT: Final[str] = "SINGLE_3"
 CHAMPIONS_STAT_POINT_PER_STAT_MAX: Final[int] = 32
@@ -186,18 +190,143 @@ class ChampionsPokemonBuild:
 
 
 @dataclass(frozen=True, slots=True)
+class SelectionPackage:
+    """One human-authored, fixed three-Pokemon Selection package."""
+
+    package_id: str
+    name: str
+    members: tuple[str, str, str]
+    intended_mega: str | None
+    notes: str
+
+    def __post_init__(self) -> None:
+        package_id = _require_text(self.package_id, "selection package id")
+        name = _require_text(self.name, "selection package name")
+        if package_id != self.package_id:
+            object.__setattr__(self, "package_id", package_id)
+        if name != self.name:
+            object.__setattr__(self, "name", name)
+        if not isinstance(self.members, tuple):
+            object.__setattr__(self, "members", tuple(self.members))
+        if len(self.members) != 3:
+            raise ValueError("selection package members must contain exactly three entries")
+        members = tuple(_require_text(value, "selection package member") for value in self.members)
+        if len(set(members)) != 3:
+            raise ValueError("selection package members must be unique")
+        if members != self.members:
+            object.__setattr__(self, "members", members)
+        intended_mega = self.intended_mega
+        if intended_mega is not None:
+            intended_mega = _require_text(intended_mega, "selection package intended_mega")
+            if intended_mega not in members:
+                raise ValueError("selection package intended_mega must be a package member")
+        if intended_mega != self.intended_mega:
+            object.__setattr__(self, "intended_mega", intended_mega)
+        if not isinstance(self.notes, str) or isinstance(self.notes, bool):
+            raise ValueError("selection package notes must be a string")
+        notes = self.notes.strip()
+        if notes != self.notes:
+            object.__setattr__(self, "notes", notes)
+
+    def to_canonical_dict(self) -> dict[str, object]:
+        return {
+            "id": self.package_id,
+            "name": self.name,
+            "members": list(self.members),
+            "intended_mega": self.intended_mega,
+            "notes": self.notes,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> SelectionPackage:
+        if not isinstance(payload, dict):
+            raise ValueError("selection package must be an object")
+        if set(payload) != {"id", "name", "members", "intended_mega", "notes"}:
+            raise ValueError("selection package fields are invalid")
+        members = payload["members"]
+        if not isinstance(members, list):
+            raise ValueError("selection package members must be an array")
+        intended_mega = payload["intended_mega"]
+        if intended_mega is not None and not isinstance(intended_mega, str):
+            raise ValueError("selection package intended_mega must be a string or null")
+        return cls(
+            package_id=payload["id"],
+            name=payload["name"],
+            members=tuple(members),
+            intended_mega=intended_mega,
+            notes=payload["notes"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TeamSelectionProfile:
+    """Small v1 strategy contract: choose one fixed package."""
+
+    mode: str
+    mixing_allowed: bool
+    packages: tuple[SelectionPackage, ...]
+
+    def __post_init__(self) -> None:
+        if self.mode != "fixed_packages":
+            raise ValueError("selection profile mode must be fixed_packages")
+        if type(self.mixing_allowed) is not bool:
+            raise ValueError("selection profile mixing_allowed must be a boolean")
+        if not isinstance(self.packages, tuple):
+            object.__setattr__(self, "packages", tuple(self.packages))
+        if not self.packages or not all(
+            isinstance(package, SelectionPackage) for package in self.packages
+        ):
+            raise ValueError("selection profile packages must contain packages")
+        package_ids = tuple(package.package_id for package in self.packages)
+        if len(set(package_ids)) != len(package_ids):
+            raise ValueError("selection package ids must be unique")
+
+    def package_by_id(self, package_id: str) -> SelectionPackage:
+        for package in self.packages:
+            if package.package_id == package_id:
+                return package
+        raise KeyError(package_id)
+
+    def to_canonical_dict(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "mixing_allowed": self.mixing_allowed,
+            "packages": [package.to_canonical_dict() for package in self.packages],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> TeamSelectionProfile:
+        if not isinstance(payload, dict):
+            raise ValueError("selection_profile must be an object")
+        if set(payload) != {"mode", "mixing_allowed", "packages"}:
+            raise ValueError("selection_profile fields are invalid")
+        packages = payload["packages"]
+        if not isinstance(packages, list):
+            raise ValueError("selection_profile packages must be an array")
+        return cls(
+            mode=payload["mode"],
+            mixing_allowed=payload["mixing_allowed"],
+            packages=tuple(SelectionPackage.from_dict(package) for package in packages),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ChampionsTeamBuild:
-    """A strict six-member Pokemon Champions v2 team build."""
+    """A strict six-member Pokemon Champions v2/v3 team build."""
 
     schema_version: str
     game: str
     name: str
     battle_format: str
     members: tuple[ChampionsPokemonBuild, ...]
+    selection_profile: TeamSelectionProfile | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version != CHAMPIONS_SCHEMA_VERSION:
-            raise ValueError("schema_version must be maple-team.v2")
+        if self.schema_version not in {
+            CHAMPIONS_SCHEMA_VERSION_V2,
+            CHAMPIONS_SCHEMA_VERSION_V3,
+        }:
+            raise ValueError("schema_version must be maple-team.v2 or maple-team.v3")
         if self.game != CHAMPIONS_GAME:
             raise ValueError("game must be pokemon-champions")
         if self.battle_format != CHAMPIONS_BATTLE_FORMAT:
@@ -214,6 +343,15 @@ class ChampionsTeamBuild:
         names = tuple(member.pokemon_name for member in self.members)
         if len(set(names)) != 6:
             raise ValueError("pokemon names must be unique")
+        if self.schema_version == CHAMPIONS_SCHEMA_VERSION_V2:
+            if self.selection_profile is not None:
+                raise ValueError("maple-team.v2 must not contain selection_profile")
+        else:
+            if not isinstance(self.selection_profile, TeamSelectionProfile):
+                raise ValueError("maple-team.v3 requires selection_profile")
+            for package in self.selection_profile.packages:
+                if any(member not in names for member in package.members):
+                    raise ValueError("selection package member is outside the team")
 
     @property
     def pokemon_names(self) -> tuple[str, str, str, str, str, str]:
@@ -247,13 +385,16 @@ class ChampionsTeamBuild:
             raise ValueError("selected member is outside the team") from exc
 
     def to_canonical_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "schema_version": self.schema_version,
             "game": self.game,
             "name": self.name,
             "battle_format": self.battle_format,
             "members": [member.to_canonical_dict() for member in self.members],
         }
+        if self.selection_profile is not None:
+            payload["selection_profile"] = self.selection_profile.to_canonical_dict()
+        return payload
 
     def canonical_json_bytes(self) -> bytes:
         return json.dumps(
@@ -298,7 +439,10 @@ class ChampionsTeamBuild:
     def from_dict(cls, payload: object) -> ChampionsTeamBuild:
         if not isinstance(payload, dict):
             raise ValueError("team build must be an object")
+        schema_version = payload.get("schema_version")
         expected = {"schema_version", "game", "name", "battle_format", "members"}
+        if schema_version == CHAMPIONS_SCHEMA_VERSION_V3:
+            expected.add("selection_profile")
         if set(payload) != expected:
             raise ValueError("team build fields are invalid")
         raw_members = payload["members"]
@@ -310,6 +454,11 @@ class ChampionsTeamBuild:
             name=payload["name"],
             battle_format=payload["battle_format"],
             members=tuple(ChampionsPokemonBuild.from_dict(member) for member in raw_members),
+            selection_profile=(
+                TeamSelectionProfile.from_dict(payload["selection_profile"])
+                if schema_version == CHAMPIONS_SCHEMA_VERSION_V3
+                else None
+            ),
         )
 
     from_canonical_dict = from_dict

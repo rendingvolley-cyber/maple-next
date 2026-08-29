@@ -146,7 +146,7 @@ def test_v20_to_v21_migration_adds_columns_with_correct_default(tmp_path: Path) 
     version = connection.execute(
         "SELECT schema_version FROM schema_meta WHERE singleton_id = 1"
     ).fetchone()[0]
-    assert version == SCHEMA_VERSION == 22
+    assert version == SCHEMA_VERSION == 23
 
     row = connection.execute(
         "SELECT response_schema_version, advice_json, action_name FROM turn_advices "

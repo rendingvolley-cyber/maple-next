@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -79,6 +79,7 @@ def migrate(connection: sqlite3.Connection) -> None:
             current_observation_id TEXT NULL,
             current_reviewed_board_id TEXT NULL,
             current_turn_advice_id TEXT NULL,
+            mega_state_json TEXT NOT NULL DEFAULT '{}',
             active_slot INTEGER NULL CHECK (active_slot IS NULL OR active_slot = 1)
         );
         CREATE UNIQUE INDEX IF NOT EXISTS ux_single_active_session
@@ -664,6 +665,15 @@ def migrate(connection: sqlite3.Connection) -> None:
         "TEXT NOT NULL DEFAULT 'maple-turn-advice-response.v1'",
     )
     _ensure_column(connection, "turn_advices", "advice_json", "TEXT NULL")
+    # Tournament Battle Mega: one additive, match-level canonical actual
+    # state. Historical sessions intentionally retain the empty JSON default;
+    # no event is inferred or backfilled from Selection intent or prior rows.
+    _ensure_column(
+        connection,
+        "battle_sessions",
+        "mega_state_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )
     _widen_selection_provider_attempt_audits(connection)
     _sanitize_async_job_result_payloads(connection)
     connection.execute(

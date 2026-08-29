@@ -72,6 +72,7 @@ from maple_next.domain.effect_catalog import (
 )
 from maple_next.domain.enums import HpBucket, MatchOutcome
 from maple_next.domain.legal_switches import LegalSwitchStatus
+from maple_next.domain.mega_evolution import MegaSide, deterministic_mega_form
 from maple_next.domain.move_catalog import MoveMatcher, normalize_move_query
 from maple_next.domain.opponent_intel import (
     ChainedOpponentMetaProvider,
@@ -1003,8 +1004,10 @@ _TARGET_SIDE_LABELS: dict[str, str] = {"self": "自分", "opponent": "相手"}
 class _ResultEventDraft:
     """UI-only description of one human-confirmed result event.
 
-    The draft is projected back into the existing ``SideDelta`` editors;
-    it is deliberately not a persisted or parallel battle-state model.
+    Ordinary result events are projected back into the existing ``SideDelta``
+    editors. A ``mega`` event is deliberately match-level draft metadata and
+    is passed through the typed action commit boundary instead; it is never a
+    SideDelta field or a persisted parallel UI model.
     """
 
     event_id: str
@@ -1013,6 +1016,7 @@ class _ResultEventDraft:
     kind: str
     field_name: str
     value: int | str
+    current_form: str | None = None
     source_move: str | None = None
     candidate_id: str | None = None
 
@@ -2484,9 +2488,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._result_entry_active = False
         self._result_event_sequence = 0
         self._result_events: list[_ResultEventDraft] = []
-        self._result_candidate_decisions: dict[str, str] = {}
-        self._result_candidate_cards: dict[str, _MoveResultCandidateCard] = {}
-        self._result_candidates: tuple[_MoveResultCandidate, ...] = ()
+        self._candidate_decisions: dict[str, str] = {}
+        self._candidate_cards: dict[str, _MoveResultCandidateCard] = {}
+        self._candidates: tuple[_MoveResultCandidate, ...] = ()
         self._result_hidden_holder = QWidget(self)
         self._result_hidden_holder.setVisible(False)
         hidden_result_layout = QVBoxLayout(self._result_hidden_holder)
@@ -2509,9 +2513,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         result_page_layout.addWidget(self.result_actions_label)
 
         candidates_group = QGroupBox("起こり得る結果")
-        self.result_candidates_layout = QVBoxLayout(candidates_group)
-        self.result_candidates_layout.setContentsMargins(4, 4, 4, 4)
-        self.result_candidates_layout.setSpacing(2)
+        self.candidates_layout = QVBoxLayout(candidates_group)
+        self.candidates_layout.setContentsMargins(4, 4, 4, 4)
+        self.candidates_layout.setSpacing(2)
         result_page_layout.addWidget(candidates_group)
 
         faint_group = QGroupBox("ひんし")
@@ -2524,6 +2528,35 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         faint_layout.addWidget(self.record_opponent_faint_button)
         faint_layout.addStretch(1)
         result_page_layout.addWidget(faint_group)
+
+        mega_group = QGroupBox("メガ進化")
+        mega_group.setObjectName("megaEvolutionResultGroup")
+        mega_layout = QHBoxLayout(mega_group)
+        mega_layout.setContentsMargins(4, 3, 4, 3)
+        mega_layout.setSpacing(4)
+        self.self_mega_button = QPushButton("自分メガ進化")
+        self.self_mega_button.setObjectName("selfMegaEvolutionButton")
+        self.self_mega_button.setCheckable(True)
+        self.self_mega_button.setToolTip(
+            "このTurnの自分Activeが実際にメガ進化した事実を記録します。"
+        )
+        self.self_mega_button.clicked.connect(
+            lambda _checked=False: self._toggle_mega_event(MegaSide.SELF)
+        )
+        self.opponent_mega_button = QPushButton("相手メガ進化")
+        self.opponent_mega_button.setObjectName("opponentMegaEvolutionButton")
+        self.opponent_mega_button.setCheckable(True)
+        self.opponent_mega_button.setToolTip(
+            "このTurnの相手Activeが実際にメガ進化した事実を記録します。"
+        )
+        self.opponent_mega_button.clicked.connect(
+            lambda _checked=False: self._toggle_mega_event(MegaSide.OPPONENT)
+        )
+        mega_layout.addWidget(self.self_mega_button)
+        mega_layout.addWidget(self.opponent_mega_button)
+        mega_layout.addStretch(1)
+        self.mega_result_group = mega_group
+        result_page_layout.addWidget(mega_group)
 
         self.manual_result_button = QPushButton("＋手入力で結果を追加")
         self.manual_result_button.clicked.connect(self._open_manual_result_dialog)
@@ -4534,7 +4567,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             if hasattr(self, "_result_entry_active"):
                 self._result_entry_active = False
                 self._result_events.clear()
-                self._result_candidate_decisions.clear()
+                self._candidate_decisions.clear()
 
         super().render_view(current)
         if hasattr(self, "match_end_local_group"):
@@ -4758,7 +4791,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             "左の確定履歴を確認し、次のTurnへ進んでください。"
         )
         if self._result_entry_active and projection.primary_cta == "RECORD_ACTUAL_ACTION":
-            self._show_result_entry_page()
+            self._show_result_entry_page(current.persistence_reads_allowed)
 
         # The v5 right rail never changes hierarchy: Gemini owns the upper
         # slot even while empty/waiting, with compact INTEL directly below.
@@ -5041,9 +5074,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.error_label.clear()
         self._result_entry_active = True
         self._result_events.clear()
-        self._result_candidate_decisions.clear()
+        self._candidate_decisions.clear()
         self._result_validation_error = ""
-        self._build_move_result_candidates()
+        self._build_move_candidates()
         self._project_result_events()
         self.weather_delta_field.mode_box.setCurrentText("UNKNOWN")
         self.terrain_delta_field.mode_box.setCurrentText("UNKNOWN")
@@ -5053,7 +5086,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._result_entry_active = False
         self.render_view()
 
-    def _show_result_entry_page(self) -> None:
+    def _show_result_entry_page(self, persistence_reads_allowed: bool = True) -> None:
         self.workbench_stack.setCurrentWidget(self.action_workbench_page)
         self.action_result_step_stack.setCurrentWidget(self.result_workbench_page)
         self.record_action_button.setText("結果記録")
@@ -5067,14 +5100,129 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.record_opponent_faint_button.setCheckable(True)
         self.record_self_faint_button.setVisible(True)
         self.record_opponent_faint_button.setVisible(True)
+        self.mega_result_group.setVisible(True)
+        self._render_mega_controls(persistence_reads_allowed)
 
-    def _build_move_result_candidates(self) -> None:
-        while self.result_candidates_layout.count():
-            item = self.result_candidates_layout.takeAt(0)
+    def _current_result_active_for_mega(self, side: MegaSide) -> str | None:
+        """Return only a nonblank, human-confirmed active Pokemon name."""
+
+        confirmed = self._bundle_c_controller.turn_state_summary().confirmed_state
+        if confirmed is None:
+            return None
+        known = (
+            confirmed.self_side.active
+            if side is MegaSide.SELF
+            else confirmed.opponent_side.active
+        )
+        if not known.is_confirmed or not isinstance(known.value, str):
+            return None
+        active_name = known.value.strip()
+        if not active_name or active_name == "UNKNOWN":
+            return None
+        return active_name
+
+    def _staged_mega_event(self, side: MegaSide) -> _ResultEventDraft | None:
+        target_side = "self" if side is MegaSide.SELF else "opponent"
+        return next(
+            (
+                event
+                for event in self._result_events
+                if event.kind == "mega" and event.target_side == target_side
+            ),
+            None,
+        )
+
+    def _render_mega_controls(self, persistence_reads_allowed: bool = True) -> None:
+        """Render controls from persisted resource state plus draft events."""
+
+        if not hasattr(self, "mega_result_group"):
+            return
+        try:
+            persisted = self._bundle_c_controller.mega_battle_state()
+        except (DomainError, KeyError, ValueError, RuntimeError):
+            for button in (self.self_mega_button, self.opponent_mega_button):
+                button.setChecked(False)
+                button.setEnabled(False)
+            return
+
+        for side, button in (
+            (MegaSide.SELF, self.self_mega_button),
+            (MegaSide.OPPONENT, self.opponent_mega_button),
+        ):
+            staged = self._staged_mega_event(side)
+            already_used = persisted.side(side).mega_used
+            button.setChecked(staged is not None)
+            button.setEnabled(
+                self._result_entry_active
+                and persistence_reads_allowed
+                and not already_used
+                and (staged is not None or self._current_result_active_for_mega(side) is not None)
+            )
+
+    def _toggle_mega_event(self, side: MegaSide) -> None:
+        """Stage/cancel one explicit actual Mega confirmation for this Turn."""
+
+        if not self._result_entry_active:
+            return
+        try:
+            persisted = self._bundle_c_controller.mega_battle_state()
+        except (DomainError, KeyError, ValueError, RuntimeError):
+            self._render_mega_controls(False)
+            return
+        if persisted.side(side).mega_used:
+            self._render_mega_controls()
+            return
+
+        existing = self._staged_mega_event(side)
+        if existing is not None:
+            self._result_events.remove(existing)
+            self._project_result_events()
+            self._render_mega_controls()
+            return
+
+        active_name = self._current_result_active_for_mega(side)
+        if active_name is None:
+            self._result_validation_error = (
+                "確認済みのActiveがないため、メガ進化を記録できません。"
+            )
+            self._render_result_summary()
+            self._render_mega_controls()
+            return
+
+        current_form = deterministic_mega_form(active_name)
+        self._result_event_sequence += 1
+        self._result_events.append(
+            _ResultEventDraft(
+                event_id=f"mega-{self._result_event_sequence}",
+                target_side="self" if side is MegaSide.SELF else "opponent",
+                pokemon_name=active_name,
+                kind="mega",
+                field_name="mega",
+                value=current_form or "MEGA",
+                current_form=current_form,
+            )
+        )
+        self._project_result_events()
+        self._render_mega_controls()
+
+    def _confirmed_mega_sides(self) -> tuple[MegaSide, ...]:
+        """Derive typed Mega confirmations from the canonical Result draft."""
+
+        sides: list[MegaSide] = []
+        for event in self._result_events:
+            if event.kind == "mega":
+                sides.append(
+                    MegaSide.SELF if event.target_side == "self" else MegaSide.OPPONENT
+                )
+        return tuple(sides)
+
+    def _build_move_candidates(self) -> None:
+        while self.candidates_layout.count():
+            item = self.candidates_layout.takeAt(0)
             widget = item.widget() if item is not None else None
             if widget is not None:
                 widget.deleteLater()
-        self._result_candidate_cards.clear()
+        self._candidate_cards.clear()
         active_names = self._current_result_active_names()
         own_move = self.actual_action_name_box.currentText().strip()
         opponent_move = self.opponent_action_name_input.text().strip()
@@ -5124,16 +5272,16 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                     display_effect=effect,
                 )
                 candidates.append(candidate)
-                card = _MoveResultCandidateCard(candidate, self._decide_result_candidate)
-                self._result_candidate_cards[candidate.candidate_id] = card
-                self.result_candidates_layout.addWidget(card)
-        self._result_candidates = tuple(candidates)
+                card = _MoveResultCandidateCard(candidate, self._decide_candidate)
+                self._candidate_cards[candidate.candidate_id] = card
+                self.candidates_layout.addWidget(card)
+        self._candidates = tuple(candidates)
         if not candidates:
-            self.result_candidates_layout.addWidget(
+            self.candidates_layout.addWidget(
                 QLabel("既存metadataから提示できる候補はありません。必要なら手入力してください。")
             )
 
-    def _decide_result_candidate(
+    def _decide_candidate(
         self, candidate: _MoveResultCandidate, decision: str
     ) -> None:
         self._result_events = [
@@ -5141,7 +5289,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             for event in self._result_events
             if event.candidate_id != candidate.candidate_id
         ]
-        self._result_candidate_decisions[candidate.candidate_id] = decision
+        self._candidate_decisions[candidate.candidate_id] = decision
         if decision == "OCCURRED":
             self._result_event_sequence += 1
             self._result_events.append(
@@ -5162,10 +5310,10 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 for event in self._result_events
                 if event.candidate_id != candidate.candidate_id
             ]
-            self._result_candidate_decisions[candidate.candidate_id] = "UNDECIDED"
+            self._candidate_decisions[candidate.candidate_id] = "UNDECIDED"
             self._project_result_events()
-        for candidate_id, card in self._result_candidate_cards.items():
-            card.set_decision(self._result_candidate_decisions.get(candidate_id, "UNDECIDED"))
+        for candidate_id, card in self._candidate_cards.items():
+            card.set_decision(self._candidate_decisions.get(candidate_id, "UNDECIDED"))
 
     def _open_manual_result_dialog(self, _checked: bool = False) -> None:
         dialog = _ManualResultDialog(self, add_event=self._add_manual_result_event)
@@ -5323,8 +5471,14 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 editor.status_field.line.setText(str(event.value))
             elif event.kind == "faint":
                 editor.mark_fainted()
-        for candidate in self._result_candidates:
-            if self._result_candidate_decisions.get(candidate.candidate_id) != "DID_NOT_OCCUR":
+            elif event.kind == "mega":
+                # Mega is a match-level resource, not a SideDelta field.
+                continue
+        for candidate in self._candidates:
+            if (
+                self._candidate_decisions.get(candidate.candidate_id)
+                != "DID_NOT_OCCUR"
+            ):
                 continue
             editor = (
                 self.self_delta_editor
@@ -5375,6 +5529,12 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 detail = f"{labels[event.field_name]} {int(event.value):+d}"
             elif event.kind == "status":
                 detail = f"状態：{event.value}"
+            elif event.kind == "mega":
+                detail = (
+                    f"→ {event.current_form}"
+                    if event.current_form is not None
+                    else "→ メガ進化（形態未確定）"
+                )
             else:
                 detail = "ひんし"
             source = f"  原因：{event.source_move}" if event.source_move else ""
@@ -5394,8 +5554,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         removed = next((event for event in self._result_events if event.event_id == event_id), None)
         self._result_events = [event for event in self._result_events if event.event_id != event_id]
         if removed is not None and removed.candidate_id is not None:
-            self._result_candidate_decisions[removed.candidate_id] = "UNDECIDED"
-            card = self._result_candidate_cards.get(removed.candidate_id)
+            self._candidate_decisions[removed.candidate_id] = "UNDECIDED"
+            card = self._candidate_cards.get(removed.candidate_id)
             if card is not None:
                 card.set_decision("UNDECIDED")
         self._project_result_events()
@@ -5412,7 +5572,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         super()._on_next_turn(_checked)
         if self._bundle_c_controller.refresh().projection.session_state == "TURN_CAPTURE_PENDING":
             self._result_events.clear()
-            self._result_candidate_decisions.clear()
+            self._candidate_decisions.clear()
 
     def _on_record_opponent_faint(self, _checked: bool = False) -> None:
         """相手ひんし: quick-set the opponent result-delta HP to HpBucket.ZERO.
@@ -5491,6 +5651,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             opponent_side_delta=opponent_side_delta,
             weather_delta=self.weather_delta_field.to_delta(),
             terrain_delta=self.terrain_delta_field.to_delta(),
+            confirmed_mega_sides=self._confirmed_mega_sides(),
         )
         self.render_view(view)
 

@@ -201,16 +201,16 @@ def test_manual_defense_minus_two_can_be_removed_before_next_turn(tmp_path: Path
     event_id = window._result_events[-1].event_id  # noqa: SLF001
     window._remove_result_event(event_id)  # noqa: SLF001
     assert window.self_delta_editor.to_side_delta().defense_stage.observation is (
-        ChangeObservation.UNCHANGED
+        ChangeObservation.UNKNOWN
     )
     confirmed = controller.turn_state_summary().confirmed_state
     assert confirmed is not None
     window.next_turn_button.click()
     persisted = repository.list_action_result_deltas_based_on(confirmed.confirmed_state_id)[-1]
-    assert persisted.self_side.defense_stage.observation is ChangeObservation.UNCHANGED
+    assert persisted.self_side.defense_stage.observation is ChangeObservation.UNKNOWN
     draft = controller.turn_state_summary().open_draft
     assert draft is not None
-    assert draft.self_side.defense_stage.value == 0
+    assert not draft.self_side.defense_stage.is_confirmed
     repository.close()
 
 
@@ -231,6 +231,9 @@ def test_probabilistic_no_proc_writes_no_delta(tmp_path: Path) -> None:
         controller.turn_state_summary().confirmed_state.confirmed_state_id
     )[-1]
     assert delta.self_side.special_defense_stage.observation is ChangeObservation.UNCHANGED
+    assert delta.self_side.hp_bucket.observation is ChangeObservation.UNKNOWN
+    assert delta.self_side.active.observation is ChangeObservation.UNKNOWN
+    assert delta.self_side.attack_stage.observation is ChangeObservation.UNKNOWN
     repository.close()
 
 
@@ -315,9 +318,43 @@ def test_double_faint_and_event_removal_share_existing_hp_zero(tmp_path: Path) -
 def test_no_event_result_entry_advances_without_dummy_result(tmp_path: Path) -> None:
     repository, controller, window, _transport = build_window(tmp_path)
     _reach_action_entry(window, controller)
+    confirmed = controller.turn_state_summary().confirmed_state
+    assert confirmed is not None
     _open_result(window)
     assert window._result_events == []  # noqa: SLF001
     window.next_turn_button.click()
     assert controller.refresh().projection.session_state == "TURN_CAPTURE_PENDING"
-    assert controller.turn_state_summary().open_draft is not None
+    draft = controller.turn_state_summary().open_draft
+    assert draft is not None
+    persisted = repository.list_action_result_deltas_based_on(
+        confirmed.confirmed_state_id
+    )[-1]
+    assert persisted.self_side.active.observation is ChangeObservation.UNKNOWN
+    assert persisted.opponent_side.active.observation is ChangeObservation.UNKNOWN
+    assert persisted.self_side.hp_bucket.observation is ChangeObservation.UNKNOWN
+    assert persisted.opponent_side.hp_bucket.observation is ChangeObservation.UNKNOWN
+    assert persisted.self_side.defense_stage.observation is ChangeObservation.UNKNOWN
+    assert persisted.opponent_side.status.observation is ChangeObservation.UNKNOWN
+    assert persisted.weather.observation is ChangeObservation.UNKNOWN
+    assert persisted.terrain.observation is ChangeObservation.UNKNOWN
+    assert not draft.self_side.active.is_confirmed
+    assert not draft.self_side.hp_bucket.is_confirmed
+    repository.close()
+
+
+def test_opponent_faint_keeps_unobserved_self_hp_unknown(tmp_path: Path) -> None:
+    repository, controller, window, _transport = build_window(tmp_path)
+    _reach_action_entry(window, controller, own_move="Wave Crash")
+    confirmed = controller.turn_state_summary().confirmed_state
+    assert confirmed is not None
+    _open_result(window)
+    window.record_opponent_faint_button.click()
+    window.next_turn_button.click()
+
+    persisted = repository.list_action_result_deltas_based_on(
+        confirmed.confirmed_state_id
+    )[-1]
+    assert persisted.opponent_side.hp_bucket.observation is ChangeObservation.CHANGED
+    assert persisted.opponent_side.hp_bucket.after_value is HpBucket.ZERO
+    assert persisted.self_side.hp_bucket.observation is ChangeObservation.UNKNOWN
     repository.close()

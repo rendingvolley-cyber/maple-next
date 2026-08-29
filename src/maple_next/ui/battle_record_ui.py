@@ -4664,7 +4664,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
         super().render_view(current)
         if hasattr(self, "match_end_local_group"):
-            endable = projection.session_state in {"BATTLE_READY", "TURN_RECORDED"}
+            endable = projection.session_state in {
+                "BATTLE_READY",
+                "TURN_REVIEWED",
+                "TURN_RECORDED",
+            }
             self.match_end_group.setVisible(False)
             self.match_end_local_group.setVisible(endable)
             for outcome_button in (self.match_win_button, self.match_loss_button):

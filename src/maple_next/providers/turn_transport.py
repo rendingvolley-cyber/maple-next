@@ -41,7 +41,27 @@ TURN_PROVIDER_MODEL_ENV = "MAPLE_NEXT_GEMINI_TURN_MODEL"
 DEFAULT_TURN_MODEL = "gemini-3.5-flash-lite"
 _API_KEY_ENV = "MAPLE_NEXT_GEMINI_API_KEY"
 _TIMEOUT_ENV = "MAPLE_NEXT_GEMINI_TIMEOUT_SECONDS"
-_DEFAULT_TIMEOUT_SECONDS = 30.0
+_DEFAULT_TIMEOUT_SECONDS = 15.0
+_MAX_TOURNAMENT_TIMEOUT_SECONDS = 15.0
+
+_TOURNAMENT_FAST_LOOKAHEAD_POLICY = """Tournament fast-lookahead requirement:
+- Reach one concrete recommendation quickly; never abstain, defer the strategic choice to the
+  human, or return without exactly one legal recommended_action merely because information is
+  uncertain.
+- Use bounded forward lookahead of roughly 2-3 turns from the current decision. This means the
+  current action, the opponent's most important plausible reply, and the next meaningful
+  continuation/revenge/switch sequence. Do not attempt exhaustive multi-turn tree search.
+- Branch only on the 1-2 opponent replies that could materially change the recommendation.
+  Collapse low-impact possibilities into the existing uncertainty/robustness handling instead
+  of exploring every possible move or switch.
+- Prefer the action whose short line leaves the best practical position and endgame resources
+  across those important replies. Include switch cost, sacrifice/revenge sequencing, setup
+  payoff, priority/speed-control preservation, and a clean finishing route when relevant.
+- If uncertainty remains after this bounded comparison, still choose the single best legal
+  action. Express the uncertainty through recommendation_robustness, opponent_prediction, and
+  warnings; uncertainty is never a reason to omit or postpone the recommendation.
+- Keep the returned JSON concise. Do not output the simulated line or hidden chain-of-thought;
+  return only the strict response contract requested by the surrounding prompt."""
 
 
 def load_authorized_turn_provider_config_from_env() -> ProviderConfig:
@@ -49,6 +69,8 @@ def load_authorized_turn_provider_config_from_env() -> ProviderConfig:
 
     The flag is deliberately separate from the API key. Merely having a key
     in the environment can never enable Turn Advice network access.
+    Tournament Turn Advice is capped at 15 seconds even if an older runtime
+    environment still carries a larger timeout value.
     """
 
     if os.environ.get(TURN_PROVIDER_AUTHORIZATION_ENV, "").strip() != "1":
@@ -59,10 +81,31 @@ def load_authorized_turn_provider_config_from_env() -> ProviderConfig:
     model = os.environ.get(TURN_PROVIDER_MODEL_ENV, "").strip() or DEFAULT_TURN_MODEL
     raw_timeout = os.environ.get(_TIMEOUT_ENV, "").strip()
     try:
-        timeout_seconds = float(raw_timeout) if raw_timeout else _DEFAULT_TIMEOUT_SECONDS
+        requested_timeout = (
+            float(raw_timeout) if raw_timeout else _DEFAULT_TIMEOUT_SECONDS
+        )
     except ValueError as exc:
         raise ProviderConfigError("GEMINI_TIMEOUT_INVALID") from exc
+    timeout_seconds = min(requested_timeout, _MAX_TOURNAMENT_TIMEOUT_SECONDS)
     return ProviderConfig(api_key=api_key, model=model, timeout_seconds=timeout_seconds)
+
+
+def _append_tournament_fast_lookahead(body: dict[str, Any]) -> dict[str, Any]:
+    """Append bounded-lookahead instructions to a fresh rich Turn body.
+
+    The canonical request/hash and response schema are untouched. The helper
+    mutates only the provider-bound prompt body built for this one dispatch.
+    """
+
+    try:
+        part = body["contents"][0]["parts"][0]
+        prompt = part["text"]
+    except (KeyError, IndexError, TypeError):
+        return body
+    if not isinstance(prompt, str):
+        return body
+    part["text"] = f"{prompt}\n\n{_TOURNAMENT_FAST_LOOKAHEAD_POLICY}"
+    return body
 
 
 class TurnProviderTransport(Protocol):
@@ -90,7 +133,9 @@ class GeminiTurnAdviceTransport:
         self, request: TurnAdviceTransportRequest, config: ProviderConfig
     ) -> SanitizedProviderResult:
         if isinstance(request, RichStateTurnAdviceRequest):
-            body = build_rich_provider_request_body(request)
+            body = _append_tournament_fast_lookahead(
+                build_rich_provider_request_body(request)
+            )
         else:
             body = build_provider_request_body(request)
         endpoint = self._endpoint_template.format(model=config.model)

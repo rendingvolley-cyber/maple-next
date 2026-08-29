@@ -37,7 +37,7 @@ _MATCH_ERROR_MESSAGES = {
     "HUMAN_MATCH_OUTCOME_CONFIRMATION_REQUIRED": "WIN / LOSE確定前に確認チェックを入れてください。",
     "MATCH_OUTCOME_ALREADY_SET": "この対戦の勝敗は既に確定しており変更できません。",
     "MATCH_END_NOT_ALLOWED_IN_CURRENT_STATE": (
-        "現在の状態では対戦を終了できません。BATTLE_READYまたはTURN_RECORDEDで操作してください。"
+        "現在の状態では対戦を終了できません。BATTLE_READY、TURN_REVIEWEDまたはTURN_RECORDEDで操作してください。"
     ),
     "EXPECTED_MATCH_ENDED": "勝敗を確定してからMATCH JSONを保存してください。",
     "MATCH_OUTCOME_REQUIRED": "確定済みのWIN / LOSEを読み込めません。",

@@ -42,6 +42,11 @@ from maple_next.domain.legal_switches import (
 from maple_next.domain.legal_switches import (
     confirm_legal_switches as build_legal_switch_confirmation,
 )
+from maple_next.domain.mega_evolution import (
+    MegaBattleState,
+    MegaSide,
+    deterministic_mega_form,
+)
 from maple_next.domain.models import (
     AppliedSelectionSnapshot,
     BattleSession,
@@ -392,6 +397,12 @@ class BattleApplication:
             except KeyError:
                 current_turn_number = None
         return project(session, latest_job, current_turn_number=current_turn_number)
+
+    def mega_battle_state(self) -> MegaBattleState:
+        """Read the persisted actual Mega resource state for the active match."""
+
+        session = self._require_active_session()
+        return self.repository.get_mega_state(session.session_id)
 
     def new_match(self) -> BattleSession:
         with self.repository.transaction():
@@ -1263,6 +1274,7 @@ class BattleApplication:
                     raise DomainError("EVIDENCE_METADATA_MISSING") from exc
 
             applied = self.repository.get_applied_selection(session.current_applied_selection_id)
+            mega_state = self.repository.get_mega_state(session.session_id)
             self_team_build_sha256: str | None = None
             if session.current_reviewed_selection_id is not None:
                 selection_facts = self.repository.get_selection_facts(
@@ -1350,6 +1362,7 @@ class BattleApplication:
                     bundle3_context=bundle3_context,
                     rules_context=rules_context,
                     opponent_intel_context=opponent_intel_context,
+                    mega_state=mega_state,
                     rules_season_id=rules_season_id,
                     evidence=evidence,
                     self_team_build_sha256=self_team_build_sha256,
@@ -1564,6 +1577,7 @@ class BattleApplication:
         if session.current_applied_selection_id is None:
             raise DomainError("APPLIED_SELECTION_REQUIRED")
         applied = self.repository.get_applied_selection(session.current_applied_selection_id)
+        mega_state = self.repository.get_mega_state(session.session_id)
         self_team_build_sha256: str | None = None
         if session.current_reviewed_selection_id is not None:
             selection_facts = self.repository.get_selection_facts(
@@ -1644,6 +1658,7 @@ class BattleApplication:
                 bundle3_context=bundle3_context,
                 rules_context=rules_context,
                 opponent_intel_context=opponent_intel_context,
+                mega_state=mega_state,
                 rules_season_id=rules_season_id,
                 evidence=evidence,
                 self_team_build_sha256=self_team_build_sha256,
@@ -2150,6 +2165,7 @@ class BattleApplication:
         completion_identity: TurnIdentity,
         action_result_delta: ActionResultDelta,
         rich_transaction_id: str,
+        confirmed_mega_sides: tuple[MegaSide, ...] = (),
     ) -> RecordedAction:
         """Record one mandatory, identity-bound Bundle 1 completion."""
 
@@ -2171,6 +2187,7 @@ class BattleApplication:
                 action_result_delta,
                 rich_transaction_id,
             ),
+            confirmed_mega_sides=confirmed_mega_sides,
         )
 
     def _record_actual_action(
@@ -2183,6 +2200,7 @@ class BattleApplication:
         opponent_action_name: str | None,
         action_order: ActionOrder,
         rich_completion: tuple[TurnIdentity, ActionResultDelta, str] | None,
+        confirmed_mega_sides: tuple[MegaSide, ...] = (),
     ) -> RecordedAction:
         if not human_confirmed:
             raise DomainError("HUMAN_ACTION_CONFIRMATION_REQUIRED")
@@ -2230,6 +2248,7 @@ class BattleApplication:
                 )
             except ValueError as exc:
                 raise DomainError(f"INVALID_RECORDED_ACTION:{exc}") from exc
+            based_on_state: ConfirmedTurnState | None = None
             if rich_completion is not None:
                 completion_identity, action_result_delta, rich_transaction_id = rich_completion
                 if not rich_transaction_id.strip():
@@ -2246,6 +2265,52 @@ class BattleApplication:
                     raise DomainError("BASED_ON_CONFIRMED_STATE_NOT_FOUND") from exc
                 if based_on_state.identity != completion_identity:
                     raise DomainError("ACTION_COMPLETION_CONFIRMED_STATE_IDENTITY_MISMATCH")
+
+            if confirmed_mega_sides and rich_completion is None:
+                raise DomainError("MEGA_CONFIRMATION_REQUIRES_RICH_ACTION_COMPLETION")
+
+            # Prepare the complete match-level actual Mega state before the
+            # first durable action write. The target is only the active
+            # Pokemon from the already validated human-confirmed state; no
+            # Selection/OCR/general-knowledge fallback is permitted.
+            prepared_mega_state: MegaBattleState | None = None
+            if confirmed_mega_sides:
+                if not all(isinstance(side, MegaSide) for side in confirmed_mega_sides):
+                    raise DomainError("MEGA_SIDE_TYPE_INVALID")
+                if len(set(confirmed_mega_sides)) != len(confirmed_mega_sides):
+                    raise DomainError("MEGA_DUPLICATE_SIDE_CONFIRMATION")
+                assert based_on_state is not None
+                try:
+                    prepared_mega_state = self.repository.get_mega_state(session.session_id)
+                except (KeyError, ValueError) as exc:
+                    raise DomainError("MEGA_STATE_LOAD_FAILED") from exc
+                confirmed_at_utc = datetime.now(UTC).isoformat()
+                for mega_side in confirmed_mega_sides:
+                    side_state = (
+                        based_on_state.self_side
+                        if mega_side is MegaSide.SELF
+                        else based_on_state.opponent_side
+                    )
+                    active_value = side_state.active.value
+                    mega_active_name = (
+                        active_value.strip() if isinstance(active_value, str) else ""
+                    )
+                    if (
+                        not side_state.active.is_confirmed
+                        or not mega_active_name
+                        or mega_active_name == "UNKNOWN"
+                    ):
+                        raise DomainError(f"MEGA_ACTIVE_NOT_CONFIRMED:{mega_side.value}")
+                    try:
+                        prepared_mega_state = prepared_mega_state.record_use(
+                            side=mega_side,
+                            pokemon_name=mega_active_name,
+                            current_form=deterministic_mega_form(mega_active_name),
+                            confirmed_turn=based_on_state.identity.turn_number,
+                            confirmed_at_utc=confirmed_at_utc,
+                        )
+                    except ValueError as exc:
+                        raise DomainError(str(exc)) from exc
 
             # Every mandatory rich prerequisite above is validated before
             # the first durable write. The writes below still share the
@@ -2268,6 +2333,7 @@ class BattleApplication:
                 # PokemonLocalMemory authority current in this same
                 # transaction so faint/alive/remaining and future legal
                 # switch derivation cannot lag behind the canonical delta.
+                assert based_on_state is not None
                 for side_name, previous_side, side_delta in (
                     ("SELF", based_on_state.self_side, action_result_delta.self_side),
                     (
@@ -2293,6 +2359,10 @@ class BattleApplication:
                                 previous_side.status, side_delta.status
                             ),
                         ),
+                    )
+                if prepared_mega_state is not None:
+                    self.repository.update_mega_state(
+                        session.session_id, prepared_mega_state
                     )
             session.state = BattleState.TURN_RECORDED
             session.bump_battle()

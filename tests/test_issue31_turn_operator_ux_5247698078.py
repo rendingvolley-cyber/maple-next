@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from pathlib import Path
 
@@ -22,6 +23,12 @@ from test_issue31_turn_state_ui_bundle_c import (
 
 from maple_next.domain.opponent_intel import OpponentMetaSnapshot, RankedUsage
 from maple_next.ocr.contracts import OCR_CANDIDATE_SOURCE, OcrCandidate, OcrFieldKey
+from maple_next.providers.turn_response_v2 import (
+    OpponentPredictionV2,
+    PredictionLineV2,
+    RecommendedAction,
+    TurnAdviceBodyV2,
+)
 
 
 def _confirm_legal_switches_honestly(window) -> None:
@@ -81,29 +88,32 @@ def _opponent_identity_candidate(species: str) -> tuple[OcrCandidate, ...]:
     )
 
 
-def test_gemini_recommendation_is_primary_and_audit_is_secondary(tmp_path: Path) -> None:
+def test_gemini_recommendation_is_minimal_player_surface(tmp_path: Path) -> None:
     repository, controller, window, _transport = build_window(tmp_path)
     _advance_to_turn_capture_pending(controller)
     window.render_view()
     _reach_action_with_advice(window, warnings="相手の先制技に注意")
 
     assert window.turn_advice_action_label.objectName() == "advicePrimaryAction"
-    assert window.turn_advice_action_label.font().pointSize() >= (
-        window.turn_advice_source_label.font().pointSize()
-    )
-    # Gemini V2 Bundle 6: the prediction label now renders the compact
-    # structured v2 line (category/support_basis/support + summary) rather
-    # than the bare summary string, per spec's "compactly show category,
-    # support, specific action if present, summary" requirement.
-    assert window.turn_advice_prediction_label.text() == (
-        "[UNKNOWN/NONE/LOW] —: 相手は交代を選ぶ可能性が高い"
-    )
+    assert window.turn_advice_action_label.text() == "Flower Trick"
     assert "対面有利" in window.turn_advice_rationale_label.text()
-    assert window.turn_advice_warning_card.isVisible()
-    assert window.turn_advice_warnings_label.text() == "相手の先制技に注意"
-    assert window.turn_advice_audit_group.isAncestorOf(window.turn_advice_source_label)
-    assert window.turn_advice_audit_group.isAncestorOf(window.turn_advice_model_label)
-    assert not window.turn_advice_audit_group.isChecked()
+    # The injected advice deliberately carries an UNKNOWN prediction and a
+    # backend warning; neither is useful player content for this successful
+    # normal card, so both are absent rather than collapsed behind a toggle.
+    assert window.turn_advice_prediction_label.text() == ""
+    assert window.turn_advice_prediction_card.isHidden()
+    assert window.turn_advice_warning_card.isHidden()
+    assert not hasattr(window, "turn_advice_audit_group")
+    for label in (
+        window.turn_advice_source_label,
+        window.turn_advice_model_label,
+        window.turn_advice_binding_label,
+        window.turn_advice_legality_label,
+        window.turn_advice_schema_version_label,
+        window.rich_gemini_status_label,
+        window.rich_gemini_denial_label,
+    ):
+        assert label.isHidden()
 
     repository.close()
 
@@ -114,8 +124,73 @@ def test_warning_card_is_absent_when_response_has_no_warning(tmp_path: Path) -> 
     window.render_view()
     _reach_action_with_advice(window)
 
-    assert window.turn_advice_warnings_label.text() == "—"
+    assert window.turn_advice_warnings_label.text() == ""
     assert window.turn_advice_warning_card.isHidden()
+    repository.close()
+
+
+def test_useful_structured_prediction_is_human_text_only(tmp_path: Path) -> None:
+    """A real Battle Record window exposes useful prediction prose only."""
+
+    repository, controller, window, _transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _reach_action_with_advice(window)
+
+    view = controller.refresh()
+    useful_body = TurnAdviceBodyV2(
+        response_schema_version="maple-turn-advice-response.v2",
+        recommended_action=RecommendedAction(
+            action_id="move-1", action_type="MOVE", action_name="Flower Trick"
+        ),
+        recommendation_robustness="HIGH",
+        reasons=("対面有利を維持できる",),
+        opponent_prediction=OpponentPredictionV2(
+            primary=PredictionLineV2(
+                category="DAMAGING_MOVE",
+                specific_action="Earthquake",
+                support_basis="CONFIRMED_MATCH",
+                support="HIGH",
+                summary="相手はじしんなどの攻撃技を選ぶ可能性が高い",
+            ),
+            alternatives=(
+                PredictionLineV2(
+                    category="SWITCH",
+                    specific_action=None,
+                    support_basis="GENERAL_KNOWLEDGE",
+                    support="LOW",
+                    summary="交代の可能性も残る",
+                ),
+            ),
+        ),
+        warnings=("backend warning",),
+    )
+    assert view.turn_advice is not None
+    synthetic_advice = dataclasses.replace(
+        view.turn_advice,
+        structured_v2=useful_body,
+        opponent_prediction=useful_body.opponent_prediction.primary.summary,
+        rationale="対面有利を維持できる",
+        warnings=("backend warning",),
+        unavailable_reason=None,
+    )
+    window.render_view(dataclasses.replace(view, turn_advice=synthetic_advice))
+
+    assert window.turn_advice_action_label.text() == "Flower Trick"
+    assert window.turn_advice_rationale_label.text() == "対面有利を維持できる"
+    assert (
+        window.turn_advice_prediction_label.text()
+        == "相手はじしんなどの攻撃技を選ぶ可能性が高い"
+    )
+    assert not window.turn_advice_prediction_card.isHidden()
+    assert window.turn_advice_warning_card.isHidden()
+    assert "DAMAGING_MOVE" not in window.turn_advice_prediction_label.text()
+    assert "CONFIRMED_MATCH" not in window.turn_advice_prediction_label.text()
+    assert "HIGH" not in window.turn_advice_prediction_label.text()
+    assert not hasattr(window, "turn_advice_audit_group")
+    assert not window.rich_gemini_status_label.isVisible()
+    assert not window.rich_gemini_denial_label.isVisible()
+
     repository.close()
 
 

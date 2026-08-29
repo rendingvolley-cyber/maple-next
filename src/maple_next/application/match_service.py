@@ -33,6 +33,7 @@ from maple_next.application.service import (
 )
 from maple_next.domain.enums import BattleState, MatchOutcome
 from maple_next.domain.match_models import MatchExportRecord, MatchOutcomeRecord
+from maple_next.domain.mega_evolution import mega_state_to_canonical_dict
 from maple_next.domain.models import BattleSession
 from maple_next.opponent_intel_db.generation_store import GenerationStoreError
 from maple_next.opponent_intel_db.runtime_intel import load_pinned_generation
@@ -497,6 +498,13 @@ class MatchApplication(BattleApplication):
             )
         except MatchExportV3Error as exc:
             raise DomainError(f"V3_EXPORT_BUILD_FAILED:{exc}") from exc
+
+        # Tournament Battle Mega: actual human-confirmed match-level state is
+        # additive audit/context in rich exports. It is never represented as
+        # an action-history entry or provider payload.
+        payload["mega_state"] = mega_state_to_canonical_dict(
+            self.repository.get_mega_state(session.session_id)
+        )
 
         # Bundle 4 (Gemini V2): small additive audit field -- the exact
         # rules identity this match was pinned to, so a later audit can

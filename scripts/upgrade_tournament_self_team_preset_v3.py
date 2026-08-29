@@ -18,6 +18,7 @@ TARGET_TEAM_NAMES = (
     "ラグラージ",
     "ブリジュラス",
 )
+TERMINAL_ACTIVE_STATES = frozenset({"MATCH_ENDED", "MATCH_EXPORTED"})
 
 
 def _db_path() -> Path:
@@ -127,9 +128,10 @@ def apply(repository_root: Path, preset_id: str | None) -> int:
     try:
         connection.execute("BEGIN IMMEDIATE")
         active = _active_session(connection)
-        if active is not None:
+        if active is not None and str(active["state"]) not in TERMINAL_ACTIVE_STATES:
             raise RuntimeError(
-                "ACTIVE_SESSION_PRESENT:finish/abort/export the current match before preset upgrade"
+                "NONTERMINAL_ACTIVE_SESSION_PRESENT:finish/abort/export the current match "
+                "before preset upgrade"
             )
 
         candidates = _candidate_rows(connection)
@@ -158,7 +160,6 @@ def apply(repository_root: Path, preset_id: str | None) -> int:
         if current.schema_version == "maple-team.v3":
             if current.selection_profile != profile:
                 raise RuntimeError("EXISTING_V3_PROFILE_DIFFERS_FROM_CANONICAL_TOURNAMENT_PROFILE")
-            # Repair only a stale metadata label if necessary.
             connection.execute(
                 "UPDATE self_team_presets SET build_schema_version = ? WHERE preset_id = ?",
                 ("maple-team.v3", chosen_id),

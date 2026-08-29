@@ -287,10 +287,11 @@ def test_v2_detailed_build_retains_free_selection(tmp_path: Path) -> None:
         repository.close()
 
 
-def test_real_battle_record_ui_shows_package_mega_and_reason(tmp_path: Path) -> None:
+def test_real_battle_record_ui_shows_package_mega_reason_and_provider(tmp_path: Path) -> None:
     qapp = cast(QApplication, QApplication.instance() or QApplication([]))
     build = _build()
-    response = _profile_payload("P1", P1, P1[1], "メタグロス")
+    response = _profile_payload("P2", P2, P2[0], "ラグラージ")
+    response["selection_reason"] = "雨展開を軸に、相手6体への対応力が最も高いため。"
     transport = FakeSelectionAdviceTransport(
         responses=[
             SanitizedProviderResult(
@@ -327,15 +328,77 @@ def test_real_battle_record_ui_shows_package_mega_and_reason(tmp_path: Path) -> 
         qapp.processEvents()
 
         assert transport.call_count == 1
-        assert window.selection_v3_advice_package.text() == "P1 グロス軸"
-        assert tuple(label.text() for label in window.selection_v3_advice_pick_labels) == P1
-        assert window.selection_v3_advice_lead.text() == P1[1]
-        assert window.selection_v3_advice_intended_mega.text() == "メタグロス"
+        assert window.selection_v3_advice_package.text() == "P2 雨軸"
+        assert tuple(label.text() for label in window.selection_v3_advice_pick_labels) == P2
+        assert window.selection_v3_advice_lead.text() == P2[0]
+        assert window.selection_v3_advice_intended_mega.text() == "ラグラージ"
         assert window.selection_v3_advice_reason.text() == response["selection_reason"]
+        assert window.selection_v3_advice_provider_model.text() == (
+            "GEMINI · fake-selection-profile-v3"
+        )
+        assert window.selection_v3_advice_reason.wordWrap()
     finally:
         window.close()
         repository.close()
 
+
+def test_legacy_selection_advice_has_safe_missing_v3_display(tmp_path: Path) -> None:
+    qapp = cast(QApplication, QApplication.instance() or QApplication([]))
+    v3_build = _build()
+    legacy_payload = {
+        "schema_version": "maple-team.v2",
+        "game": v3_build.game,
+        "name": v3_build.name,
+        "battle_format": v3_build.battle_format,
+        "members": [member.to_canonical_dict() for member in v3_build.members],
+    }
+    legacy_build = ChampionsTeamBuild.from_dict(legacy_payload)
+    response = {"selected_three": list(P1), "lead": P1[0]}
+    transport = FakeSelectionAdviceTransport(
+        responses=[
+            SanitizedProviderResult(
+                payload=response,
+                source_type=GEMINI_SOURCE_TYPE,
+                model="legacy-selection-model",
+            )
+        ]
+    )
+    repository = SQLiteRepository(tmp_path / "profile-legacy-ui.db")
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    application = MatchApplication(repository, export_dir)
+    adapter = GeminiSelectionAdviceAdapter(
+        transport,
+        lambda: ProviderConfig(api_key="fake", model="legacy-selection-model"),
+        dispatch_factory=SyncDispatch,
+    )
+    controller = TurnStateFlowController(
+        application,
+        repository,
+        MockSelectionAdviceAdapter(),
+        MockTurnAdviceAdapter(),
+        adapter,
+    )
+    ocr_dir = tmp_path / "ocr"
+    ocr_dir.mkdir()
+    window = BattleRecordUiWindow(controller, ocr_data_directory=ocr_dir)
+    try:
+        controller.new_match()
+        controller.confirm_selection_facts(legacy_build.pokemon_names, OPPONENT_TEAM, legacy_build)
+        window.render_view()
+        controller.send_selection_advice_to_gemini(on_result=window.render_view)
+        qapp.processEvents()
+
+        assert window.selection_v3_advice_package.text() == "—"
+        assert window.selection_v3_advice_intended_mega.text() == "—"
+        assert window.selection_v3_advice_reason.text() == "（理由情報なし）"
+        assert window.selection_v3_advice_provider_model.text() == (
+            "GEMINI · legacy-selection-model"
+        )
+        assert "P1" not in window.selection_v3_advice_package.text()
+    finally:
+        window.close()
+        repository.close()
 
 def test_profile_invalid_ui_result_is_not_rendered(tmp_path: Path) -> None:
     build = _build()

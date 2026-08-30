@@ -49,8 +49,9 @@ JOB_TYPE: Final[str] = "TURN_ADVICE"
 TOURNAMENT_TURN_STRATEGY_POLICY_VERSION: Final[str] = (
     "maple-turn-tournament-strategy.2026-08-30.v1"
 )
-_CURRENT_RICH_TURN_CONTRACT_MARKER: Final[str] = (
-    '"contract_version":"maple-turn-advice.v7"'
+_CURRENT_RICH_TURN_CONTRACT_MARKERS: Final[tuple[str, ...]] = (
+    '"contract_version":"maple-turn-advice.v7"',
+    '"contract_version":"maple-turn-advice.v8"',
 )
 _TOURNAMENT_TURN_STRATEGY_POLICY: Final[str] = """Tournament turn strategy policy
 (policy_version: maple-turn-tournament-strategy.2026-08-30.v1):
@@ -519,7 +520,7 @@ def _apply_current_rich_turn_strategy_policy(prompt: str) -> str:
     cannot add/remove legal actions or authorize dispatch.
     """
 
-    if _CURRENT_RICH_TURN_CONTRACT_MARKER not in prompt:
+    if not any(marker in prompt for marker in _CURRENT_RICH_TURN_CONTRACT_MARKERS):
         return prompt
     return f"{prompt}\n\n{_TOURNAMENT_TURN_STRATEGY_POLICY}"
 

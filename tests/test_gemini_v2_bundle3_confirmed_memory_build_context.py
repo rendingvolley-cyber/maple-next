@@ -376,6 +376,16 @@ class Bundle3Fixture:
                 confirmation=_confirmation(),
             )
         )
+        for index, name in enumerate((MASUKAANYA, HASSAMU), start=1):
+            self.repository.append_confirmed_legal_action_selection(
+                ConfirmedLegalActionSelection(
+                    confirmation_id=f"legal-switch-{index}-7",
+                    identity=self.identity(CURRENT_TURN_NUMBER),
+                    action_type=ActionType.SWITCH,
+                    action_name=name,
+                    confirmation=_confirmation(),
+                )
+            )
         self.repository.upsert_legal_switch_confirmation(
             LegalSwitchConfirmation(
                 confirmation_id="switch-confirm-7",

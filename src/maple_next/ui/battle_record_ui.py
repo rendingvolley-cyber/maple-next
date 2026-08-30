@@ -2021,11 +2021,17 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # legal switches, the provider-ready gate, and match export.
         faint_row = QHBoxLayout()
         self.record_opponent_faint_button = QPushButton("相手ひんし")
+        self.record_opponent_faint_button.setProperty("faintControl", True)
+        self.record_opponent_faint_button.setMinimumSize(128, 36)
+        self.record_opponent_faint_button.setAccessibleName("相手ひんし")
         self.record_opponent_faint_button.setToolTip(
             "相手の場のポケモンをHP0（ひんし）として結果に記録します（行動・結果記録で確定）。"
         )
         self.record_opponent_faint_button.clicked.connect(self._on_record_opponent_faint)
         self.record_self_faint_button = QPushButton("自分ひんし")
+        self.record_self_faint_button.setProperty("faintControl", True)
+        self.record_self_faint_button.setMinimumSize(128, 36)
+        self.record_self_faint_button.setAccessibleName("自分ひんし")
         self.record_self_faint_button.setToolTip(
             "自分の場のポケモンをHP0（ひんし）として結果に記録します（行動・結果記録で確定）。"
         )
@@ -3077,6 +3083,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             "QPushButton:disabled { color: #91a8bb; background: #091623; border-color: #20384e; }"
             "QPushButton:checked, QPushButton[selected=\"true\"], QPushButton[strong=\"true\"] { "
             "background: #1a3c5d; font-weight: 800; }"
+            "QPushButton[faintControl=\"true\"] { min-width: 128px; min-height: 36px; "
+            "padding: 7px 14px; font-size: 13px; font-weight: 800; "
+            "background: #26384d; color: #f8fafc; border: 2px solid #64748b; }"
+            "QPushButton[faintControl=\"true\"]:checked { background: #991b1b; "
+            "color: #ffffff; border-color: #f87171; }"
+            "QPushButton[faintControl=\"true\"]:disabled { background: #17212d; "
+            "color: #718096; border-color: #334155; }"
             "QPushButton[lifecycle=\"true\"] { min-height: 28px; font-size: 11px; "
             "font-weight: 800; }"
             "QPushButton[lifecycle=\"true\"][active=\"true\"] { background: #1a3c5d; "
@@ -4374,13 +4387,15 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if summary is None:
             summary = self._bundle_c_controller.turn_state_summary()
         confirmation = summary.legal_switch_confirmation
+        confirmed_state = summary.confirmed_state
         confirmation_is_current = bool(
             confirmation is not None
             and summary.identity is not None
-            and confirmation.identity == summary.identity
-            and summary.confirmed_state is not None
+            and confirmed_state is not None
+            and confirmation.identity == confirmed_state.identity
+            and self._same_turn_binding_for_ui(confirmation.identity, summary.identity)
             and confirmation.based_on_confirmed_state_id
-            == summary.confirmed_state.confirmed_state_id
+            == confirmed_state.confirmed_state_id
             and current.projection.current_applied_selection_id
             == confirmation.applied_selection_id
         )
@@ -4422,6 +4437,18 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.self_switch_target_box.setEnabled(has_legal_switch)
         self.self_switch_unavailable_label.setText(unavailable_message)
         self.self_switch_unavailable_label.setVisible(not has_legal_switch)
+
+    @staticmethod
+    def _same_turn_binding_for_ui(left: TurnIdentity, right: TurnIdentity) -> bool:
+        """Allow same-Turn metadata revisions without accepting stale Turns."""
+
+        return (
+            left.session_id == right.session_id
+            and left.match_id == right.match_id
+            and left.generation == right.generation
+            and left.turn_id == right.turn_id
+            and left.turn_number == right.turn_number
+        )
 
     @staticmethod
     def _player_turn_advice_action(advice: TurnAdviceView) -> str:
@@ -4966,9 +4993,16 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             f"HP{self.opponent_hp_box.currentText() or '—'}"
         )
 
-        self.next_turn_button.setEnabled(
-            self.next_turn_button.isEnabled() and projection.primary_cta == "NEXT_TURN"
-        )
+        if self._result_entry_active and projection.primary_cta == "RECORD_ACTUAL_ACTION":
+            # Result Entry is a second step of the current action lifecycle;
+            # its NEXT TURN click performs the atomic result commit first.
+            # A harmless render must not disable that live control merely
+            # because the legacy primary CTA is still RECORD_ACTUAL_ACTION.
+            self.next_turn_button.setEnabled(current.persistence_reads_allowed)
+        else:
+            self.next_turn_button.setEnabled(
+                self.next_turn_button.isEnabled() and projection.primary_cta == "NEXT_TURN"
+            )
 
         if not current.persistence_reads_allowed:
             for lockable_widget in (
@@ -5002,40 +5036,33 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self._bind_turn_snapshot_draft_field(
                 "self_active",
                 self_active.value,
-                ocr_replaceable=(
-                    ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD
-                    in self_active.provenance_chain
-                ),
+                # Every value in an OPEN draft belongs to the previous Turn
+                # (including a result-derived CHANGED ZERO). It is only a
+                # starting point for this new board capture; current-Turn
+                # human input remains locked and current-Turn OCR may replace
+                # the carry-forward value.
+                ocr_replaceable=True,
             )
         opponent_active = draft.opponent_side.active
         if opponent_active.is_confirmed and opponent_active.value is not None:
             self._bind_turn_snapshot_draft_field(
                 "opponent_active",
                 opponent_active.value,
-                ocr_replaceable=(
-                    ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD
-                    in opponent_active.provenance_chain
-                ),
+                ocr_replaceable=True,
             )
         self_hp = draft.self_side.hp_bucket
         if self_hp.is_confirmed and self_hp.value is not None:
             self._bind_turn_snapshot_draft_field(
                 "self_hp",
                 self_hp.value.value,
-                ocr_replaceable=(
-                    ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD
-                    in self_hp.provenance_chain
-                ),
+                ocr_replaceable=True,
             )
         opponent_hp = draft.opponent_side.hp_bucket
         if opponent_hp.is_confirmed and opponent_hp.value is not None:
             self._bind_turn_snapshot_draft_field(
                 "opponent_hp",
                 opponent_hp.value.value,
-                ocr_replaceable=(
-                    ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD
-                    in opponent_hp.provenance_chain
-                ),
+                ocr_replaceable=True,
             )
 
     # -- overridden handlers: gather the new widgets, then delegate ------------
@@ -5180,8 +5207,24 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.next_turn_button.style().polish(self.next_turn_button)
         self.record_self_faint_button.setCheckable(True)
         self.record_opponent_faint_button.setCheckable(True)
+        self.record_self_faint_button.setText("自分ひんし")
+        self.record_opponent_faint_button.setText("相手ひんし")
         self.record_self_faint_button.setVisible(True)
         self.record_opponent_faint_button.setVisible(True)
+        self.record_self_faint_button.setEnabled(persistence_reads_allowed)
+        self.record_opponent_faint_button.setEnabled(persistence_reads_allowed)
+        self.record_self_faint_button.setChecked(
+            any(
+                event.kind == "faint" and event.target_side == "self"
+                for event in self._result_events
+            )
+        )
+        self.record_opponent_faint_button.setChecked(
+            any(
+                event.kind == "faint" and event.target_side == "opponent"
+                for event in self._result_events
+            )
+        )
         self.mega_result_group.setVisible(True)
         self._render_mega_controls(persistence_reads_allowed)
 

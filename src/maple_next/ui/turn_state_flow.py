@@ -128,6 +128,24 @@ _HUMAN_INPUT_CHAIN = (ProvenanceStep.HUMAN_INPUT,)
 _CARRY_FORWARD_CHAIN = (ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD,)
 
 
+def _same_turn_binding(left: TurnIdentity, right: TurnIdentity) -> bool:
+    """Match the current factual Turn while allowing later metadata revisions.
+
+    ``battle_revision`` is a global mutation counter. Applying Turn Advice
+    advances it, but does not replace the already-confirmed board or its
+    exact legal-switch binding. Read-side projections therefore distinguish
+    a later mutation on the same Turn from a different Turn.
+    """
+
+    return (
+        left.session_id == right.session_id
+        and left.match_id == right.match_id
+        and left.generation == right.generation
+        and left.turn_id == right.turn_id
+        and left.turn_number == right.turn_number
+    )
+
+
 def _stage_value(known: Known[int]) -> int:
     """0 for an UNKNOWN stage -- stages are always CONFIRMED once Turn 1
     initializes them; this default only guards a genuinely missing value."""
@@ -428,6 +446,9 @@ _RICH_GATE_MESSAGES: dict[str, str] = {
     GateDenialReason.LEGAL_ACTIONS_NOT_CONFIRMED.value: "合法行動が確定されていません。",
     GateDenialReason.LEGAL_ACTIONS_IDENTITY_MISMATCH.value: (
         "合法行動が現在のTurn identityと一致しません。"
+    ),
+    GateDenialReason.LEGAL_SWITCH_ACTIONS_MISMATCH_CONFIRMATION.value: (
+        "確定済み交代候補と合法行動の内容が一致しません。"
     ),
 }
 
@@ -730,6 +751,10 @@ class TurnStateFlowController(MatchFlowController):
             match_id=identity.match_id,
             generation=identity.generation,
         )
+        confirmed_state_is_current_turn = bool(
+            confirmed_state is not None
+            and _same_turn_binding(confirmed_state.identity, identity)
+        )
         confirmed_legal_actions = (
             self._repository.list_confirmed_legal_action_selections_for_identity(identity)
         )
@@ -757,13 +782,24 @@ class TurnStateFlowController(MatchFlowController):
         confirmed_fainted_members: frozenset[str] = frozenset()
         if confirmed_state is not None:
             session = self._repository.load_active_session()
-            if session is not None and session.current_applied_selection_id is not None:
+            if (
+                confirmed_state_is_current_turn
+                and session is not None
+                and session.current_applied_selection_id is not None
+            ):
                 applied = self._repository.get_applied_selection(
                     session.current_applied_selection_id
                 )
+                # The exact legal-switch confirmation is bound to the
+                # factual revision that created ``confirmed_state``. A later
+                # global mutation revision (for example, applying Turn
+                # Advice) must not make that same-Turn human confirmation
+                # disappear from the operator UI. Provider readiness still
+                # receives the session's current identity below and remains
+                # fail-closed on any revision mismatch.
                 selected_three = applied.selected_three
                 legal_switch_confirmation = self._repository.get_legal_switch_confirmation(
-                    identity=identity,
+                    identity=confirmed_state.identity,
                     based_on_confirmed_state_id=confirmed_state.confirmed_state_id,
                     applied_selection_id=applied.applied_selection_id,
                 )
@@ -876,6 +912,17 @@ class TurnStateFlowController(MatchFlowController):
         untouched, exactly as before.
         """
 
+        # Bundle C has two UI surfaces for switches: the legacy checkbox memo
+        # and the explicit Legal Switch workbench. Once the workbench supplies
+        # a value, it is the one human-visible source of truth for every
+        # representation written by this confirmation. Callers that predate
+        # the workbench keep the legacy argument unchanged.
+        effective_legal_switches: tuple[str, ...] = (
+            legal_switch_selection
+            if legal_switch_selection is not None
+            else tuple(legal_switches)
+        )
+
         before_error = self._error_message
         view = super().confirm_turn_facts(
             self_active=self_active,
@@ -883,7 +930,7 @@ class TurnStateFlowController(MatchFlowController):
             self_hp=self_hp,
             opponent_hp=opponent_hp,
             legal_moves=legal_moves,
-            legal_switches=legal_switches,
+            legal_switches=effective_legal_switches,
             human_note=human_note,
             human_confirmed=human_confirmed,
         )
@@ -933,7 +980,7 @@ class TurnStateFlowController(MatchFlowController):
                     confirmation=confirmation,
                 )
             )
-        for name in legal_switches:
+        for name in effective_legal_switches:
             if not name.strip():
                 continue
             selections.append(
@@ -965,7 +1012,7 @@ class TurnStateFlowController(MatchFlowController):
             self._save_pokemon_local_memory(identity, "SELF", self_side)
             self._save_pokemon_local_memory(identity, "OPPONENT", opponent_side)
         if legal_switch_selection is not None:
-            self._confirm_legal_switch_selection_for_new_state(legal_switch_selection)
+            self._confirm_legal_switch_selection_for_new_state(effective_legal_switches)
         self._error_message = None
         return self.refresh()
 

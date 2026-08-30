@@ -118,6 +118,17 @@ def _legal_action(identity: TurnIdentity) -> ConfirmedLegalActionSelection:
         confirmation=_confirmation(),
     )
 
+def _legal_switch_action(
+    identity: TurnIdentity, *, action_name: str, index: int
+) -> ConfirmedLegalActionSelection:
+    return ConfirmedLegalActionSelection(
+        confirmation_id=f"legal-switch-{index}",
+        identity=identity,
+        action_type=ActionType.SWITCH,
+        action_name=action_name,
+        confirmation=_confirmation(),
+    )
+
 
 # --- A/B/C/D/P: candidate derivation -----------------------------------------
 
@@ -636,10 +647,25 @@ def _r3c_gate(
     confirmation: LegalSwitchConfirmation | None,
     selected_three: tuple[str, str, str] | None = ("A", "B", "C"),
     confirmed_fainted_members: frozenset[str] = frozenset(),
+    confirmed_switch_action_names: tuple[str, ...] | None = None,
 ):
+    if confirmed_switch_action_names is None:
+        confirmed_switch_action_names = (
+            confirmation.legal_switches
+            if confirmation is not None
+            and confirmation.status is LegalSwitchStatus.CONFIRMED_NONEMPTY
+            else ()
+        )
+    confirmed_actions = (
+        _legal_action(state.identity),
+        *(
+            _legal_switch_action(state.identity, action_name=name, index=index)
+            for index, name in enumerate(confirmed_switch_action_names, start=1)
+        ),
+    )
     return evaluate_provider_ready_gate(
         confirmed_state=state,
-        confirmed_legal_actions=(_legal_action(state.identity),),
+        confirmed_legal_actions=confirmed_actions,
         current_identity=state.identity,
         latest_confirmed_state_id=state.confirmed_state_id,
         latest_open_draft_turn_number=None,
@@ -702,6 +728,25 @@ def test_r3c_e_valid_nonempty_confirmation_reaches_ready() -> None:
     result = _r3c_gate(state=state, confirmation=confirmation)
     assert result.allowed is True
     assert result.denial_reasons == ()
+
+
+def test_r3c_h_nonempty_confirmation_without_switch_actions_fails_closed() -> None:
+    """A confirmed switch set must be represented in provider legal_actions."""
+
+    state = _r3c_state(active="A")
+    confirmation = _r3c_confirmation(
+        legal_switches=("B", "C"), status=LegalSwitchStatus.CONFIRMED_NONEMPTY
+    )
+    result = _r3c_gate(
+        state=state,
+        confirmation=confirmation,
+        confirmed_switch_action_names=(),
+    )
+    assert result.allowed is False
+    assert (
+        GateDenialReason.LEGAL_SWITCH_ACTIONS_MISMATCH_CONFIRMATION
+        in result.denial_reasons
+    )
 
 
 def test_r3c_f_valid_confirmed_none_reaches_ready() -> None:

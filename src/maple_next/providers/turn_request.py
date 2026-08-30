@@ -43,6 +43,101 @@ TURN_PROMPT_VERSION: Final[str] = "maple-turn-prompt.v1"
 TURN_PROMPT_VERSION_V2: Final[str] = "maple-turn-prompt.v2"
 JOB_TYPE: Final[str] = "TURN_ADVICE"
 
+#: Tournament-day strategic policy appended only to the current rich-state
+#: provider body. It changes advice reasoning only: no legal action, state,
+#: response schema, dispatch gate, transport setting, or game input is changed.
+TOURNAMENT_TURN_STRATEGY_POLICY_VERSION: Final[str] = (
+    "maple-turn-tournament-strategy.2026-08-30.v1"
+)
+_CURRENT_RICH_TURN_CONTRACT_MARKER: Final[str] = (
+    '"contract_version":"maple-turn-advice.v7"'
+)
+_TOURNAMENT_TURN_STRATEGY_POLICY: Final[str] = """Tournament turn strategy policy
+(policy_version: maple-turn-tournament-strategy.2026-08-30.v1):
+
+Your objective is to maximize the probability of winning the whole match, not to maximize
+this turn's damage, preserve every HP point, or avoid every knockout.
+
+Silently use this decision order after the normal authority and uncertainty rules:
+1. Check for an immediate or near-immediate winning line, including a clean finish, revenge,
+   priority finish, or removal of the opponent's last critical answer when the confirmed
+   state supports it.
+2. Check whether staying in risks losing an irreplaceable win condition, defensive answer,
+   speed-control/revenge resource, or other uniquely necessary member of selected_three.
+3. Compare the best MOVE against every legal SWITCH by expected match value after the next
+   exchange, not merely by type matchup on the current screen.
+4. Prefer actions that make concrete progress: damage/KO pressure, disabling a key threat,
+   improving a real endgame, denying setup, gaining durable tempo, or creating a clearly
+   better next turn. Avoid low-value loops that only postpone the same position.
+5. When materially ahead, prefer robust lines that avoid a catastrophic reversal. When
+   materially behind, accept calculated variance when it creates a real comeback path, but
+   never invent unsupported opponent coverage or exact damage/speed claims to justify it.
+
+STAY / MOVE principles:
+- Staying in is not the default. It is correct when the current active can make meaningful
+  progress without exposing an irreplaceable resource to an unreasonable downside.
+- Prefer direct progress over generic utility when utility does not materially improve the
+  next exchange or endgame.
+- Do not greed setup merely because a setup move is legal. Setup must have a concrete payoff
+  that remains valuable across plausible opponent responses; prefer direct pressure when
+  setup would give the opponent a strong reversal window.
+- Do not automatically choose the highest apparent damage. A lower-damage move may be better
+  when its confirmed utility, priority, coverage, disruption, or positioning value improves
+  the match-winning line.
+- In a simplified endgame, reduce unnecessary switching. If a legal move produces the most
+  direct robust route to finish or to force a favorable revenge sequence, favor that progress.
+
+SWITCH principles:
+A switch should normally require at least one concrete strategic benefit that outweighs its
+cost. Strong reasons include:
+- the current active is at serious risk of being lost or crippled before providing an
+  irreplaceable future role, and a legal switch materially improves the exchange;
+- preserving the current active is necessary for a confirmed or strongly supported later
+  matchup/endgame role that the other selected members cannot replace;
+- the current active has little productive action into the plausible opponent lines while a
+  legal switch creates immediate pressure, a stable defensive answer, revenge positioning,
+  or durable tempo;
+- switching denies a dangerous setup/progress line better than any available move;
+- a switch creates a clearly stronger endgame or safe revenge sequence.
+
+Weak reasons that are not sufficient by themselves:
+- type disadvantage alone;
+- wanting to save a small amount of HP with no identified future role;
+- a generic claim that another Pokémon is "safer";
+- speculative opponent coverage that is not confirmed or supported by the allowed evidence;
+- rotating between members without creating damage, denial, positioning, or an endgame gain.
+
+For every SWITCH, account for the switch cost using only allowed evidence: giving up the
+current action, confirmed hazards/side effects/status risks, likely incoming pressure at the
+category level, exposing the switch target, and consuming a bench member that may be needed
+later. Unknown bench HP/status must remain unknown, not silently assumed healthy.
+
+RESOURCE / SACRIFICE principles:
+- Do not preserve a low-value or already-spent member at the cost of exposing the team's only
+  remaining answer or win condition.
+- It can be correct to let the current active be lost when its remaining future value is low,
+  switching would endanger a much more important resource, and the loss creates a strong
+  revenge or cleanup entry. This is a match-value decision, not an instruction to sacrifice
+  automatically.
+- Conversely, do not casually trade away an irreplaceable win condition merely for chip,
+  short-term tempo, or a speculative read.
+- Re-evaluate roles from the confirmed selected_three build plus battle_memory each turn;
+  early-game labels are not permanent after HP/status/faints and revealed actions change the
+  practical value of each member.
+
+ENDGAME principles:
+- As remaining resources shrink, prioritize deterministic progress and clean sequencing over
+  preserving theoretical flexibility.
+- Preserve priority, speed control, recovery, or a specific defensive answer when it is the
+  clearest remaining route to beat a confirmed threat; otherwise do not hoard a resource that
+  no longer has a realistic job.
+- If one line wins across the important plausible opponent categories and another line merely
+  stays safe without advancing the finish, prefer the winning/progressing line.
+
+This policy never authorizes fabricated exact damage calculations, exact speed relations,
+opponent sets, or hidden information. It does not change the response schema or the human-only
+operation rule. Return the same strict JSON contract required by the surrounding prompt."""
+
 #: Fixed and deterministic. Never derived from a live provider schema.
 REQUESTED_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
@@ -415,16 +510,31 @@ def _render_provider_prompt_from_canonical_request(
     return f"{_TURN_INITIAL_PROMPT}\n\nCanonical request:\n{canonical}"
 
 
+def _apply_current_rich_turn_strategy_policy(prompt: str) -> str:
+    """Append the tournament policy only to the current rich-state Turn lane.
+
+    The marker is the trusted canonical request contract serialized inside
+    the rich prompt. Legacy v1/v2 requests do not carry this marker and are
+    returned byte-for-byte unchanged. The policy is advisory text only and
+    cannot add/remove legal actions or authorize dispatch.
+    """
+
+    if _CURRENT_RICH_TURN_CONTRACT_MARKER not in prompt:
+        return prompt
+    return f"{prompt}\n\n{_TOURNAMENT_TURN_STRATEGY_POLICY}"
+
+
 def _render_provider_request_body_from_prompt(
     prompt: str, requested_output_schema: dict[str, Any]
 ) -> dict[str, Any]:
     """Shared Gemini ``generateContent`` body renderer. No secrets, no model/endpoint."""
 
+    provider_prompt = _apply_current_rich_turn_strategy_policy(prompt)
     return {
         "contents": [
             {
                 "role": "user",
-                "parts": [{"text": prompt}],
+                "parts": [{"text": provider_prompt}],
             }
         ],
         "generationConfig": {

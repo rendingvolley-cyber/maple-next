@@ -134,19 +134,13 @@ def sanitize_gemini_failure(reason: object) -> str:
 
 
 def is_selection_fallback_eligible(reason: object) -> bool:
-    """Classify only tournament-safe transient failures for model fallback."""
+    """Classify only positively identified quota/rate/capacity exhaustion."""
 
     sanitized = sanitize_gemini_failure(reason)
-    if sanitized == "GEMINI_TIMEOUT" or sanitized.startswith("GEMINI_NETWORK_ERROR"):
-        return True
     if not sanitized.startswith("GEMINI_HTTP_ERROR:"):
         return False
     fields = sanitized.split("|")
-    try:
-        status = int(fields[0].split(":", 1)[1])
-    except (IndexError, ValueError):
-        return False
-    if status in _TRANSIENT_HTTP_STATUSES:
+    if fields[0] == "GEMINI_HTTP_ERROR:429":
         return True
     classifications = dict(field.split("=", 1) for field in fields[1:] if "=" in field)
     return (

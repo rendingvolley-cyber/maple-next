@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from maple_next.providers.selection_request import (
     REQUESTED_OUTPUT_SCHEMA,
+    SELECTION_PROMPT_VERSION,
+    build_provider_prompt,
     build_selection_advice_request,
     canonical_request_dict,
     encode_canonical_request,
@@ -99,3 +101,22 @@ def test_request_payload_hash_changes_when_any_canonical_field_changes() -> None
     assert baseline != request_payload_hash(_build(reviewed_selection_id="other"))
     assert baseline != request_payload_hash(_build(session_id="other-session"))
     assert baseline != request_payload_hash(_build(match_id="other-match"))
+
+
+def test_tournament_selection_prompt_is_v2_and_requires_full_matchup_comparison() -> None:
+    prompt = build_provider_prompt(_build())
+
+    assert SELECTION_PROMPT_VERSION == "maple-selection-prompt.v2"
+    assert "Compare all 20 distinct three-Pokémon combinations" in prompt
+    assert "worst reasonable lead matchup" in prompt
+    assert "weather setter + weather beneficiary" in prompt
+    assert "fixed preset package" in prompt
+    assert "one exact opponent" in prompt
+
+
+def test_tournament_selection_prompt_preserves_opponent_uncertainty_boundary() -> None:
+    prompt = build_provider_prompt(_build())
+
+    assert "opponent's team contains names only" in prompt
+    assert "unconfirmed opponent details must remain uncertainty" in prompt
+    assert "do not assume the player's moves" in prompt

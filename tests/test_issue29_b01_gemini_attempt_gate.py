@@ -299,12 +299,13 @@ def test_second_activation_after_network_failure_dispatches_one_new_job(
     ready_selection(controller)
 
     first = controller.send_selection_advice_to_gemini(on_result=lambda _view: None)
-    assert first.error_message is None
+    assert first.error_message is not None
     job = repository.get_job(cast(str, adapter.last_job_id))
-    assert job.status is JobStatus.SUCCEEDED
-    assert transport.call_count == 2
+    assert job.status is JobStatus.FAILED
 
-    _assert_second_activation_zero_delta(controller, repository, adapter, transport)
+    _assert_transient_second_activation_dispatches_once(
+        controller, repository, adapter, transport
+    )
     repository.close()
 
 
@@ -317,10 +318,11 @@ def test_second_activation_after_http_failure_dispatches_one_new_job(tmp_path: P
 
     controller.send_selection_advice_to_gemini(on_result=lambda _view: None)
     job = repository.get_job(cast(str, adapter.last_job_id))
-    assert job.status is JobStatus.SUCCEEDED
-    assert transport.call_count == 2
+    assert job.status is JobStatus.FAILED
 
-    _assert_second_activation_zero_delta(controller, repository, adapter, transport)
+    _assert_transient_second_activation_dispatches_once(
+        controller, repository, adapter, transport
+    )
     repository.close()
 
 
@@ -333,10 +335,11 @@ def test_second_activation_after_timeout_dispatches_one_new_job(tmp_path: Path) 
 
     controller.send_selection_advice_to_gemini(on_result=lambda _view: None)
     job = repository.get_job(cast(str, adapter.last_job_id))
-    assert job.status is JobStatus.SUCCEEDED
-    assert transport.call_count == 2
+    assert job.status is JobStatus.TIMED_OUT
 
-    _assert_second_activation_zero_delta(controller, repository, adapter, transport)
+    _assert_transient_second_activation_dispatches_once(
+        controller, repository, adapter, transport
+    )
     repository.close()
 
 
@@ -373,11 +376,7 @@ def test_second_activation_after_stale_response_yields_zero_new_attempts(tmp_pat
 def test_reload_then_transient_failure_exposes_explicit_resend(tmp_path: Path) -> None:
     qt_application()
     transport = FakeSelectionAdviceTransport(
-        responses=[
-            ProviderTransportError("GEMINI_NETWORK_ERROR:refused"),
-            ProviderTransportError("GEMINI_NETWORK_ERROR:refused"),
-            valid_result(),
-        ]
+        responses=[ProviderTransportError("GEMINI_NETWORK_ERROR:refused"), valid_result()]
     )
     repository, _application, adapter, controller = build_controller(tmp_path, transport)
     ready_selection(controller)
@@ -412,10 +411,7 @@ def test_process_restart_restores_failure_and_explicit_resend(tmp_path: Path) ->
     repo_root = tmp_path / "repository-root"
 
     transport = FakeSelectionAdviceTransport(
-        responses=[
-            ProviderTransportError("GEMINI_NETWORK_ERROR:refused"),
-            ProviderTransportError("GEMINI_NETWORK_ERROR:refused"),
-        ]
+        responses=[ProviderTransportError("GEMINI_NETWORK_ERROR:refused")]
     )
     repository = SQLiteRepository(database_path)
     application = MatchApplication(repository, exports_path, repository_root=repo_root)
@@ -430,7 +426,7 @@ def test_process_restart_restores_failure_and_explicit_resend(tmp_path: Path) ->
     controller.send_selection_advice_to_gemini(on_result=window.render_view)
     pump_until(qapp, lambda: window._controller.refresh().error_message is not None)  # noqa: SLF001
     window.render_view()
-    assert transport.call_count == 2
+    assert transport.call_count == 1
     assert window.gemini_send_button.isEnabled() is True
 
     window.close()

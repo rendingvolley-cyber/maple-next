@@ -149,6 +149,30 @@ def is_selection_fallback_eligible(reason: object) -> bool:
     )
 
 
+def _is_configured_chain_fallback_eligible(reason: object) -> bool:
+    """Classify transient failures for an explicitly configured multi-model chain.
+
+    The normal two-model Selection lane keeps ``main``'s narrow fallback rule:
+    only positively identified quota/rate/capacity exhaustion may switch models.
+    Tournament configuration may explicitly provide a longer bounded chain;
+    that opt-in chain also permits network/timeout/transient HTTP recovery while
+    remaining within the one-job hard deadline.
+    """
+
+    sanitized = sanitize_gemini_failure(reason)
+    if is_selection_fallback_eligible(sanitized):
+        return True
+    if sanitized == "GEMINI_TIMEOUT" or sanitized.startswith("GEMINI_NETWORK_ERROR"):
+        return True
+    if not sanitized.startswith("GEMINI_HTTP_ERROR:"):
+        return False
+    try:
+        status = int(sanitized.split("|", 1)[0].split(":", 1)[1])
+    except (IndexError, ValueError):
+        return False
+    return status in _TRANSIENT_HTTP_STATUSES
+
+
 def describe_gemini_failure(reason: str) -> str:
     """Map an allowlisted failure code to a non-secret operator message."""
 
@@ -340,6 +364,7 @@ class GeminiSelectionAdviceAdapter:
 
         if isinstance(loaded_config, SelectionProviderConfig):
             attempt_configs = loaded_config.chain()
+            extended_chain_fallback = bool(loaded_config.additional_models)
         else:
             attempt_configs = (
                 loaded_config,
@@ -349,6 +374,7 @@ class GeminiSelectionAdviceAdapter:
                     timeout_seconds=loaded_config.timeout_seconds,
                 ),
             )
+            extended_chain_fallback = False
         self.model_chain = tuple(config.model for config in attempt_configs)
 
         try:
@@ -434,7 +460,11 @@ class GeminiSelectionAdviceAdapter:
             )
             next_ordinal = attempt_ordinal + 1
             if (
-                is_selection_fallback_eligible(sanitized)
+                (
+                    _is_configured_chain_fallback_eligible(sanitized)
+                    if extended_chain_fallback
+                    else is_selection_fallback_eligible(sanitized)
+                )
                 and next_ordinal <= len(attempt_configs)
                 and self._clock() < cascade_deadline
             ):

@@ -1,0 +1,71 @@
+name: Maple tournament sync runner
+
+on:
+  push:
+    branches:
+      - tournament-production-20260829
+    paths:
+      - .github/workflows/maple-tournament-sync-runner.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify exact handoff ancestry and no source drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git branch --show-current)" = "tournament-production-20260829"
+          test "$(git rev-parse HEAD^)" = "f57660dace7246933267e375ce51a4f333966810"
+          test "$(git rev-parse HEAD^^)" = "58c3598934c4fcd6a5fe2a843d086d455b59ba0a"
+          changed="$(git diff --name-only 58c3598934c4fcd6a5fe2a843d086d455b59ba0a..HEAD | sort)"
+          expected="$(printf '%s\n' .github/workflows/maple-tournament-sync-once.yml .github/workflows/maple-tournament-sync-runner.yml | sort)"
+          test "$changed" = "$expected"
+
+      - name: Recover, verify and apply reviewed selective patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          awk '/^H4sI/{print; exit}' .github/workflows/maple-tournament-sync-once.yml > /tmp/maple-sync.patch.gz.b64
+          test -s /tmp/maple-sync.patch.gz.b64
+          base64 -d /tmp/maple-sync.patch.gz.b64 > /tmp/maple-sync.patch.gz
+          gzip -dc /tmp/maple-sync.patch.gz > /tmp/maple-sync.patch
+          test "$(sha256sum /tmp/maple-sync.patch | awk '{print $1}')" = "6715d2b20c1b6734b273f5a472eddcf6277925980331b326aac2afa80d6dcb1e"
+          git apply --check /tmp/maple-sync.patch
+          git apply /tmp/maple-sync.patch
+
+      - name: Verify exact reviewed target
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' 5b2bf83fbd16d52b25cc08a55c9e6b19ecbfa1ced1d442d7a64ec72bfa16c3c2 src/maple_next/ui/battle_record_ui.py | sha256sum -c -
+          printf '%s  %s\n' ba9fcade1cf054f416e07ef98d117cc7872f193749efdd0fabc53ebd27a6e7c5 src/maple_next/ui/turn_state_flow.py | sha256sum -c -
+          printf '%s  %s\n' 9ecb42966cdeb46b2377efc8b318c70c443963bccc4eefc41df5731cad9518e1 src/maple_next/domain/turn_state_projection.py | sha256sum -c -
+          printf '%s  %s\n' 1c4370ac9c6781fa3b53fa31e2c015615ed334cc80cf2c53ca94cd47e991a08f tests/test_tournament_real_battle_three_blockers.py | sha256sum -c -
+          printf '%s  %s\n' 642acd20467ff5ca4c90017ff45b4ec87d03410107d0bffcc4e1820db7d09eaa tests/test_gemini_v2_bundle2_legal_switches.py | sha256sum -c -
+          printf '%s  %s\n' d18cc4a5b7304287852f063b3750d3d432e7c8c323b0720cbe7a2bf5db86f7aa tests/test_gemini_v2_bundle3_confirmed_memory_build_context.py | sha256sum -c -
+          grep -q 'LEGAL_SWITCH_ACTIONS_MISMATCH_CONFIRMATION' src/maple_next/domain/turn_state_projection.py
+          grep -q '_same_turn_binding_for_ui' src/maple_next/ui/battle_record_ui.py
+          grep -q 'ocr_replaceable=True' src/maple_next/ui/battle_record_ui.py
+          grep -q 'record_self_faint_button' src/maple_next/ui/battle_record_ui.py
+          python -m py_compile src/maple_next/ui/battle_record_ui.py src/maple_next/ui/turn_state_flow.py src/maple_next/domain/turn_state_projection.py tests/test_tournament_real_battle_three_blockers.py tests/test_gemini_v2_bundle2_legal_switches.py tests/test_gemini_v2_bundle3_confirmed_memory_build_context.py
+          git diff --check
+
+      - name: Commit reviewed source and remove one-shot helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/maple-tournament-sync-once.yml
+          rm .github/workflows/maple-tournament-sync-runner.yml
+          git config user.name "Maple Tournament Sync"
+          git config user.email "maple-sync@users.noreply.github.com"
+          git add src/maple_next/ui/battle_record_ui.py src/maple_next/ui/turn_state_flow.py src/maple_next/domain/turn_state_projection.py tests/test_tournament_real_battle_three_blockers.py tests/test_gemini_v2_bundle2_legal_switches.py tests/test_gemini_v2_bundle3_confirmed_memory_build_context.py .github/workflows/maple-tournament-sync-once.yml .github/workflows/maple-tournament-sync-runner.yml
+          git commit -m "sync: tournament three-blocker production closure"
+          git push origin HEAD:tournament-production-20260829

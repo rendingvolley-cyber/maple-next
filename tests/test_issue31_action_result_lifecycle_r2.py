@@ -1268,7 +1268,11 @@ def test_r3_real_battle_record_requires_complete_rich_prerequisites_and_retries_
             repository, "get_latest_confirmed_turn_state_for_identity", lambda **_kwargs: None
         )
     elif fault == "missing_delta":
-        monkeypatch.setattr(window.self_delta_editor, "to_side_delta", lambda: None)
+        monkeypatch.setattr(
+            window.self_delta_editor,
+            "to_side_delta",
+            lambda **_kwargs: None,
+        )
     else:
         latest = original_latest(
             session_id=identity_before.session_id,

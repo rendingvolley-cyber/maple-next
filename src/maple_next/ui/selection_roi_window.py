@@ -583,13 +583,21 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
         attempt_consumed = False
         if ready_to_send and view.persistence_reads_allowed:
             attempt_consumed = self._controller.gemini_selection_attempt_consumed()
+        resend_eligible = (
+            ready_to_send
+            and view.persistence_reads_allowed
+            and self._controller.gemini_selection_resend_eligible()
+        )
+        self.selection_roi_send_button.setText(
+            "現在の6体でGeminiに再送" if resend_eligible else "現在の6体でGeminiに送る"
+        )
         self.selection_roi_send_button.setEnabled(
             view.persistence_reads_allowed
             and projection.session_state == "SELECTION_OPEN"
             and self._controller.gemini_send_available
             and complete_unique
             and (pre_confirm or ready_to_send)
-            and not attempt_consumed
+            and (not attempt_consumed or resend_eligible)
         )
 
     def _apply_selection_roi_slot(self, slot: int) -> None:
@@ -726,8 +734,8 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
             bundle=bundle,
             bundle_identity=bundle_identity,
         )
-        # Reuse the accepted trusted-send/controller/provider path. No retry,
-        # fallback beyond its existing bounded policy, APPLY, or game action is
+        # Reuse the accepted trusted-send/controller/provider path. Its bounded
+        # cascade remains inside this one activation; no APPLY or game action is
         # introduced here.
         super()._on_trusted_send_to_gemini()
         self.render_view(self._controller.refresh())

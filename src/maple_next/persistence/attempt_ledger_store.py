@@ -3,10 +3,9 @@
 Distinct from ``async_jobs.dispatch_count`` (which guards a single job
 against being dispatched twice): this ledger guards a Selection *identity*
 (session/match/generation/battle_revision/reviewed_selection_id) against
-ever producing a second production Gemini job, even after the first job
-reaches a terminal state or the process restarts. Only the production
-Gemini lane consults this table; the mock/dev Selection Advice lane never
-calls these methods and is unaffected.
+concurrent or unapproved production jobs. A verified transient terminal
+failure may move the reservation to a new human-explicit job. Only the
+production Gemini lane consults this table; the mock/dev lane is unaffected.
 """
 
 from __future__ import annotations
@@ -165,6 +164,46 @@ class AttemptLedgerStoreMixin(StoreBase):
             ),
         ).fetchone()
         return row is not None
+
+    def replace_gemini_selection_attempt_reservation(
+        self,
+        *,
+        session_id: str,
+        match_id: str,
+        generation: int,
+        battle_revision: int,
+        reviewed_selection_id: str,
+        expected_job_id: str,
+        new_job_id: str,
+    ) -> bool:
+        """Move one current Selection reservation to a new explicit-send job.
+
+        The caller must establish transient-failure eligibility inside the
+        same ``BEGIN IMMEDIATE`` transaction.  Matching ``expected_job_id``
+        makes a concurrent/double activation a zero-row update.
+        """
+
+        cursor = self.connection.execute(
+            """
+            UPDATE gemini_selection_attempt_ledger
+            SET job_id = ?, consumed_at_utc = ?
+            WHERE session_id = ? AND match_id = ? AND generation = ?
+              AND battle_revision = ? AND reviewed_selection_id = ?
+              AND lane = ? AND job_id = ?
+            """,
+            (
+                new_job_id,
+                self._now(),
+                session_id,
+                match_id,
+                generation,
+                battle_revision,
+                reviewed_selection_id,
+                GEMINI_SELECTION_PRODUCTION_LANE,
+                expected_job_id,
+            ),
+        )
+        return cursor.rowcount == 1
 
     def reserve_turn_advice_attempt(
         self,

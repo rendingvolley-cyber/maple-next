@@ -129,7 +129,7 @@ class TeamPresetStoreMixin(StoreBase):
         if team_build.pokemon_names != tuple(self_team):
             raise ValueError("team build names must match self_team")
         return (
-            "maple-team.v2",
+            team_build.schema_version,
             team_build.canonical_json_bytes().decode("utf-8"),
             team_build.sha256(),
         )
@@ -149,7 +149,7 @@ class TeamPresetStoreMixin(StoreBase):
             raw_hash = row["team_build_sha256"]
             team_build: ChampionsTeamBuild | None = None
             team_build_sha256: str | None = None
-            if build_schema_version == "maple-team.v2":
+            if build_schema_version in {"maple-team.v2", "maple-team.v3"}:
                 if raw_build is None or raw_hash is None:
                     raise ValueError("stored detailed preset is incomplete")
                 team_build = ChampionsTeamBuild.from_json_bytes(str(raw_build).encode("utf-8"))
@@ -158,6 +158,17 @@ class TeamPresetStoreMixin(StoreBase):
                 team_build_sha256 = str(raw_hash)
                 if team_build.sha256() != team_build_sha256:
                     raise ValueError("stored detailed preset hash does not match")
+                # Tournament v3 was briefly written through a v2-only metadata
+                # column path. Accept that one legacy mislabel in memory when
+                # the canonical JSON/hash themselves prove a valid v3 build;
+                # the next normal preset save writes the true schema version.
+                if (
+                    build_schema_version == "maple-team.v2"
+                    and team_build.schema_version == "maple-team.v3"
+                ):
+                    build_schema_version = "maple-team.v3"
+                elif team_build.schema_version != build_schema_version:
+                    raise ValueError("stored detailed preset schema does not match build")
             elif build_schema_version != "maple-team.v1":
                 raise ValueError("stored preset schema is invalid")
             elif raw_build is not None or raw_hash is not None:

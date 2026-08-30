@@ -13,6 +13,7 @@ from maple_next.persistence.attempt_ledger_store import AttemptLedgerStoreMixin
 from maple_next.persistence.job_store import JobStoreMixin
 from maple_next.persistence.legal_switch_store import LegalSwitchStoreMixin
 from maple_next.persistence.match_store import MatchStoreMixin
+from maple_next.persistence.mega_store import MegaStoreMixin
 from maple_next.persistence.schema import migrate
 from maple_next.persistence.selection_store import SelectionStoreMixin
 from maple_next.persistence.session_store import SessionStoreMixin
@@ -31,6 +32,7 @@ class SQLiteRepository(
     TeamPresetStoreMixin,
     TurnStateStoreMixin,
     LegalSwitchStoreMixin,
+    MegaStoreMixin,
 ):
     """The only component allowed to hold a writable SQLite connection."""
 

@@ -12,6 +12,7 @@ from typing import cast
 from PySide6.QtWidgets import QApplication
 
 from maple_next.application.match_service import MatchApplication
+from maple_next.feedback.service import FeedbackPublishConfig, FeedbackPublishService
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.providers.transport import (
     GeminiSelectionAdviceTransport,
@@ -45,6 +46,13 @@ def default_export_directory() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".maple-next" / "exports"
+
+
+def default_feedback_directory() -> Path:
+    configured = os.environ.get("MAPLE_NEXT_FEEDBACK_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".maple-next" / "feedback"
 
 
 def default_ocr_data_directory() -> Path:
@@ -89,6 +97,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=default_export_directory(),
     )
     parser.add_argument(
+        "--feedback-directory",
+        type=Path,
+        default=default_feedback_directory(),
+    )
+    parser.add_argument(
         "--ocr-data-directory",
         type=Path,
         default=default_ocr_data_directory(),
@@ -97,6 +110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     database_path = cast(Path, args.database).expanduser()
     export_directory = cast(Path, args.export_directory).expanduser()
+    feedback_directory = cast(Path, args.feedback_directory).expanduser()
     expected_ocr_data_directory = default_ocr_data_directory().resolve()
     ocr_data_directory = cast(Path, args.ocr_data_directory).expanduser().resolve()
     if ocr_data_directory != expected_ocr_data_directory:
@@ -111,6 +125,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         battle_application = MatchApplication(repository, export_directory)
         battle_application.recover_after_restart()
+        feedback_service = FeedbackPublishService(
+            feedback_directory,
+            FeedbackPublishConfig.from_env(),
+        )
         controller = TurnStateFlowController(
             battle_application,
             repository,
@@ -121,6 +139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             turn_gemini_adapter=build_turn_gemini_adapter(),
             rich_turn_gemini_adapter=build_rich_turn_gemini_adapter(),
+            feedback_service=feedback_service,
         )
         window = BattleRecordUiWindow(
             controller,

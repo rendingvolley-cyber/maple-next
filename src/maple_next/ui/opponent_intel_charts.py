@@ -20,7 +20,7 @@ from typing import NamedTuple
 
 from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QPainter, QPaintEvent, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 _MAX_BAR_ENTRIES = 8
 _OBSERVED_BADGE_EN = "OBSERVED"
@@ -239,3 +239,126 @@ class BarChartWidget(QWidget):
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                 percent_text,
             )
+
+
+_THIN_BAR_HEIGHT = 4
+_PERCENT_COLUMN_WIDTH = 60
+
+
+class _ThinUsageBar(QWidget):
+    """A slim proportional bar with no text -- structurally cannot overlap
+    a label or percentage, since those live in sibling widgets, never
+    painted over this one."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._ratio = 0.0
+        self._is_observed = False
+        self._has_value = False
+        self.setFixedHeight(_THIN_BAR_HEIGHT)
+
+    def set_value(self, ratio: float | None, *, is_observed: bool) -> None:
+        self._has_value = ratio is not None
+        self._ratio = 0.0 if ratio is None else max(0.0, min(1.0, ratio))
+        self._is_observed = is_observed
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            rect = self.rect()
+            painter.setPen(Qt.PenStyle.NoPen)
+            track_color = QColor(self.palette().mid().color())
+            track_color.setAlpha(90)
+            painter.setBrush(track_color)
+            painter.drawRect(rect)
+            if not self._has_value:
+                return
+            fill_color = (
+                QColor(self.palette().link().color())
+                if self._is_observed
+                else self.palette().highlight().color()
+            )
+            painter.setBrush(fill_color)
+            fill_width = rect.width() * self._ratio
+            painter.drawRect(QRectF(rect.left(), rect.top(), fill_width, rect.height()))
+        finally:
+            painter.end()
+
+
+class ReadableRankedListWidget(QWidget):
+    """One category's ranked entries as full-height, never-elided rows.
+
+    Each row is: full name (word-wrap allowed, never truncated) and
+    percentage on one line, with a thin auxiliary usage bar underneath --
+    the bar is a separate sibling widget below the text, so it can never be
+    painted over any character. Rows stack vertically, so this widget's own
+    width never limits how much of a name is readable; only wrapping does.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(8)
+        self._empty_label: QLabel | None = None
+
+    def _clear(self) -> None:
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.deleteLater()
+        self._empty_label = None
+
+    def set_entries(self, entries: Sequence[tuple[str, float | None, bool]]) -> None:
+        self._clear()
+        if not entries:
+            label = QLabel("データなし")
+            label.setProperty("muted", True)
+            self._layout.addWidget(label)
+            self._empty_label = label
+            return
+        max_percentage = max(
+            (percentage for _, percentage, _ in entries if percentage is not None),
+            default=0.0,
+        )
+        max_percentage = max(max_percentage, 1.0)
+        for label_text, percentage, is_observed in entries:
+            self._layout.addWidget(
+                self._build_row(label_text, percentage, is_observed, max_percentage)
+            )
+
+    def _build_row(
+        self,
+        label_text: str,
+        percentage: float | None,
+        is_observed: bool,
+        max_percentage: float,
+    ) -> QWidget:
+        row = QWidget()
+        row_layout = QVBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(2)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        name_text = f"✓ {label_text}" if is_observed else label_text
+        name_label = QLabel(name_text)
+        name_label.setWordWrap(True)
+        if is_observed:
+            name_label.setProperty("factChip", True)
+        top_row.addWidget(name_label, 1)
+
+        percent_label = QLabel("--%" if percentage is None else f"{percentage:.1f}%")
+        percent_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        percent_label.setMinimumWidth(_PERCENT_COLUMN_WIDTH)
+        top_row.addWidget(percent_label, 0)
+        row_layout.addLayout(top_row)
+
+        bar = _ThinUsageBar()
+        ratio = None if percentage is None else float(percentage) / max_percentage
+        bar.set_value(ratio, is_observed=is_observed)
+        row_layout.addWidget(bar)
+
+        return row

@@ -393,8 +393,7 @@ def test_stale_identity_result_rejected_via_existing_binding_contract(tmp_path: 
     repository.close()
 
 
-# --- 14. timeout -> TIMED_OUT only; HTTP/network/parse error -> FAILED -------
-# All fail-closed: no retry, no fallback, no canonical state mutation.
+# --- 14. transient failures cascade; non-transient parse errors fail closed --
 
 
 @pytest.mark.parametrize(
@@ -406,11 +405,12 @@ def test_stale_identity_result_rejected_via_existing_binding_contract(tmp_path: 
         (ProviderTransportError("GEMINI_RESPONSE_ENVELOPE_MALFORMED"), JobStatus.FAILED),
     ],
 )
-def test_transport_failure_fails_closed_without_retry_or_fallback(
+def test_transport_failure_uses_only_contract_allowed_fallback(
     tmp_path: Path, error: ProviderTransportError, expected_status: JobStatus
 ) -> None:
     qapp = qt_application()
-    transport = FakeSelectionAdviceTransport(responses=[error])
+    eligible = is_selection_fallback_eligible(str(error))
+    transport = FakeSelectionAdviceTransport(responses=[error, error] if eligible else [error])
     repository, application, controller = build_controller(tmp_path, transport)
     ready_selection_open(controller)
     before = repository.load_active_session()
@@ -418,7 +418,7 @@ def test_transport_failure_fails_closed_without_retry_or_fallback(
 
     results = send_and_wait(qapp, controller)
 
-    assert transport.call_count == 1  # no automatic retry
+    assert transport.call_count == (2 if eligible else 1)
     after = repository.load_active_session()
     assert after is not None
     assert after.state is BattleState.SELECTION_OPEN
@@ -491,11 +491,11 @@ def test_selection_config_has_exact_lane_specific_defaults(
         ("GEMINI_HTTP_ERROR:429", True),
         ("GEMINI_HTTP_ERROR:429|STATUS=RESOURCE_EXHAUSTED", True),
         ("GEMINI_HTTP_ERROR:503|REASON=MODEL_CAPACITY_EXHAUSTED", True),
-        ("GEMINI_HTTP_ERROR:503|STATUS=UNAVAILABLE", False),
-        ("GEMINI_HTTP_ERROR:503|DOMAIN=RESOURCE_EXHAUSTED", False),
-        ("GEMINI_HTTP_ERROR:500", False),
-        ("GEMINI_NETWORK_ERROR", False),
-        ("GEMINI_TIMEOUT", False),
+        ("GEMINI_HTTP_ERROR:503|STATUS=UNAVAILABLE", True),
+        ("GEMINI_HTTP_ERROR:503|DOMAIN=RESOURCE_EXHAUSTED", True),
+        ("GEMINI_HTTP_ERROR:500", True),
+        ("GEMINI_NETWORK_ERROR", True),
+        ("GEMINI_TIMEOUT", True),
         ("GEMINI_RESPONSE_ENVELOPE_MALFORMED", False),
         ("GEMINI_FAILURE_UNCLASSIFIED", False),
     ],

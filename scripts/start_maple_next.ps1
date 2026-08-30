@@ -65,12 +65,15 @@ function Import-MapleProviderEnvironment {
         "MAPLE_NEXT_GEMINI_API_KEY",
         "MAPLE_NEXT_GEMINI_SELECTION_PRIMARY_MODEL",
         "MAPLE_NEXT_GEMINI_SELECTION_FALLBACK_MODEL",
+        "MAPLE_NEXT_GEMINI_SELECTION_MODEL_CHAIN",
         "MAPLE_NEXT_GEMINI_TIMEOUT_SECONDS",
         "MAPLE_NEXT_GEMINI_TURN_MODEL",
-        "MAPLE_NEXT_GEMINI_TURN_AUTHORIZED"
+        "MAPLE_NEXT_GEMINI_TURN_AUTHORIZED",
+        "MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED"
     )
     $legacyKeys = @(
         "MAPLE_SELECTION_ADVISOR_API_KEY",
+        "MAPLE_SELECTION_MODEL_CHAIN",
         "MAPLE_TURN_ADVISOR_API_KEY"
     )
     $allowedKeys = $currentKeys + $legacyKeys
@@ -107,6 +110,19 @@ function Import-MapleProviderEnvironment {
     }
 
     $loadedNames = @()
+    $currentChainKey = "MAPLE_NEXT_GEMINI_SELECTION_MODEL_CHAIN"
+    $legacyChainKey = "MAPLE_SELECTION_MODEL_CHAIN"
+    $currentChainValue = [Environment]::GetEnvironmentVariable($currentChainKey, "Process")
+    if (
+        [string]::IsNullOrWhiteSpace($currentChainValue) -and
+        -not $parsed.ContainsKey($currentChainKey) -and
+        $parsed.ContainsKey($legacyChainKey)
+    ) {
+        [Environment]::SetEnvironmentVariable(
+            $currentChainKey, [string]$parsed[$legacyChainKey], "Process"
+        )
+        $loadedNames += $currentChainKey
+    }
     foreach ($key in $currentKeys) {
         $existing = [Environment]::GetEnvironmentVariable($key, "Process")
         if ([string]::IsNullOrWhiteSpace($existing) -and $parsed.ContainsKey($key)) {
@@ -264,8 +280,9 @@ $StateDirectory = Join-Path $ResolvedRuntimeRoot "state"
 $ExportsDirectory = Join-Path $ResolvedRuntimeRoot "exports"
 $LogsDirectory = Join-Path $ResolvedRuntimeRoot "logs"
 $SmokeDirectory = Join-Path $ResolvedRuntimeRoot "smoke"
+$FeedbackDirectory = Join-Path $ResolvedRuntimeRoot "feedback"
 
-foreach ($directory in @($StateDirectory, $ExportsDirectory, $LogsDirectory, $SmokeDirectory)) {
+foreach ($directory in @($StateDirectory, $ExportsDirectory, $LogsDirectory, $SmokeDirectory, $FeedbackDirectory)) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }
 
@@ -286,6 +303,7 @@ Write-Log "resolved python executable: $PythonExe $($PythonArgsPrefix -join ' ')
 Write-Log "resolved runtime root: $ResolvedRuntimeRoot"
 Write-Log "database path: $DatabasePath"
 Write-Log "export directory: $ExportsDirectory"
+Write-Log "feedback directory: $FeedbackDirectory"
 Write-Log "log path: $LogPath"
 if ($LoadedProviderEnvironmentNames.Count -gt 0) {
     Write-Log "provider environment loaded from repository-local .env"
@@ -315,7 +333,8 @@ if ($Smoke) {
     $appArgs = $PythonArgsPrefix + @(
         "-m", "maple_next",
         "--database", $DatabasePath,
-        "--export-directory", $ExportsDirectory
+        "--export-directory", $ExportsDirectory,
+        "--feedback-directory", $FeedbackDirectory
     )
     & $PythonExe @appArgs
     $ExitCode = $LASTEXITCODE

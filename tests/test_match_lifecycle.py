@@ -926,17 +926,11 @@ def test_turn_recorded_confirmed_lose_transitions_to_match_ended(tmp_path: Path)
     assert repository.count_actions(session.session_id) == 1
 
 
-@pytest.mark.parametrize("state_setup", ["pending", "reviewed", "advice_pending"])
-def test_pending_and_reviewed_states_reject_match_end_without_mutation(
+def test_pending_state_rejects_match_end_without_mutation(
     tmp_path: Path,
-    state_setup: str,
 ) -> None:
     repository, application, _, _ = build_ready_application(tmp_path)
     application.start_turn_capture()
-    if state_setup in {"reviewed", "advice_pending"}:
-        confirm_turn(application)
-    if state_setup == "advice_pending":
-        application.request_turn_advice("explicit-pending")
     before = repository.load_active_session()
     assert before is not None
 
@@ -948,6 +942,29 @@ def test_pending_and_reviewed_states_reject_match_end_without_mutation(
     assert after.state is before.state
     assert after.battle_revision == before.battle_revision
     assert repository.get_match_outcome(after.session_id) is None
+
+
+@pytest.mark.parametrize("state_setup", ["reviewed", "advice_pending"])
+def test_reviewed_states_allow_explicit_match_end(
+    tmp_path: Path,
+    state_setup: str,
+) -> None:
+    repository, application, _, _ = build_ready_application(tmp_path)
+    application.start_turn_capture()
+    confirm_turn(application)
+    if state_setup == "advice_pending":
+        application.request_turn_advice("explicit-pending")
+
+    before = repository.load_active_session()
+    assert before is not None
+    outcome = application.end_match(MatchOutcome.WIN, human_confirmed=True)
+
+    after = repository.load_active_session()
+    assert after is not None
+    assert outcome.outcome is MatchOutcome.WIN
+    assert after.state is BattleState.MATCH_ENDED
+    assert after.battle_revision == before.battle_revision + 1
+    assert repository.get_match_outcome(after.session_id) is not None
 
 
 def test_outcome_is_immutable_and_duplicate_end_does_not_bump_revision(

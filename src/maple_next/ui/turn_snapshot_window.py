@@ -48,6 +48,9 @@ _TURN_SNAPSHOT_ORIGIN_EMPTY = "未入力"
 _TURN_SNAPSHOT_ORIGIN_CARRY_FORWARD = "前Turn確定値の引き継ぎ・未確認"
 _TURN_SNAPSHOT_ORIGIN_CONFIRMED_DRAFT = "確定済み値の引き継ぎ・OCR上書き不可"
 _TURN_SNAPSHOT_ORIGIN_OCR = "OCR候補・未確認"
+#: Bounded so the diagnostics drawer shows only the current episode or two,
+#: never an unbounded growing log across a whole match.
+_TURN_OCR_MILESTONE_LOG_CAP = 40
 
 
 class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
@@ -67,6 +70,15 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
         self._turn_snapshot_worker: TurnSnapshotOcrWorker | None = None
         self._turn_snapshot_setting_fields = False
         self._turn_snapshot_transition_in_progress = False
+        #: P0 diagnostic (OCR recapture incident follow-up): sanitized
+        #: milestone trail for the capture/OCR request lifecycle -- no raw
+        #: OCR text, confidences, or provider payloads, only identifiers,
+        #: status codes, and counts. Neither the request/capture identity
+        #: nor its outcome was previously durable anywhere (not the DB, not
+        #: the launcher log), so a past incident could not be reconstructed
+        #: after the fact. This in-memory, bounded trail exists so the next
+        #: recapture can be read directly off the Diagnostics drawer.
+        self._turn_ocr_milestones: list[str] = []
         self._turn_snapshot_field_locks = {
             field.value: False
             for field in (
@@ -435,6 +447,20 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
             f"押下時の1枚を固定しました（age={status.age_ms}ms）。解析します。",
         )
 
+    def _record_turn_ocr_milestone(self, event: str, *, detail: str = "") -> None:
+        """Append one sanitized capture/OCR lifecycle milestone.
+
+        ``detail`` may only carry identifiers, enum status codes, and
+        counts -- never raw OCR text, confidence values, or provider
+        payloads, per the diagnostic's own sanitization requirement.
+        """
+
+        entry = f"{event} {detail}".strip()
+        self._turn_ocr_milestones.append(entry)
+        overflow = len(self._turn_ocr_milestones) - _TURN_OCR_MILESTONE_LOG_CAP
+        if overflow > 0:
+            del self._turn_ocr_milestones[:overflow]
+
     def _reset_turn_snapshot_draft(self) -> None:
         self._latest_ocr_bundle = None
         for label in self._ocr_field_labels.values():
@@ -464,6 +490,11 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
         if identity is None:
             return
         self._turn_snapshot_active_identity = identity
+        identity_detail = f"turn={identity.turn_number} gen={identity.snapshot_generation}"
+        self._record_turn_ocr_milestone(
+            "FRAME_FROZEN" if frame is not None else "FRAME_FREEZE_FAILED",
+            detail=f"{identity_detail} status={status}",
+        )
         if reset_draft:
             self._reset_turn_snapshot_draft()
         self.turn_snapshot_identity_label.setText(
@@ -504,6 +535,7 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
             TurnSnapshotStatus.ANALYZING,
             "固定画像だけをバックグラウンド解析しています。",
         )
+        self._record_turn_ocr_milestone("OCR_SUBMITTED", detail=identity_detail)
         worker.submit(request)
 
     # -- human-triggered transitions ----------------------------------------
@@ -557,29 +589,52 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
     def _on_retake_turn_snapshot(self, _checked: bool = False) -> None:
         if not self._mutation_slots_allowed() or self._turn_snapshot_transition_in_progress:
             return
-        current = self._controller.refresh()
-        if current.projection.session_state != _TURN_PENDING_STATE:
-            return
-        frozen, status, message = self._freeze_turn_frame()
-        self._submit_frozen_turn_frame(
-            frame=frozen,
-            status=status,
-            message=message,
-            reset_draft=False,
-        )
-        self.render_view()
+        # Explicit recapture is authoritative for starting exactly one new
+        # OCR attempt at a time -- mirrors the same in-progress guard
+        # _on_start_turn/_on_next_turn already hold around their own
+        # freeze+submit, so a recapture cannot itself be re-entered (or
+        # interleaved with a NEXT TURN transition) while its own freeze is
+        # still running.
+        self._turn_snapshot_transition_in_progress = True
+        try:
+            current = self._controller.refresh()
+            if current.projection.session_state != _TURN_PENDING_STATE:
+                return
+            self._record_turn_ocr_milestone(
+                "RECAPTURE_REQUESTED", detail=f"turn={current.projection.turn_number}"
+            )
+            frozen, status, message = self._freeze_turn_frame()
+            self._submit_frozen_turn_frame(
+                frame=frozen,
+                status=status,
+                message=message,
+                reset_draft=False,
+            )
+        finally:
+            self._turn_snapshot_transition_in_progress = False
+            self.render_view()
 
     # -- result application --------------------------------------------------
 
     def _on_turn_snapshot_result(self, payload: object) -> None:
         if not isinstance(payload, TurnSnapshotResult):
             return
+        identity_detail = (
+            f"turn={payload.identity.turn_number} gen={payload.identity.snapshot_generation}"
+        )
+        self._record_turn_ocr_milestone(
+            "OCR_COMPLETED", detail=f"{identity_detail} status={payload.status}"
+        )
         current = self._controller.refresh()
-        if (
-            not current.persistence_reads_allowed
-            or current.projection.session_state != _TURN_PENDING_STATE
-            or not self._identity_is_current(payload.identity, current)
-        ):
+        accepted = (
+            current.persistence_reads_allowed
+            and current.projection.session_state == _TURN_PENDING_STATE
+            and self._identity_is_current(payload.identity, current)
+        )
+        self._record_turn_ocr_milestone(
+            "CALLBACK_ACCEPTED" if accepted else "CALLBACK_STALE", detail=identity_detail
+        )
+        if not accepted:
             return
         self._latest_ocr_bundle = payload.bundle
         self._render_ocr_candidates(payload.bundle)
@@ -588,6 +643,7 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
         self._set_turn_snapshot_status(payload.status, payload.operator_message)
         self._auto_fill_turn_snapshot_candidates(payload.bundle.candidates)
         self._render_turn_snapshot_origins()
+        self._record_turn_ocr_milestone("UI_REFRESHED", detail=identity_detail)
 
     def _auto_fill_turn_snapshot_candidates(
         self,
@@ -598,6 +654,8 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
             current = best_by_field.get(candidate.field_key)
             if current is None or candidate.rank < current.rank:
                 best_by_field[candidate.field_key] = candidate
+        applied_count = 0
+        suppressed_by_lock_count = 0
         self._turn_snapshot_setting_fields = True
         try:
             for field_key, candidate in best_by_field.items():
@@ -606,6 +664,7 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
                 if candidate.suggested_value == "UNKNOWN":
                     continue
                 if self._turn_snapshot_field_locks.get(field_key, False):
+                    suppressed_by_lock_count += 1
                     continue
                 origin = self._turn_snapshot_origins.get(
                     field_key, _TURN_SNAPSHOT_ORIGIN_EMPTY
@@ -615,6 +674,7 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
                     and origin != _TURN_SNAPSHOT_ORIGIN_CARRY_FORWARD
                 ):
                     continue
+                applied_count += 1
                 # Publish the OCR origin before changing the widget.  Qt
                 # emits text/current-value signals synchronously; consumers
                 # that project identity-dependent UI (notably the opponent
@@ -624,6 +684,10 @@ class TurnSnapshotMatchFlowWindow(SelectionSnapshotMatchFlowWindow):
                 self._set_turn_field(field_key, candidate.suggested_value)
         finally:
             self._turn_snapshot_setting_fields = False
+        self._record_turn_ocr_milestone("FIELDS_APPLIED", detail=f"count={applied_count}")
+        self._record_turn_ocr_milestone(
+            "FIELDS_SUPPRESSED_BY_HUMAN_LOCK", detail=f"count={suppressed_by_lock_count}"
+        )
 
     def _bind_turn_snapshot_draft_field(
         self,

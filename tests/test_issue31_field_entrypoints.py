@@ -153,6 +153,35 @@ def _assert_no_destructive_new_match(window: BattleRecordUiWindow) -> None:
     assert not window.new_match_after_export_button.isEnabled()
 
 
+def test_standard_landing_defaults_to_battle_record_and_preserves_explicit_tab(
+    tmp_path: Path,
+) -> None:
+    repository, _application, controller, window = _build_window(tmp_path)
+    try:
+        assert window.header_tabs.currentIndex() == 1
+        assert window.header_tabs.currentWidget() is window.battle_record_page
+
+        # A normal refresh preserves explicit operator navigation.
+        window.header_tabs.setCurrentIndex(0)
+        window.render_view(controller.refresh())
+        assert window.header_tabs.currentIndex() == 0
+    finally:
+        window.close()
+        repository.close()
+
+    # A fresh window is a fresh standard landing, including after refresh.
+    restarted_repository, _app, restarted_controller, restarted_window = _build_window(
+        tmp_path, suffix="-default-refresh"
+    )
+    try:
+        assert restarted_window.header_tabs.currentIndex() == 1
+        restarted_window.render_view(restarted_controller.refresh())
+        assert restarted_window.header_tabs.currentIndex() == 1
+    finally:
+        restarted_window.close()
+        restarted_repository.close()
+
+
 def test_no_active_match_field_button_uses_canonical_handler_once_and_hydrates(
     tmp_path: Path,
 ) -> None:
@@ -293,9 +322,9 @@ def test_mandatory_field_controls_exist_gate_and_connect_to_canonical_handlers(
         assert window.apply_button._on_trusted_activate.__func__.__name__ == "_on_apply"  # noqa: SLF001
         window._on_apply()  # noqa: SLF001 - explicit human fixture
 
-        # Turn record: fixed Battle lifecycle slot is present. A RECORD projection
-        # plus completed human fields enables it and its click reaches the canonical
-        # controller method exactly once.
+        # Turn result entry: the fixed Battle lifecycle slot opens the
+        # second-step result workbench. Persistence remains on NEXT TURN;
+        # clicking this slot must not call the canonical record mutation yet.
         current = controller.refresh()
         record_view = replace(
             current,
@@ -321,22 +350,41 @@ def test_mandatory_field_controls_exist_gate_and_connect_to_canonical_handlers(
             controller, "record_actual_action", return_value=record_view
         ) as record_spy:
             window.record_action_button.click()
-        assert record_spy.call_count == 1
+        assert record_spy.call_count == 0
+        assert window._result_entry_active is True  # noqa: SLF001
+        window._on_back_to_action_entry()  # noqa: SLF001
 
-        # MATCH END: visible through the accepted terminal drawer only in an
-        # endable state; completing the human outcome controls enables it and
-        # its click reaches the canonical match controller exactly once.
+        # MATCH END: WIN / LOSS and the established confirmation/end controls
+        # are one local Battle Record surface, with no old drawer duplicate.
         battle_ready = controller.refresh()
         window.render_view(battle_ready)
-        window.header_export_button.click()
-        window.outcome_box.setCurrentText(MatchOutcome.WIN.value)
+        assert window.match_end_local_group.isVisible()
+        for control in (
+            window.match_win_button,
+            window.match_loss_button,
+            window.outcome_confirm_checkbox,
+            window.end_match_button,
+        ):
+            assert window.match_end_local_group.isAncestorOf(control)
+            assert not window.terminal_flow_drawer.isAncestorOf(control)
+        assert window.match_end_group.isHidden()
+        assert not window.end_match_button.isEnabled()
+
+        window.match_win_button.click()
+        assert window.outcome_box.currentText() == MatchOutcome.WIN.value
+        assert window.match_win_button.isChecked()
+        assert not window.match_loss_button.isChecked()
+        assert not window.end_match_button.isEnabled()
         window.outcome_confirm_checkbox.setChecked(True)
         QApplication.processEvents()
         assert window.end_match_button.isVisible()
         assert window.end_match_button.isEnabled()
-        with patch.object(controller, "end_match", return_value=battle_ready) as end_spy:
+        with patch.object(controller, "end_match", wraps=controller.end_match) as end_spy:
+            window.end_match_button.click()
             window.end_match_button.click()
         assert end_spy.call_count == 1
+        assert controller.refresh().session_state == "MATCH_ENDED"
+        assert window.match_end_local_group.isHidden()
     finally:
         window.close()
         repository.close()

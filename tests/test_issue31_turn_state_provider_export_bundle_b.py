@@ -352,6 +352,7 @@ def test_gate_allows_open_draft_that_is_not_newer() -> None:
             identity=state.identity, based_on_confirmed_state_id=state.confirmed_state_id
         ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
+        confirmed_fainted_members=frozenset({"Gholdengo", "Urshifu"}),
     )
     assert result.allowed
 
@@ -431,6 +432,7 @@ def test_gate_allows_explicit_confirmed_unknown_hp_status_stages_weather_terrain
             identity=state.identity, based_on_confirmed_state_id=state.confirmed_state_id
         ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
+        confirmed_fainted_members=frozenset({"Gholdengo", "Urshifu"}),
     )
     assert result.allowed
 
@@ -449,6 +451,7 @@ def test_bridge_builds_request_from_loaded_state() -> None:
             identity=state.identity, based_on_confirmed_state_id=state.confirmed_state_id
         ),
         selected_three=("Dondozo", "Gholdengo", "Urshifu"),
+        confirmed_fainted_members=frozenset({"Gholdengo", "Urshifu"}),
         self_active="Dondozo",
         bundle3_context=names_only_bundle3_context(
             selected_three=("Dondozo", "Gholdengo", "Urshifu")

@@ -163,7 +163,7 @@ def test_fixed_geometry_exact_four_lifecycle_buttons_and_no_legacy_phase(
     assert tuple(button.text() for button in window.lifecycle_buttons) == (
         "Turn撮影",
         "CONFIRM TURN FACTS",
-        "行動・結果記録",
+        "結果記録",
         "NEXT TURN",
     )
     assert "facts/state確定" not in {button.text() for button in window.lifecycle_buttons}
@@ -769,10 +769,13 @@ def test_self_switch_selector_explicitly_reports_empty_legal_targets(
     _advance_to_turn_capture_pending(controller)
     window.render_view()
     _fill_minimal_current_state(window)
-    for checkbox in window.switch_checkboxes:
-        checkbox.setChecked(False)
+    # The Bundle 2 workbench, not the legacy memo checkboxes, is the source
+    # of the exact legal-switch confirmation. Deliberately clear that list
+    # and use the dedicated human "none" action.
+    for index in range(window.legal_switch_list.count()):
+        window.legal_switch_list.item(index).setSelected(False)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    _confirm_legal_switches_honestly(window)
+    window._on_confirm_legal_switches_none()  # noqa: SLF001
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
     window.mock_turn_prediction_input.setText("manual test prediction")

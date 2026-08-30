@@ -66,19 +66,9 @@ STAGE_EVENT_PRESETS: tuple[StageEventPreset, ...] = (
         ),
     ),
     StageEventPreset(
-        key="turuginomai",
-        label="つるぎのまい",
-        deltas=(("attack_stage", 2),),
-    ),
-    StageEventPreset(
         key="ryuunomai",
         label="りゅうのまい",
         deltas=(("attack_stage", 1), ("speed_stage", 1)),
-    ),
-    StageEventPreset(
-        key="meisou",
-        label="めいそう",
-        deltas=(("special_attack_stage", 1), ("special_defense_stage", 1)),
     ),
     StageEventPreset(
         key="chounomai",
@@ -88,6 +78,31 @@ STAGE_EVENT_PRESETS: tuple[StageEventPreset, ...] = (
             ("special_defense_stage", 1),
             ("speed_stage", 1),
         ),
+    ),
+    StageEventPreset(
+        key="buildup",
+        label="ビルドアップ",
+        deltas=(("attack_stage", 1), ("defense_stage", 1)),
+    ),
+    StageEventPreset(
+        key="meisou",
+        label="めいそう",
+        deltas=(("special_attack_stage", 1), ("special_defense_stage", 1)),
+    ),
+    StageEventPreset(
+        key="turuginomai",
+        label="つるぎのまい",
+        deltas=(("attack_stage", 2),),
+    ),
+    StageEventPreset(
+        key="warudakumi",
+        label="わるだくみ",
+        deltas=(("special_attack_stage", 2),),
+    ),
+    StageEventPreset(
+        key="kousokuidou",
+        label="こうそくいどう",
+        deltas=(("speed_stage", 2),),
     ),
     StageEventPreset(
         key="reset",
@@ -100,6 +115,14 @@ STAGE_EVENT_PRESETS: tuple[StageEventPreset, ...] = (
 STAGE_EVENT_PRESETS_BY_KEY: dict[str, StageEventPreset] = {
     preset.key: preset for preset in STAGE_EVENT_PRESETS
 }
+
+#: The "よく使う能力変化" quick-preset row (direct-entry stage editor):
+#: every non-reset preset, in the exact display order operators expect.
+#: ``能力変化リセット`` stays out of this row on purpose -- it is a bulk
+#: zero-out, not a "common move effect" an operator picks mid-match.
+COMMON_STAGE_EVENT_PRESETS: tuple[StageEventPreset, ...] = tuple(
+    preset for preset in STAGE_EVENT_PRESETS if not preset.reset
+)
 
 
 def apply_stage_event(

@@ -470,11 +470,15 @@ def test_1j_selection_naming_a_non_selected_pokemon_is_rejected(tmp_path: Path) 
         terrain=Known.confirmed("NONE", provenance_chain=_HUMAN),
         legal_switch_selection=("Not-In-Selected-Three",),
     )
-    assert view.error_message is None
+    # With one canonical explicit switch set, the legacy snapshot also
+    # validates the selected name; a foreign workbench selection therefore
+    # fails closed before either representation is persisted.
+    assert view.error_message is not None
 
     summary = controller.turn_state_summary()
+    assert summary.confirmed_state is None
     assert summary.legal_switch_confirmation is None
-    assert "LEGAL_SWITCHES_UNRESOLVED" in summary.provider_ready_denial_reasons
+    assert summary.provider_ready_denial_reasons == ()
     assert transport.call_count == 0
     repository.close()
 
@@ -568,6 +572,24 @@ def test_3b_confirm_none_reaches_provider_ready_but_never_sends(tmp_path: Path) 
     )
     _advance_to_turn_capture_pending(controller)
     window.render_view()
+    session = repository.load_active_session()
+    assert session is not None
+    # CONFIRMED_NONE is provider-ready only when the selected backline is
+    # actually confirmed fainted. Keep this positive-path fixture distinct
+    # from test_3c, which intentionally exercises the contradictory case.
+    with repository.transaction():
+        for name in (SELECTED_THREE[1], SELECTED_THREE[2]):
+            repository.upsert_pokemon_local_state(
+                session_id=session.session_id,
+                match_id=session.match_id,
+                generation=session.generation,
+                side="SELF",
+                memory=PokemonLocalMemory(
+                    pokemon_name=name,
+                    hp_bucket=Known.confirmed(HpBucket.ZERO, provenance_chain=_HUMAN),
+                    status=Known.confirmed("NONE", provenance_chain=_HUMAN),
+                ),
+            )
     _fill_minimal_current_state(window)
     window.confirm_turn_facts_button.click()
     assert transport.call_count == 0
@@ -585,6 +607,38 @@ def test_3b_confirm_none_reaches_provider_ready_but_never_sends(tmp_path: Path) 
     window._on_trusted_send_turn_to_gemini()  # noqa: SLF001
     assert transport.call_count == 1
     assert adapter.dispatch_count == 1
+    repository.close()
+
+
+def test_3c_confirmed_none_contradicting_real_backline_blocks_ready(tmp_path: Path) -> None:
+    """Tournament-week hotfix: an explicit CONFIRMED_NONE override while
+    Gholdengo/Dragonite are still valid (non-fainted, non-active) backline
+    candidates must never reach provider-ready -- the gate treats it as an
+    unresolved contradiction, exactly like a never-confirmed binding, rather
+    than letting an empty legal-switch set be sent to Gemini. Uses the plain
+    (non-auto-sending) fixture so the contradiction itself -- not any
+    unrelated same-click send behavior -- is what's under test."""
+
+    repository, controller, window, transport = build_window(tmp_path)
+    _advance_to_turn_capture_pending(controller)
+    window.render_view()
+    _fill_minimal_current_state(window)
+    window._on_confirm_turn_facts()  # noqa: SLF001
+
+    before = controller.turn_state_summary()
+    assert before.legal_switch_confirmation is not None
+    assert before.legal_switch_confirmation.status is LegalSwitchStatus.CONFIRMED_NONEMPTY
+
+    window._on_confirm_legal_switches_none()  # noqa: SLF001
+
+    summary = controller.turn_state_summary()
+    assert summary.legal_switch_confirmation is not None
+    assert summary.legal_switch_confirmation.status is LegalSwitchStatus.CONFIRMED_NONE
+    assert summary.provider_ready is False
+    assert "LEGAL_SWITCHES_CONFIRMED_NONE_CONTRADICTS_DERIVATION" in (
+        summary.provider_ready_denial_reasons
+    )
+    assert transport.call_count == 0
     repository.close()
 
 

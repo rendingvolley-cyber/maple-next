@@ -50,7 +50,12 @@ class SelectionAdviceIntegrationController(ExplicitTurnNumberController):
                 advice_id=None,
                 can_apply=False,
             )
-        if adapter.in_flight:
+        adapter_state_current = adapter.operator_state_matches(
+            session_id=projection.session_id,
+            match_id=projection.match_id,
+            generation=projection.generation,
+        )
+        if adapter_state_current and adapter.in_flight:
             return SelectionAdviceStatusView(
                 status="PENDING",
                 source_type="GEMINI",
@@ -61,7 +66,7 @@ class SelectionAdviceIntegrationController(ExplicitTurnNumberController):
                 advice_id=None,
                 can_apply=False,
             )
-        if adapter.last_failure_reason is not None:
+        if adapter_state_current and adapter.last_failure_reason is not None:
             return SelectionAdviceStatusView(
                 status="FAILED",
                 source_type="GEMINI",
@@ -72,7 +77,19 @@ class SelectionAdviceIntegrationController(ExplicitTurnNumberController):
                 advice_id=None,
                 can_apply=False,
             )
-        if adapter.last_disposition is ResultDisposition.STALE_REJECTED:
+        durable_failure = self._application.gemini_selection_last_failure_reason()
+        if durable_failure is not None:
+            return SelectionAdviceStatusView(
+                status="FAILED",
+                source_type="GEMINI",
+                model="—",
+                binding_status="REJECTED",
+                legality_status="NOT_APPLICABLE",
+                sanitized_failure=durable_failure,
+                advice_id=None,
+                can_apply=False,
+            )
+        if adapter_state_current and adapter.last_disposition is ResultDisposition.STALE_REJECTED:
             return SelectionAdviceStatusView(
                 status="STALE",
                 source_type=adapter.last_source_type or "GEMINI",
@@ -83,7 +100,7 @@ class SelectionAdviceIntegrationController(ExplicitTurnNumberController):
                 advice_id=None,
                 can_apply=False,
             )
-        if adapter.last_disposition in {
+        if adapter_state_current and adapter.last_disposition in {
             ResultDisposition.INVALID_REJECTED,
             ResultDisposition.DUPLICATE_IGNORED,
         }:
@@ -308,14 +325,35 @@ class SelectionAdviceIntegrationWindow(ExplicitTurnNumberWindow):
         self.gemini_group.setVisible(
             self._selection_gemini_controller.gemini_send_available and selection_scope
         )
+        # A fallback/no-cache view must not trigger durable selection reads.
+        # Resend and attempt status are persistence-backed; keep the send
+        # surface fail-closed until a normal refresh restores a durable view.
+        resend_eligible = False
+        selection_attempt_consumed = True
+        if current.persistence_reads_allowed:
+            resend_eligible = bool(
+                self._selection_gemini_controller.gemini_selection_resend_eligible()
+            )
+            selection_attempt_consumed = bool(
+                self._selection_gemini_controller.gemini_selection_attempt_consumed()
+            )
+        self.gemini_send_button.setText(
+            "Gemini再送" if resend_eligible else "SEND SELECTION TO GEMINI"
+        )
         self.gemini_send_button.setEnabled(
             current.persistence_reads_allowed
             and current.primary_cta == "REQUEST_SELECTION_ADVICE"
             and current.projection.provider_send_enabled
             and status.status not in {"PENDING", "SUCCESS"}
-            and not self._selection_gemini_controller.gemini_selection_attempt_consumed()
+            and (
+                not selection_attempt_consumed
+                or resend_eligible
+            )
         )
-        self.gemini_status_label.setText(f"Status: {status.status}")
+        progress = self._selection_gemini_controller.gemini_selection_progress()
+        self.gemini_status_label.setText(
+            progress if status.status == "PENDING" and progress else f"Status: {status.status}"
+        )
         self.gemini_failure_label.setText(
             f"Sanitized failure: {status.sanitized_failure}"
             if status.sanitized_failure

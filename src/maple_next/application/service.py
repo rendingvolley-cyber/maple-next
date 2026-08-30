@@ -6,7 +6,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, TypeVar
 from uuid import uuid4
 
 from maple_next.application.projection import DomainProjection, project
@@ -42,6 +42,11 @@ from maple_next.domain.legal_switches import (
 from maple_next.domain.legal_switches import (
     confirm_legal_switches as build_legal_switch_confirmation,
 )
+from maple_next.domain.mega_evolution import (
+    MegaBattleState,
+    MegaSide,
+    deterministic_mega_form,
+)
 from maple_next.domain.models import (
     AppliedSelectionSnapshot,
     BattleSession,
@@ -59,10 +64,14 @@ from maple_next.domain.opponent_intel_context import (
 from maple_next.domain.team_build import ChampionsTeamBuild
 from maple_next.domain.turn_state import (
     ActionResultDelta,
+    ChangeObservation,
     ConfirmationMeta,
     ConfirmedTurnState,
+    FieldDelta,
+    Known,
     NextTurnStateDraft,
     PokemonLocalMemory,
+    ProvenanceStep,
     TurnIdentity,
     TurnStateIdentityError,
     TurnStateStaleError,
@@ -107,6 +116,7 @@ from maple_next.providers.turn_response_v2 import (
     RESPONSE_SCHEMA_VERSION_V2,
     TurnAdviceBodyV2,
     canonical_turn_advice_v2_json,
+    normalize_degradable_opponent_prediction_v2,
     turn_advice_body_v2_from_canonical_json,
     turn_advice_body_v2_from_dict,
 )
@@ -127,9 +137,101 @@ from maple_next.providers.turn_validation import (
 )
 from maple_next.workers.contracts.models import JobEnvelope, ResultEnvelope
 
+_MemoryValueT = TypeVar("_MemoryValueT")
+
+
+def _apply_local_memory_delta(
+    previous: Known[_MemoryValueT], delta: FieldDelta[_MemoryValueT]
+) -> Known[_MemoryValueT]:
+    """Project one confirmed result field into match-local memory."""
+
+    if delta.observation is ChangeObservation.CHANGED:
+        assert delta.after_value is not None
+        return Known.confirmed(delta.after_value, provenance_chain=delta.provenance_chain)
+    if delta.observation is ChangeObservation.UNCHANGED:
+        return previous
+    return Known.unknown(provenance_chain=(ProvenanceStep.UNKNOWN,))
+
 
 class DomainError(RuntimeError):
     """Raised when a command violates the canonical transition contract."""
+
+
+#: Every fixed sanitized token a Turn Advice v1/v2 validator can produce.
+#: Built from the validators' own dicts (via their public accessor
+#: functions), never hand-duplicated, so it can never drift out of sync with
+#: what those modules actually emit.
+_TURN_ADVICE_SANITIZED_REJECTION_TOKENS: Final[frozenset[str]] = frozenset(
+    sanitized_reason_for(code) for code in TurnAdviceResultCode
+) | frozenset(
+    sanitized_reason_for_v2_semantics(code) for code in TurnAdviceV2SemanticResultCode
+)
+
+
+def _invalid_payload_reason(exc: Exception) -> str:
+    """Sanitized ``async_job_results.reason`` for a rejected Turn Advice response.
+
+    Never widens what reaches the audit row to arbitrary exception text --
+    that would risk echoing provider-derived content. Only two sources are
+    trusted to append detail beyond the generic ``INVALID_PAYLOAD`` marker:
+
+    - ``TurnAdviceSchemaError``/``TurnAdviceParseError``: documented (at
+      their definitions) to always carry one of a small fixed set of
+      sanitized tokens, never raw provider text.
+    - A plain ``ValueError`` whose message is exactly one of the legality/
+      semantic validators' own fixed sanitized tokens (i.e. it was raised
+      via ``sanitized_reason_for``/``sanitized_reason_for_v2_semantics``).
+
+    Any other exception (KeyError, TypeError, a ValueError from somewhere
+    else, ``ProviderReadyGateError``, ``DomainError``) collapses to the
+    pre-existing plain ``INVALID_PAYLOAD``, exactly as before.
+    """
+
+    if isinstance(exc, (TurnAdviceSchemaError, TurnAdviceParseError)):
+        return f"INVALID_PAYLOAD:{exc}"
+    if isinstance(exc, ValueError) and str(exc) in _TURN_ADVICE_SANITIZED_REJECTION_TOKENS:
+        return f"INVALID_PAYLOAD:{exc}"
+    return "INVALID_PAYLOAD"
+
+
+#: Audit token recorded on an otherwise-normal ``APPLIED`` disposition when
+#: :func:`~maple_next.providers.turn_response_v2.turn_advice_body_v2_from_dict`
+#: silently canonicalized a LOW-support prediction line's ``specific_action``
+#: to ``null`` (see that function's own normalization). Purely a sanitized
+#: diagnostic marker for the operator/audit trail -- never derived from or
+#: containing any raw provider text itself.
+NORMALIZED_LOW_SUPPORT_SPECIFIC_ACTION_TO_NULL: Final[str] = (
+    "NORMALIZED_LOW_SUPPORT_SPECIFIC_ACTION_TO_NULL"
+)
+
+PREDICTION_DOWNGRADED_TO_UNKNOWN: Final[str] = "prediction_downgraded_to_unknown"
+
+
+def _payload_had_low_support_specific_action(payload: Any) -> bool:
+    """True if the raw v2 payload named a ``specific_action`` on a LOW-support
+    prediction line -- the exact shape ``turn_advice_body_v2_from_dict``
+    normalizes to ``null`` rather than reject.
+
+    Read-only inspection of ``result.payload`` already held in memory by the
+    caller; nothing here persists or widens retention of that raw payload,
+    it only derives one sanitized boolean for the audit trail.
+    """
+
+    if not isinstance(payload, dict):
+        return False
+    opponent_prediction = payload.get("opponent_prediction")
+    if not isinstance(opponent_prediction, dict):
+        return False
+    lines: list[Any] = [opponent_prediction.get("primary")]
+    alternatives = opponent_prediction.get("alternatives")
+    if isinstance(alternatives, list):
+        lines.extend(alternatives)
+    return any(
+        isinstance(line, dict)
+        and line.get("support") == "LOW"
+        and line.get("specific_action") is not None
+        for line in lines
+    )
 
 
 class TurnAdviceStructuredDataCorruptError(RuntimeError):
@@ -296,6 +398,12 @@ class BattleApplication:
                 current_turn_number = None
         return project(session, latest_job, current_turn_number=current_turn_number)
 
+    def mega_battle_state(self) -> MegaBattleState:
+        """Read the persisted actual Mega resource state for the active match."""
+
+        session = self._require_active_session()
+        return self.repository.get_mega_state(session.session_id)
+
     def new_match(self) -> BattleSession:
         with self.repository.transaction():
             if self.repository.load_active_session() is not None:
@@ -413,18 +521,15 @@ class BattleApplication:
         return job
 
     def reserve_gemini_selection_attempt(self, command_id: str) -> JobEnvelope:
-        """Atomically reserve and create the one durable production Gemini job.
+        """Atomically reserve and create a human-authorized production job.
 
         Distinct from :meth:`request_selection_advice` (still used by the
         mock/dev Selection Advice lane): for the production Gemini lane,
-        once this reservation succeeds for a Selection identity (session,
-        match, generation, battle_revision, reviewed_selection_id), no
-        further production Gemini job may ever be created for that same
-        identity, regardless of how the reserved job resolves (success,
-        failure, timeout, crash) or whether the process restarts. Local
-        validation failures before the reservation point (no active
-        session, wrong state, missing reviewed selection) never write a
-        ledger row and never create a job.
+        the first reservation is unique for a Selection identity. The only
+        replacement is a new command/job created by another human activation
+        after the current job durably ended in an allowlisted transient
+        failure. Local validation failures before the reservation point never
+        write a ledger row or create a job.
         """
 
         job_id = str(uuid4())
@@ -440,13 +545,28 @@ class BattleApplication:
                 reviewed_selection_id=session.current_reviewed_selection_id,
                 job_id=job_id,
             )
-            if not reserved:
-                raise DomainError("GEMINI_SELECTION_ATTEMPT_CONSUMED")
-
             latest_job = self.repository.latest_job_by_type(
                 session.session_id, JobType.SELECTION_ADVICE
             )
-            self._guard_provider_request(latest_job)
+            if not reserved:
+                resend_reason = self._gemini_selection_failure_reason(
+                    session, latest_job, transient_only=True
+                )
+                if resend_reason is None or latest_job is None:
+                    raise DomainError("GEMINI_SELECTION_ATTEMPT_CONSUMED")
+                replaced = self.repository.replace_gemini_selection_attempt_reservation(
+                    session_id=session.session_id,
+                    match_id=session.match_id,
+                    generation=session.generation,
+                    battle_revision=session.battle_revision,
+                    reviewed_selection_id=session.current_reviewed_selection_id,
+                    expected_job_id=latest_job.job_id,
+                    new_job_id=job_id,
+                )
+                if not replaced:
+                    raise DomainError("GEMINI_SELECTION_ATTEMPT_CONSUMED")
+            else:
+                self._guard_provider_request(latest_job)
             selection_facts = self.repository.get_selection_facts(
                 session.current_reviewed_selection_id
             )
@@ -496,6 +616,74 @@ class BattleApplication:
             generation=session.generation,
             reviewed_selection_id=session.current_reviewed_selection_id,
         )
+
+    def gemini_selection_resend_eligible(self) -> bool:
+        """Whether the current identity permits a new human-explicit send."""
+
+        session = self.repository.load_active_session()
+        if session is None or session.current_reviewed_selection_id is None:
+            return False
+        latest_job = self.repository.latest_job_by_type(
+            session.session_id, JobType.SELECTION_ADVICE
+        )
+        return (
+            self._gemini_selection_failure_reason(
+                session, latest_job, transient_only=True
+            )
+            is not None
+        )
+
+    def gemini_selection_last_failure_reason(self) -> str | None:
+        """Restore the current Selection job's sanitized failure after restart."""
+
+        session = self.repository.load_active_session()
+        if session is None or session.current_reviewed_selection_id is None:
+            return None
+        latest_job = self.repository.latest_job_by_type(
+            session.session_id, JobType.SELECTION_ADVICE
+        )
+        return self._gemini_selection_failure_reason(
+            session, latest_job, transient_only=False
+        )
+
+    def _gemini_selection_failure_reason(
+        self,
+        session: BattleSession,
+        latest_job: JobEnvelope | None,
+        *,
+        transient_only: bool,
+    ) -> str | None:
+        if (
+            latest_job is None
+            or latest_job.session_id != session.session_id
+            or latest_job.match_id != session.match_id
+            or latest_job.generation != session.generation
+            or latest_job.base_battle_revision != session.battle_revision
+            or latest_job.input_snapshot_id != session.current_reviewed_selection_id
+            or latest_job.status not in {JobStatus.FAILED, JobStatus.TIMED_OUT}
+        ):
+            return None
+        audits = self.repository.selection_provider_attempt_audits(latest_job.job_id)
+        if not audits:
+            return None
+        _ordinal, _model, outcome, reason = audits[-1]
+        if outcome != "FAILED" or not reason:
+            return None
+        if transient_only and not self._is_transient_selection_failure(reason):
+            return None
+        return reason
+
+    @staticmethod
+    def _is_transient_selection_failure(reason: str) -> bool:
+        if reason == "GEMINI_TIMEOUT" or reason.startswith("GEMINI_NETWORK_ERROR"):
+            return True
+        if not reason.startswith("GEMINI_HTTP_ERROR:"):
+            return False
+        try:
+            status = int(reason.split(":", 1)[1].split("|", 1)[0])
+        except ValueError:
+            return False
+        return status in {408, 425, 429, 500, 502, 503, 504}
 
     def build_selection_advice_transport_request(
         self, job: JobEnvelope
@@ -604,12 +792,33 @@ class BattleApplication:
                 return ResultDisposition.STALE_REJECTED
 
             assert session is not None
+            chosen_package: str | None = None
+            chosen_package_name: str | None = None
+            intended_mega: str | None = None
+            selection_reason: str | None = None
             try:
+                selection_facts = self.repository.get_selection_facts(job.input_snapshot_id)
+                selection_profile = (
+                    selection_facts.self_team_build.selection_profile
+                    if selection_facts.self_team_build is not None
+                    else None
+                )
                 payload = result.payload
                 if not isinstance(payload, dict):
                     raise ValueError("payload must be a JSON object")
-                if set(payload.keys()) != {"selected_three", "lead"}:
-                    raise ValueError("payload must contain exactly selected_three and lead")
+                expected_keys = (
+                    {
+                        "chosen_package",
+                        "selected_three",
+                        "lead",
+                        "intended_mega",
+                        "selection_reason",
+                    }
+                    if selection_profile is not None
+                    else {"selected_three", "lead"}
+                )
+                if set(payload) != expected_keys:
+                    raise ValueError("payload fields do not match the current Selection contract")
 
                 selected_three = payload["selected_three"]
                 if not isinstance(selected_three, list):
@@ -629,9 +838,40 @@ class BattleApplication:
 
                 if len(set(typed_three)) != 3 or lead not in typed_three:
                     raise ValueError("illegal selection")
-                selection_facts = self.repository.get_selection_facts(job.input_snapshot_id)
                 if any(name not in selection_facts.self_team for name in typed_three):
                     raise ValueError("selection outside reviewed team")
+                if selection_profile is not None:
+                    raw_package = payload["chosen_package"]
+                    if not isinstance(raw_package, str) or isinstance(raw_package, bool):
+                        raise ValueError("chosen_package must be a string")
+                    package = selection_profile.package_by_id(raw_package)
+                    raw_intended_mega = payload["intended_mega"]
+                    if raw_intended_mega is not None and (
+                        not isinstance(raw_intended_mega, str)
+                        or isinstance(raw_intended_mega, bool)
+                    ):
+                        raise ValueError("intended_mega must be a string or null")
+                    raw_reason = payload["selection_reason"]
+                    if (
+                        not isinstance(raw_reason, str)
+                        or isinstance(raw_reason, bool)
+                        or not raw_reason.strip()
+                        or len(raw_reason.strip()) > 500
+                    ):
+                        raise ValueError("selection_reason must be concise text")
+                    if (
+                        not selection_profile.mixing_allowed
+                        and set(typed_three) != set(package.members)
+                    ):
+                        raise ValueError("selected_three mixes fixed packages")
+                    if lead not in package.members:
+                        raise ValueError("lead is outside chosen package")
+                    if raw_intended_mega != package.intended_mega:
+                        raise ValueError("intended_mega does not match chosen package")
+                    chosen_package = package.package_id
+                    chosen_package_name = package.name
+                    intended_mega = raw_intended_mega
+                    selection_reason = raw_reason.strip()
                 backline_values = tuple(name for name in typed_three if name != lead)
                 backline = (backline_values[0], backline_values[1])
             except (KeyError, IndexError, TypeError, ValueError):
@@ -651,6 +891,10 @@ class BattleApplication:
                 backline,
                 source_type=result.source_type,
                 model=result.model,
+                chosen_package=chosen_package,
+                chosen_package_name=chosen_package_name,
+                intended_mega=intended_mega,
+                selection_reason=selection_reason,
             )
             session.current_selection_advice_id = advice_id
             session.state = BattleState.SELECTION_ADVICE_READY
@@ -693,6 +937,30 @@ class BattleApplication:
                 raise DomainError("SELECTION_OUTSIDE_REVIEWED_TEAM")
             if lead not in typed_three:
                 raise DomainError("LEAD_NOT_IN_SELECTED_THREE")
+
+            # Tournament P0 / maple-team.v3. Human APPLY may intentionally
+            # differ from Gemini advice, but it must still obey the bound
+            # human-authored Selection Profile. For fixed_packages with
+            # mixing_allowed=false, any cross-package trio is invalid battle
+            # state and must fail before the first durable applied-selection
+            # write. This is defense in depth in addition to provider-result
+            # validation; it also protects manual operator override paths.
+            selection_profile = (
+                selection_facts.self_team_build.selection_profile
+                if selection_facts.self_team_build is not None
+                else None
+            )
+            if selection_profile is not None and not selection_profile.mixing_allowed:
+                matching_package = next(
+                    (
+                        package
+                        for package in selection_profile.packages
+                        if set(typed_three) == set(package.members)
+                    ),
+                    None,
+                )
+                if matching_package is None:
+                    raise DomainError("SELECTION_MIXES_FIXED_PACKAGES")
 
             backline_values = tuple(name for name in typed_three if name != lead)
             backline = (backline_values[0], backline_values[1])
@@ -1030,6 +1298,7 @@ class BattleApplication:
                     raise DomainError("EVIDENCE_METADATA_MISSING") from exc
 
             applied = self.repository.get_applied_selection(session.current_applied_selection_id)
+            mega_state = self.repository.get_mega_state(session.session_id)
             self_team_build_sha256: str | None = None
             if session.current_reviewed_selection_id is not None:
                 selection_facts = self.repository.get_selection_facts(
@@ -1117,6 +1386,7 @@ class BattleApplication:
                     bundle3_context=bundle3_context,
                     rules_context=rules_context,
                     opponent_intel_context=opponent_intel_context,
+                    mega_state=mega_state,
                     rules_season_id=rules_season_id,
                     evidence=evidence,
                     self_team_build_sha256=self_team_build_sha256,
@@ -1331,6 +1601,7 @@ class BattleApplication:
         if session.current_applied_selection_id is None:
             raise DomainError("APPLIED_SELECTION_REQUIRED")
         applied = self.repository.get_applied_selection(session.current_applied_selection_id)
+        mega_state = self.repository.get_mega_state(session.session_id)
         self_team_build_sha256: str | None = None
         if session.current_reviewed_selection_id is not None:
             selection_facts = self.repository.get_selection_facts(
@@ -1411,6 +1682,7 @@ class BattleApplication:
                 bundle3_context=bundle3_context,
                 rules_context=rules_context,
                 opponent_intel_context=opponent_intel_context,
+                mega_state=mega_state,
                 rules_season_id=rules_season_id,
                 evidence=evidence,
                 self_team_build_sha256=self_team_build_sha256,
@@ -1670,6 +1942,7 @@ class BattleApplication:
             assert session is not None
             assert session.current_turn_id is not None
             assert latest_state is not None
+            applied_audit_suffix = ""
             try:
                 rebuilt = self.build_rich_turn_advice_transport_request(job)
                 source_type = str(result.source_type).strip()
@@ -1695,7 +1968,16 @@ class BattleApplication:
                 # any version claim inside ``result.payload`` itself.
                 parser_version = select_response_parser_version(rebuilt.contract_version)
                 if parser_version == "v2":
-                    body_v2 = turn_advice_body_v2_from_dict(result.payload)
+                    normalized_payload, prediction_downgraded = (
+                        normalize_degradable_opponent_prediction_v2(result.payload)
+                    )
+                    body_v2 = turn_advice_body_v2_from_dict(normalized_payload)
+                    if prediction_downgraded:
+                        applied_audit_suffix = f":{PREDICTION_DOWNGRADED_TO_UNKNOWN}"
+                    if _payload_had_low_support_specific_action(result.payload):
+                        applied_audit_suffix += (
+                            f":{NORMALIZED_LOW_SUPPORT_SPECIFIC_ACTION_TO_NULL}"
+                        )
                     legality_code = validate_turn_advice_legality_v2(
                         rebuilt, body_v2.recommended_action
                     )
@@ -1780,9 +2062,9 @@ class BattleApplication:
                 TurnAdviceParseError,
                 ProviderReadyGateError,
                 DomainError,
-            ):
+            ) as exc:
                 self.repository.audit_result(
-                    result, ResultDisposition.INVALID_REJECTED, "INVALID_PAYLOAD"
+                    result, ResultDisposition.INVALID_REJECTED, _invalid_payload_reason(exc)
                 )
                 self.repository.update_job_status(job.job_id, JobStatus.FAILED)
                 return ResultDisposition.INVALID_REJECTED
@@ -1792,7 +2074,9 @@ class BattleApplication:
             session.bump_battle()
             self.repository.save_session(session)
             self.repository.update_job_status(job.job_id, JobStatus.SUCCEEDED)
-            self.repository.audit_result(result, ResultDisposition.APPLIED, "BINDING_ACCEPTED")
+            self.repository.audit_result(
+                result, ResultDisposition.APPLIED, f"BINDING_ACCEPTED{applied_audit_suffix}"
+            )
         return ResultDisposition.APPLIED
 
     @staticmethod
@@ -1905,6 +2189,7 @@ class BattleApplication:
         completion_identity: TurnIdentity,
         action_result_delta: ActionResultDelta,
         rich_transaction_id: str,
+        confirmed_mega_sides: tuple[MegaSide, ...] = (),
     ) -> RecordedAction:
         """Record one mandatory, identity-bound Bundle 1 completion."""
 
@@ -1926,6 +2211,7 @@ class BattleApplication:
                 action_result_delta,
                 rich_transaction_id,
             ),
+            confirmed_mega_sides=confirmed_mega_sides,
         )
 
     def _record_actual_action(
@@ -1938,6 +2224,7 @@ class BattleApplication:
         opponent_action_name: str | None,
         action_order: ActionOrder,
         rich_completion: tuple[TurnIdentity, ActionResultDelta, str] | None,
+        confirmed_mega_sides: tuple[MegaSide, ...] = (),
     ) -> RecordedAction:
         if not human_confirmed:
             raise DomainError("HUMAN_ACTION_CONFIRMATION_REQUIRED")
@@ -1985,6 +2272,7 @@ class BattleApplication:
                 )
             except ValueError as exc:
                 raise DomainError(f"INVALID_RECORDED_ACTION:{exc}") from exc
+            based_on_state: ConfirmedTurnState | None = None
             if rich_completion is not None:
                 completion_identity, action_result_delta, rich_transaction_id = rich_completion
                 if not rich_transaction_id.strip():
@@ -2002,6 +2290,52 @@ class BattleApplication:
                 if based_on_state.identity != completion_identity:
                     raise DomainError("ACTION_COMPLETION_CONFIRMED_STATE_IDENTITY_MISMATCH")
 
+            if confirmed_mega_sides and rich_completion is None:
+                raise DomainError("MEGA_CONFIRMATION_REQUIRES_RICH_ACTION_COMPLETION")
+
+            # Prepare the complete match-level actual Mega state before the
+            # first durable action write. The target is only the active
+            # Pokemon from the already validated human-confirmed state; no
+            # Selection/OCR/general-knowledge fallback is permitted.
+            prepared_mega_state: MegaBattleState | None = None
+            if confirmed_mega_sides:
+                if not all(isinstance(side, MegaSide) for side in confirmed_mega_sides):
+                    raise DomainError("MEGA_SIDE_TYPE_INVALID")
+                if len(set(confirmed_mega_sides)) != len(confirmed_mega_sides):
+                    raise DomainError("MEGA_DUPLICATE_SIDE_CONFIRMATION")
+                assert based_on_state is not None
+                try:
+                    prepared_mega_state = self.repository.get_mega_state(session.session_id)
+                except (KeyError, ValueError) as exc:
+                    raise DomainError("MEGA_STATE_LOAD_FAILED") from exc
+                confirmed_at_utc = datetime.now(UTC).isoformat()
+                for mega_side in confirmed_mega_sides:
+                    side_state = (
+                        based_on_state.self_side
+                        if mega_side is MegaSide.SELF
+                        else based_on_state.opponent_side
+                    )
+                    active_value = side_state.active.value
+                    mega_active_name = (
+                        active_value.strip() if isinstance(active_value, str) else ""
+                    )
+                    if (
+                        not side_state.active.is_confirmed
+                        or not mega_active_name
+                        or mega_active_name == "UNKNOWN"
+                    ):
+                        raise DomainError(f"MEGA_ACTIVE_NOT_CONFIRMED:{mega_side.value}")
+                    try:
+                        prepared_mega_state = prepared_mega_state.record_use(
+                            side=mega_side,
+                            pokemon_name=mega_active_name,
+                            current_form=deterministic_mega_form(mega_active_name),
+                            confirmed_turn=based_on_state.identity.turn_number,
+                            confirmed_at_utc=confirmed_at_utc,
+                        )
+                    except ValueError as exc:
+                        raise DomainError(str(exc)) from exc
+
             # Every mandatory rich prerequisite above is validated before
             # the first durable write. The writes below still share the
             # same outer transaction for rollback on persistence failures.
@@ -2017,6 +2351,43 @@ class BattleApplication:
                     action_order=action.action_order,
                     delta=action_result_delta,
                 )
+                # Result-confirmed HP/status belongs to the Pokemon that was
+                # active at Turn start, even if the next captured screen
+                # already shows its replacement.  Keep the existing
+                # PokemonLocalMemory authority current in this same
+                # transaction so faint/alive/remaining and future legal
+                # switch derivation cannot lag behind the canonical delta.
+                assert based_on_state is not None
+                for side_name, previous_side, side_delta in (
+                    ("SELF", based_on_state.self_side, action_result_delta.self_side),
+                    (
+                        "OPPONENT",
+                        based_on_state.opponent_side,
+                        action_result_delta.opponent_side,
+                    ),
+                ):
+                    active_name = previous_side.active.value
+                    if active_name is None or not previous_side.active.is_confirmed:
+                        continue
+                    self.repository.upsert_pokemon_local_state(
+                        session_id=completion_identity.session_id,
+                        match_id=completion_identity.match_id,
+                        generation=completion_identity.generation,
+                        side=side_name,
+                        memory=PokemonLocalMemory(
+                            pokemon_name=active_name,
+                            hp_bucket=_apply_local_memory_delta(
+                                previous_side.hp_bucket, side_delta.hp_bucket
+                            ),
+                            status=_apply_local_memory_delta(
+                                previous_side.status, side_delta.status
+                            ),
+                        ),
+                    )
+                if prepared_mega_state is not None:
+                    self.repository.update_mega_state(
+                        session.session_id, prepared_mega_state
+                    )
             session.state = BattleState.TURN_RECORDED
             session.bump_battle()
             self.repository.save_session(session)

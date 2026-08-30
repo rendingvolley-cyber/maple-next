@@ -10,11 +10,12 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from maple_next.ui.opponent_intel_charts import (
     _ROW_HEIGHT,
     BarChartWidget,
+    ReadableRankedListWidget,
     _row_layout,
     render_entries_as_text,
     top_ranked_entries,
@@ -192,4 +193,62 @@ def test_bar_chart_tooltip_only_set_when_something_is_observed() -> None:
     widget = BarChartWidget()
     widget.set_entries([("A", 10.0, False), ("B", 5.0, False)])
     assert widget.toolTip() == ""
+    widget.deleteLater()
+
+
+def _row_labels(widget: ReadableRankedListWidget) -> list[QLabel]:
+    labels = []
+    for i in range(widget._layout.count()):  # noqa: SLF001
+        row = widget._layout.itemAt(i).widget()  # noqa: SLF001
+        if row is None:
+            continue
+        for child in row.findChildren(QLabel):
+            labels.append(child)
+    return labels
+
+
+def test_readable_ranked_list_never_truncates_long_japanese_names() -> None:
+    """The main-panel readability hotfix: a long move/item name must render
+    in full, with no "..." ellipsis, even at the narrow width the old
+    3-column-per-row layout used to force truncation at."""
+
+    long_move = "とんぼがえりインファイトふいうちきあいのタスキこだわりスカーフ"
+    widget = ReadableRankedListWidget()
+    widget.set_entries([(long_move, 78.0, False), ("インファイト", 56.0, True)])
+    widget.resize(90, widget.sizeHint().height())  # narrower than the old 1/3-column width
+    _pump(widget)
+
+    labels = _row_labels(widget)
+    full_texts = [label.text() for label in labels]
+    assert any(long_move in text for text in full_texts)
+    assert not any("..." in text or "…" in text for text in full_texts)
+    name_labels = [label for label in labels if long_move in label.text()]
+    assert name_labels and all(label.wordWrap() is True for label in name_labels)
+    widget.deleteLater()
+
+
+def test_readable_ranked_list_shows_percentage_per_row() -> None:
+    widget = ReadableRankedListWidget()
+    widget.set_entries([("ふいうち", 78.0, False), ("かえんだん", None, False)])
+    _pump(widget)
+
+    texts = [label.text() for label in _row_labels(widget)]
+    assert any("78.0%" in text for text in texts)
+    assert any("--%" in text for text in texts)
+    widget.deleteLater()
+
+
+def test_readable_ranked_list_empty_shows_placeholder_not_crash() -> None:
+    widget = ReadableRankedListWidget()
+    widget.set_entries([])
+    _pump(widget)
+    assert widget._layout.count() == 1  # noqa: SLF001
+    widget.deleteLater()
+
+
+def test_readable_ranked_list_row_count_matches_entries() -> None:
+    widget = ReadableRankedListWidget()
+    entries = [("A", 10.0, False), ("B", 20.0, False), ("C", 30.0, True)]
+    widget.set_entries(entries)
+    assert widget._layout.count() == len(entries)  # noqa: SLF001
     widget.deleteLater()

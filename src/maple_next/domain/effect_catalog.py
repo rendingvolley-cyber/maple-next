@@ -100,9 +100,34 @@ def _ability(
     )
 
 
-# High-value deterministic input aids. Random secondary effects and damage
-# amounts are intentionally absent.
+# High-value operator input aids.  Entries are *possible result candidates*;
+# even deterministic effects are never facts until the operator confirms
+# that they occurred.  A deliberately tiny set of common secondary effects
+# is included for Result Entry confirmation (rather than creating a second
+# comprehensive move database).
 EFFECT_CATALOG: tuple[EffectCatalogEntry, ...] = (
+    _move("torchsong", "フレアソング", "特攻+1", notes="技が成功した場合。人間が実際の上昇を確認。"),
+    _move(
+        "shadowball",
+        "シャドーボール",
+        "特防-1",
+        target=EffectTarget.OPPONENT,
+        notes="追加効果が発生した場合のみ。人間確認必須。",
+    ),
+    _move(
+        "snarl",
+        "バークアウト",
+        "特攻-1",
+        target=EffectTarget.OPPONENT,
+        notes="命中して能力低下が発生した場合。人間確認必須。",
+    ),
+    _move(
+        "sludgebomb",
+        "ヘドロばくだん",
+        "どく",
+        target=EffectTarget.OPPONENT,
+        notes="追加効果が発生した場合のみ。人間確認必須。",
+    ),
     _move("shellsmash", "からをやぶる", "攻撃+2", "防御-1", "特攻+2", "特防-1", "素早さ+2"),
     _move("dragondance", "りゅうのまい", "攻撃+1", "素早さ+1"),
     _move("swordsdance", "つるぎのまい", "攻撃+2"),

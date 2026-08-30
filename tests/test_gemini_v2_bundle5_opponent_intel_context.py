@@ -302,11 +302,9 @@ def test_incomplete_flat_pair_is_never_archived(tmp_path: Path) -> None:
 
 
 def test_schema_version_advanced_for_the_additive_intel_pin() -> None:
-    # Gemini V2 Bundle 6 additively raised this further, 20 -> 21, for the
-    # versioned Turn Advice response contract (turn_advices.response_schema_
-    # version / advice_json) -- the Bundle 5 opponent-INTEL pin columns
-    # this test's name refers to are untouched.
-    assert SCHEMA_VERSION == 21
+    # Tournament Battle Mega additively raises the schema after the
+    # versioned Turn Advice response contract and Bundle 5 pin columns.
+    assert SCHEMA_VERSION == 23
 
 
 def test_new_match_pins_the_accepted_generation(tmp_path: Path) -> None:
@@ -908,12 +906,10 @@ def test_authority_can_never_be_escalated(tmp_path: Path) -> None:
 # =========================================================================
 
 
-def test_request_contract_is_v6() -> None:
-    # Gemini V2 Bundle 6 raised this further, .v6 -> .v7 (response schema
-    # v2); Bundle 5's single-field addition this test's name refers to
-    # (opponent_intel_context) is proven elsewhere in this file and remains
-    # untouched.
-    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v7"
+def test_request_contract_is_v8() -> None:
+    # Tournament Battle Mega raised this further, .v7 -> .v8; the historical
+    # opponent-intel field remains unchanged.
+    assert RICH_STATE_REQUEST_CONTRACT_VERSION == "maple-turn-advice.v8"
 
 
 def test_v6_preserves_every_v5_field_and_adds_exactly_one(tmp_path: Path) -> None:
@@ -951,13 +947,12 @@ def test_v6_preserves_every_v5_field_and_adds_exactly_one(tmp_path: Path) -> Non
             "battle_memory",
             # Bundle 4 ...
             "rules_context",
-            # ... and exactly one Bundle 5 addition.
+            # Bundle 5 and Tournament Battle Mega additions.
             "opponent_intel_context",
+            "mega_state",
         ):
             assert field in canonical
-        # Gemini V2 Bundle 6 raised the contract further (.v6 -> .v7); every
-        # Bundle 5 field this test proves is present is still untouched.
-        assert canonical["contract_version"] == "maple-turn-advice.v7"
+        assert canonical["contract_version"] == "maple-turn-advice.v8"
     finally:
         fixture.close()
 

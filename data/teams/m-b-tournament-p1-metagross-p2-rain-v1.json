@@ -1,0 +1,76 @@
+{
+  "schema_version": "maple-team.v3",
+  "game": "pokemon-champions",
+  "name": "M-B大会用 P1グロス / P2雨 仮組みv1",
+  "battle_format": "SINGLE_3",
+  "selection_profile": {
+    "mode": "fixed_packages",
+    "mixing_allowed": false,
+    "packages": [
+      {
+        "id": "P1",
+        "name": "グロス軸",
+        "members": ["メタグロス", "サザンドラ", "アシレーヌ"],
+        "intended_mega": "メタグロス",
+        "notes": "基本選出P1。相手6体を見てP2より適する場合に選択する。"
+      },
+      {
+        "id": "P2",
+        "name": "雨軸",
+        "members": ["ペリッパー", "ラグラージ", "ブリジュラス"],
+        "intended_mega": "ラグラージ",
+        "notes": "雨展開を軸にした基本選出P2。"
+      }
+    ]
+  },
+  "members": [
+    {
+      "pokemon": "メタグロス",
+      "moves": ["バレットパンチ", "サイコファング", "じしん", "かみなりパンチ"],
+      "held_item": "メタグロスナイト",
+      "ability": "クリアボディ",
+      "nature": "ようき",
+      "stat_points": {"hp": 2, "attack": 32, "defense": 0, "special_attack": 0, "special_defense": 0, "speed": 32}
+    },
+    {
+      "pokemon": "サザンドラ",
+      "moves": ["あくのはどう", "りゅうせいぐん", "とんぼがえり", "かえんほうしゃ"],
+      "held_item": "こだわりスカーフ",
+      "ability": "ふゆう",
+      "nature": "ひかえめ",
+      "stat_points": {"hp": 2, "attack": 0, "defense": 0, "special_attack": 32, "special_defense": 0, "speed": 32}
+    },
+    {
+      "pokemon": "アシレーヌ",
+      "moves": ["ムーンフォース", "うたかたのアリア", "アクアジェット", "アンコール"],
+      "held_item": "オボンのみ",
+      "ability": "げきりゅう",
+      "nature": "ひかえめ",
+      "stat_points": {"hp": 32, "attack": 0, "defense": 0, "special_attack": 32, "special_defense": 0, "speed": 2}
+    },
+    {
+      "pokemon": "ペリッパー",
+      "moves": ["ぼうふう", "なみのり", "とんぼがえり", "はねやすめ"],
+      "held_item": "しめったいわ",
+      "ability": "あめふらし",
+      "nature": "のんき",
+      "stat_points": {"hp": 32, "attack": 0, "defense": 32, "special_attack": 0, "special_defense": 2, "speed": 0}
+    },
+    {
+      "pokemon": "ラグラージ",
+      "moves": ["ウェーブタックル", "じしん", "れいとうパンチ", "クイックターン"],
+      "held_item": "ラグラージナイト",
+      "ability": "げきりゅう",
+      "nature": "いじっぱり",
+      "stat_points": {"hp": 2, "attack": 32, "defense": 0, "special_attack": 0, "special_defense": 0, "speed": 32}
+    },
+    {
+      "pokemon": "ブリジュラス",
+      "moves": ["エレクトロビーム", "ラスターカノン", "りゅうせいぐん", "はどうだん"],
+      "held_item": "たべのこし",
+      "ability": "じきゅうりょく",
+      "nature": "おだやか",
+      "stat_points": {"hp": 32, "attack": 0, "defense": 0, "special_attack": 2, "special_defense": 32, "speed": 0}
+    }
+  ]
+}

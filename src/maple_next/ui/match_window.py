@@ -133,7 +133,7 @@ class MatchFlowWindow(TurnAdviceIntegrationWindow):
             current = self._match_controller.refresh()
 
         state = current.session_state
-        endable = state in {"BATTLE_READY", "TURN_RECORDED"}
+        endable = state in {"BATTLE_READY", "TURN_REVIEWED", "TURN_RECORDED"}
         self.match_end_group.setVisible(endable)
         self.outcome_box.setEnabled(endable)
         self.outcome_confirm_checkbox.setEnabled(endable)

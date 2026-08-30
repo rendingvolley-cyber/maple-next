@@ -10,6 +10,7 @@ from maple_next.application.match_service import MatchApplication
 from maple_next.application.projection import DomainProjection
 from maple_next.application.service import DomainError
 from maple_next.domain.enums import MatchOutcome
+from maple_next.feedback.service import FeedbackPublishService, FeedbackStatus
 from maple_next.persistence.sqlite import SQLiteRepository
 from maple_next.ui.controller import OperatorInputError, OperatorView
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter, MockTurnAdviceAdapter
@@ -28,6 +29,7 @@ class MatchOperatorView(OperatorView):
     export_path: str | None = None
     export_sha256: str | None = None
     export_schema_version: str | None = None
+    feedback_status: str | None = None
 
 
 _MATCH_ERROR_MESSAGES = {
@@ -37,7 +39,7 @@ _MATCH_ERROR_MESSAGES = {
     "HUMAN_MATCH_OUTCOME_CONFIRMATION_REQUIRED": "WIN / LOSE確定前に確認チェックを入れてください。",
     "MATCH_OUTCOME_ALREADY_SET": "この対戦の勝敗は既に確定しており変更できません。",
     "MATCH_END_NOT_ALLOWED_IN_CURRENT_STATE": (
-        "現在の状態では対戦を終了できません。BATTLE_READYまたはTURN_RECORDEDで操作してください。"
+        "現在の状態では対戦を終了できません。BATTLE_READY、TURN_REVIEWEDまたはTURN_RECORDEDで操作してください。"
     ),
     "EXPECTED_MATCH_ENDED": "勝敗を確定してからMATCH JSONを保存してください。",
     "MATCH_OUTCOME_REQUIRED": "確定済みのWIN / LOSEを読み込めません。",
@@ -82,6 +84,10 @@ _NEW_MATCH_AFTER_EXPORT_FAILURE_MESSAGE = (
 _PERSISTENCE_RESULT_UNKNOWN_MESSAGE = (
     "操作結果をデータベースから確認できません。復旧するまで操作を停止しています。"
 )
+_FEEDBACK_STATUS_LABELS = {
+    FeedbackStatus.SYNCED: "Feedback: GitHub同期済み",
+    FeedbackStatus.PENDING: "Feedback: 同期待ち",
+}
 
 
 def _match_message(error: DomainError) -> str:
@@ -100,6 +106,7 @@ class MatchFlowController(TurnAdviceIntegrationController):
         mock_turn_adapter: MockTurnAdviceAdapter | None = None,
         gemini_adapter: GeminiSelectionAdviceAdapter | None = None,
         turn_gemini_adapter: GeminiTurnAdviceAdapter | None = None,
+        feedback_service: FeedbackPublishService | None = None,
     ) -> None:
         super().__init__(
             application,
@@ -110,6 +117,7 @@ class MatchFlowController(TurnAdviceIntegrationController):
             turn_gemini_adapter,
         )
         self._match_application = application
+        self._feedback_service = feedback_service
         self._last_safe_match_view: MatchOperatorView | None = None
 
     def refresh(self) -> MatchOperatorView:
@@ -120,6 +128,7 @@ class MatchFlowController(TurnAdviceIntegrationController):
         export_path: str | None = None
         export_sha256: str | None = None
         export_schema_version: str | None = None
+        feedback_status: str | None = None
         turn_count = 0
         action_count = 0
         session_id = base.projection.session_id
@@ -136,6 +145,10 @@ class MatchFlowController(TurnAdviceIntegrationController):
                 export_path = export.export_path
                 export_sha256 = export.sha256
                 export_schema_version = export.schema_version
+                if self._feedback_service is not None:
+                    status = self._feedback_service.status_for_match(export.match_id)
+                    if status is not None:
+                        feedback_status = _FEEDBACK_STATUS_LABELS[status]
         view = MatchOperatorView(
             projection=base.projection,
             error_message=base.error_message,
@@ -157,6 +170,7 @@ class MatchFlowController(TurnAdviceIntegrationController):
             export_path=export_path,
             export_sha256=export_sha256,
             export_schema_version=export_schema_version,
+            feedback_status=feedback_status,
         )
         self._last_safe_match_view = view
         return view
@@ -287,15 +301,49 @@ class MatchFlowController(TurnAdviceIntegrationController):
     def save_match_json(self) -> MatchOperatorView:
         def command() -> None:
             self._match_application.export_match()
+            self._publish_match_feedback()
 
         return self._run_match_persistence_command(
             command, failure_message=_SAVE_MATCH_JSON_FAILURE_MESSAGE
         )
 
+    def _publish_match_feedback(self) -> None:
+        """Best-effort feedback publish after a successful export.
+
+        Runs only after ``export_match()`` above has already returned
+        normally. Every exception (persistence read, service, or otherwise)
+        is swallowed here -- on top of ``FeedbackPublishService`` already
+        being non-raising -- so this can never turn a successful MATCH JSON
+        export into a reported command failure.
+        """
+
+        if self._feedback_service is None:
+            return
+        try:
+            session = self._repository.load_active_session()
+            if session is None:
+                return
+            outcome = self._repository.get_match_outcome(session.session_id)
+            export = self._repository.get_match_export(session.session_id)
+            if outcome is None or export is None:
+                return
+            self._feedback_service.handle_match_exported(
+                match_id=export.match_id,
+                ended_at_utc=outcome.ended_at_utc,
+                outcome=outcome.outcome.value,
+                export_path=export.export_path,
+            )
+        except Exception:
+            return
+
     def new_match_after_export(self) -> MatchOperatorView:
         def command() -> None:
             self._match_application.new_match_after_export()
 
-        return self._run_match_persistence_command(
+        view = self._run_match_persistence_command(
             command, failure_message=_NEW_MATCH_AFTER_EXPORT_FAILURE_MESSAGE
         )
+        if view.projection.session_state == "SELECTION_OPEN" and view.error_message is None:
+            self.clear_gemini_operator_state()
+            return self.refresh()
+        return view

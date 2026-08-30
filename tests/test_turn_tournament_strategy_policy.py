@@ -30,6 +30,18 @@ def test_current_rich_turn_body_appends_tournament_strategy_policy() -> None:
     assert "low-value loops" in text
 
 
+def test_current_mega_rich_turn_body_keeps_tournament_strategy_policy() -> None:
+    prompt = (
+        "Mega rich prompt\n\nCanonical request:\n"
+        '{"contract_version":"maple-turn-advice.v8","job_type":"TURN_ADVICE"}'
+    )
+
+    text = _provider_text(prompt)
+
+    assert TOURNAMENT_TURN_STRATEGY_POLICY_VERSION in text
+    assert "Compare the best MOVE against every legal SWITCH" in text
+
+
 def test_legacy_turn_body_is_byte_for_byte_unchanged() -> None:
     prompt = (
         "Legacy prompt\n\nCanonical request:\n"

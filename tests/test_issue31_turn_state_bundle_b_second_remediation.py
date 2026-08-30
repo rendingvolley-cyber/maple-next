@@ -227,9 +227,17 @@ class RichSessionFixture:
             action_name="Wave Crash",
             confirmation=_confirmation(),
         )
+        switch = ConfirmedLegalActionSelection(
+            confirmation_id="legal-switch-1",
+            identity=self.identity(),
+            action_type=ActionType.SWITCH,
+            action_name="Gholdengo",
+            confirmation=_confirmation(),
+        )
         self.repository.append_confirmed_legal_action_selection(move)
+        self.repository.append_confirmed_legal_action_selection(switch)
         self.repository.connection.commit()
-        return (move,)
+        return (move, switch)
 
     def confirm_legal_switches(
         self, *, based_on_confirmed_state_id: str | None = None

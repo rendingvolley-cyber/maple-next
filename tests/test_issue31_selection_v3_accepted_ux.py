@@ -114,15 +114,17 @@ def _build_window(
     return repository, controller, window
 
 
-def _fixture_match(slot: int, name: str, color: str) -> SelectionSlotMatch:
+def _fixture_match(
+    slot: int, name: str, color: str, *, score: float = 0.91
+) -> SelectionSlotMatch:
     crop = QImage(220, 120, QImage.Format.Format_RGB32)
     crop.fill(QColor(color))
     return SelectionSlotMatch(
         slot=slot,
         crop=crop,
         assigned_label=name,
-        assigned_score=0.91,
-        top_candidates=(SelectionCandidateScore(name, 0.91, 3),),
+        assigned_score=score,
+        top_candidates=(SelectionCandidateScore(name, score, 3),),
     )
 
 
@@ -211,7 +213,10 @@ def test_fixture_roi_crop_is_rendered_and_missing_crop_is_explicit(tmp_path: Pat
         repository.close()
 
 
-def test_selection_send_requires_six_human_confirmed_values(tmp_path: Path) -> None:
+def test_selection_send_requires_six_confirmed_values(tmp_path: Path) -> None:
+    """An unfilled slot blocks send; a high-confidence OCR auto-fill and a
+    human-typed value both count as confirmed and unblock it once all six
+    slots have one or the other."""
     repository, controller, window = _build_window(tmp_path)
     try:
         controller.new_match()
@@ -220,30 +225,74 @@ def test_selection_send_requires_six_human_confirmed_values(tmp_path: Path) -> N
             field.setText(name)
         window._render_selection_v3(controller.refresh())  # noqa: SLF001
         assert window.selection_v3_build_name.text() == "編集中のPT（未確定）"
+
+        # Five slots auto-fill at high OCR confidence via the real production
+        # path (should_auto_fill -> _auto_fill_selection_roi_slot); the sixth
+        # is left untouched.
         for slot, name in enumerate(OPPONENT_TEAM, start=1):
-            window._set_selection_slot_value(  # noqa: SLF001
-                slot,
-                name,
-                origin=SelectionInputOrigin.OCR_AUTO,
-                user_locked=False,
+            if slot == 6:
+                continue
+            window._auto_fill_selection_roi_slot(  # noqa: SLF001
+                slot, _fixture_match(slot, name, "#336699")
             )
         current = controller.refresh()
         window._update_selection_roi_buttons(current)  # noqa: SLF001
         window._render_selection_v3(current)  # noqa: SLF001
-        assert window.selection_v3_confirmed_status.text() == "確認済み 0 / 6"
+        assert window.selection_v3_confirmed_status.text() == "確認済み 5 / 6"
         assert not window.selection_roi_send_button.isEnabled()
 
-        for slot, name in enumerate(OPPONENT_TEAM, start=1):
-            window._set_selection_slot_value(  # noqa: SLF001
-                slot,
-                name,
-                origin=SelectionInputOrigin.MANUAL_TEXT,
-                user_locked=True,
-            )
+        # A human types the remaining slot -> also confirmed.
+        window._set_selection_slot_value(  # noqa: SLF001
+            6,
+            OPPONENT_TEAM[5],
+            origin=SelectionInputOrigin.MANUAL_TEXT,
+            user_locked=True,
+        )
         window._update_selection_roi_buttons(current)  # noqa: SLF001
         window._render_selection_v3(current)  # noqa: SLF001
         assert window.selection_v3_confirmed_status.text() == "確認済み 6 / 6"
         assert window.selection_roi_send_button.isEnabled()
+    finally:
+        window.close()
+        repository.close()
+
+
+def test_selection_v3_ocr_auto_fill_confirms_at_80_percent_threshold(
+    tmp_path: Path,
+) -> None:
+    """OCR top-candidate confidence >= 80.0% auto-confirms a slot; below
+    80.0% it stays REVIEW_REQUIRED (要確認) instead of a silent provisional
+    fill that never becomes confirmed."""
+    repository, controller, window = _build_window(tmp_path)
+    try:
+        controller.new_match()
+        window.render_view()
+        for field, name in zip(window.self_team_inputs, SELF_TEAM, strict=True):
+            field.setText(name)
+        current = controller.refresh()
+
+        cases = (
+            (0.799, False),
+            (0.800, True),
+            (0.848, True),
+            (0.909, True),
+            (0.948, True),
+        )
+        for slot, (score, expect_confirmed) in enumerate(cases, start=1):
+            window._auto_fill_selection_roi_slot(  # noqa: SLF001
+                slot, _fixture_match(slot, OPPONENT_TEAM[slot - 1], "#336699", score=score)
+            )
+            window._render_selection_v3(current)  # noqa: SLF001
+            badge = window.selection_v3_slot_badges[slot - 1]
+            field_value = window.opponent_team_inputs[slot - 1].text().strip()
+            if expect_confirmed:
+                assert field_value == OPPONENT_TEAM[slot - 1], score
+                assert badge.text() == "確認済み", score
+                assert badge.property("confirmed") is True, score
+            else:
+                assert field_value == "", score
+                assert badge.text() == "要確認", score
+                assert badge.property("confirmed") is False, score
     finally:
         window.close()
         repository.close()

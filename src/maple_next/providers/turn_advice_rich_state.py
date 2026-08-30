@@ -16,8 +16,8 @@ from ``providers/turn_request.py``, and the strict v2 response schema
 ``REQUESTED_OUTPUT_SCHEMA_V2`` from ``providers/turn_response_v2.py`` (which
 itself only imports pure schema primitives from ``turn_response.py`` -- this
 module never imports ``turn_response.py`` directly and never touches the v1
-parser). Gemini V2 Bundle 6: every request this module builds is contract
-``.v7``, paired with Initial Prompt v2 (``_TURN_INITIAL_PROMPT_V2``, defined
+parser). Tournament Battle Mega: every current request this module builds is
+contract ``.v8``, paired with Initial Prompt v2 (``_TURN_INITIAL_PROMPT_V2``, defined
 in this module) and response schema v2. The legacy Initial Prompt v1 text
 and ``REQUESTED_OUTPUT_SCHEMA`` (v1) in ``turn_request.py`` are never copied,
 reimplemented, or repointed here.
@@ -53,6 +53,10 @@ from maple_next.domain.battle_memory import (
 from maple_next.domain.champions_rules import RULES_CONTEXT_SCHEMA_VERSION
 from maple_next.domain.enums import ActionType
 from maple_next.domain.legal_switches import LegalSwitchConfirmation
+from maple_next.domain.mega_evolution import (
+    MegaBattleState,
+    mega_state_to_canonical_dict,
+)
 from maple_next.domain.opponent_intel_context import (
     CONTEXT_STATUS_AVAILABLE,
     OpponentIntelContextError,
@@ -122,7 +126,11 @@ from maple_next.providers.turn_response_v2 import REQUESTED_OUTPUT_SCHEMA_V2
 #: keyed off this contract version (see
 #: ``turn_validation.select_response_parser_version``), never off any claim
 #: inside the provider's own response body.
-RICH_STATE_REQUEST_CONTRACT_VERSION = "maple-turn-advice.v7"
+#:
+#: Tournament Battle Mega raises this from ``.v7`` to ``.v8``. The actual
+#: human-confirmed match-level Mega resource is part of the canonical request
+#: and therefore participates in the request hash and deterministic rebuild.
+RICH_STATE_REQUEST_CONTRACT_VERSION = "maple-turn-advice.v8"
 
 #: Top-level keys ``rules_context`` must carry. Defence in depth: the value
 #: is always actually produced by
@@ -148,6 +156,8 @@ _REQUIRED_RULES_CONTEXT_KEYS: Final[frozenset[str]] = frozenset(
 #: job envelope from a legacy one.
 RICH_STATE_JOB_TYPE = "TURN_ADVICE"
 
+_EMPTY_MEGA_STATE = MegaBattleState()
+
 #: Gemini V2 Bundle 6. Self-contained ``maple-turn-prompt.v2`` instructions,
 #: paired exclusively with ``REQUESTED_OUTPUT_SCHEMA_V2``
 #: (``providers/turn_response_v2.py``). Deliberately a fully independent
@@ -164,6 +174,17 @@ HP values are buckets, not exact percentages. Do not convert a bucket to exact H
 
 Only the current active Pokémon's HP and status are confirmed.
 Do not assume the current HP or status of a benched switch target.
+
+mega_state is the HUMAN-CONFIRMED ACTUAL match-level Mega Evolution state.
+Selection intended_mega is planning context only and never proves that Mega
+Evolution occurred. Never infer actual Mega use from intended_mega, a
+recommendation, OCR, species, item, move, or general game knowledge. If a
+side has mega_used=true, its once-per-match Mega resource is already spent.
+If current_form is non-null, treat it as the authoritative actual current
+Mega form. If mega_used=true and current_form is null, Mega use is confirmed
+but the exact form is unknown; do not invent one. For SELF, a confirmed Mega
+current form supersedes the pre-Mega species/form implication of selected-build
+context for current-turn reasoning.
 
 The opponent's build and remaining selected Pokémon are not confirmed.
 Do not state opponent moves, item, ability, nature, stat allocation, speed relation,
@@ -217,6 +238,13 @@ copied directly from a population usage number. A GENERAL_KNOWLEDGE line must al
 LOW support. A POPULATION_PRIOR line must never use HIGH support. Naming a
 support_basis, even CONFIRMED_MATCH, describes how well-supported your inference is --
 it never means the predicted future action itself is confirmed.
+
+Never attach NONE, blank, UNKNOWN, or an invented support_basis/support value to a
+concrete prediction category. If no allowed non-NONE basis and compatible support level
+actually supports the prediction, emit the entire opponent_prediction block as exactly
+one canonical UNKNOWN primary (specific_action null, support_basis NONE, support LOW,
+alternatives empty). Keep the independently chosen recommended_action complete and legal;
+prediction uncertainty is not a reason to omit or corrupt the primary recommendation.
 
 Set a line's specific_action to a concrete move or Pokémon name only when support is not
 LOW and the exact name is grounded either in confirmed current-match battle memory or in
@@ -379,6 +407,10 @@ class RichStateTurnAdviceRequest:
     #: ``MISMATCHED`` with ``population = None`` whenever it cannot be
     #: proven. Validated in ``__post_init__`` below.
     opponent_intel_context: dict[str, Any]
+    #: Tournament Battle Mega: canonical human-confirmed actual match state.
+    #: Selection ``intended_mega`` is never represented here and never
+    #: activates this resource.
+    mega_state: MegaBattleState
     request_hash: str
 
     def __post_init__(self) -> None:
@@ -403,6 +435,8 @@ class RichStateTurnAdviceRequest:
             pinned_format = str(self.rules_context["facts"]["battle_format"]).upper()
             if snapshot_format != pinned_format:
                 raise RichStateRequestError("OPPONENT_INTEL_COMPATIBILITY_CLAIM_INVALID")
+        if not isinstance(self.mega_state, MegaBattleState):
+            raise RichStateRequestError("MEGA_STATE_INVALID")
 
 
 def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
@@ -497,6 +531,9 @@ def canonical_rich_request_dict(request: RichStateTurnAdviceRequest) -> dict[str
         # the population database itself, never raw source documents,
         # never re-derived or re-fetched here.
         "opponent_intel_context": request.opponent_intel_context,
+        # Tournament Battle Mega. This is actual, human-confirmed
+        # match-level resource state; it is not a SideDelta or an action.
+        "mega_state": mega_state_to_canonical_dict(request.mega_state),
     }
     return payload
 
@@ -532,7 +569,7 @@ def _render_provider_prompt_from_canonical_request_v2(
 def build_rich_provider_prompt(request: RichStateTurnAdviceRequest) -> str:
     """Build the rich request's prompt v2, paired with ``REQUESTED_OUTPUT_SCHEMA_V2``.
 
-    Every request this module builds is contract ``.v7`` (response schema
+    Every request this module builds is contract ``.v8`` (response schema
     v2) -- there is no live older rich contract to branch on (see the
     ``RICH_STATE_REQUEST_CONTRACT_VERSION`` docstring).
     """
@@ -565,6 +602,7 @@ def build_rich_state_turn_advice_request(
     bundle3_context: Bundle3TurnContext,
     rules_context: dict[str, Any],
     opponent_intel_context: dict[str, Any],
+    mega_state: MegaBattleState = _EMPTY_MEGA_STATE,
     rules_season_id: str | None = None,
     evidence: FixedEvidenceMetadata | None = None,
     self_team_build_sha256: str | None = None,
@@ -610,12 +648,16 @@ def build_rich_state_turn_advice_request(
     (below) and re-validates its shape, but never resolves, re-reads, or
     re-derives population data itself.
 
+    ``mega_state`` is the canonical persisted actual Mega resource state for
+    this match. It is typed deliberately so Selection intent or arbitrary UI
+    dictionaries cannot activate or replace actual Mega facts.
+
     ``rules_season_id`` is the canonical pinned regulation season
     (``effective_period.season_id`` of the match's pinned Champions rules
     snapshot, via
     ``application.turn_provider_export_bridge.load_champions_rules_season_id``).
     It is a *validation input only* -- it is never embedded in the request
-    and never changes the v6 canonical request shape. It exists because the
+    and never changes the v8 canonical request shape. It exists because the
     compact Bundle 4 ``rules_context`` deliberately carries
     ``facts.battle_format`` but not the season, so without it this boundary
     could only revalidate half of a ``MATCHED`` compatibility claim. It
@@ -741,6 +783,7 @@ def build_rich_state_turn_advice_request(
         battle_memory=bundle3_context.battle_memory,
         rules_context=rules_context,
         opponent_intel_context=opponent_intel_context,
+        mega_state=mega_state,
         request_hash="",
     )
     return replace(request, request_hash=rich_request_payload_hash(request))

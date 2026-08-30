@@ -20,13 +20,18 @@ class SelectionStoreMixin(StoreBase):
         backline: tuple[str, str],
         source_type: str = "MOCK",
         model: str = "",
+        chosen_package: str | None = None,
+        chosen_package_name: str | None = None,
+        intended_mega: str | None = None,
+        selection_reason: str | None = None,
     ) -> None:
         self.connection.execute(
             """
             INSERT INTO selection_advices (
                 advice_id, session_id, job_id, selected_three_json,
-                lead, backline_json, source_type, model, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                lead, backline_json, source_type, model, chosen_package,
+                chosen_package_name, intended_mega, selection_reason, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 advice_id,
@@ -37,6 +42,10 @@ class SelectionStoreMixin(StoreBase):
                 json.dumps(backline, ensure_ascii=False),
                 source_type,
                 model,
+                chosen_package,
+                chosen_package_name,
+                intended_mega,
+                selection_reason,
                 self._now(),
             ),
         )
@@ -58,6 +67,10 @@ class SelectionStoreMixin(StoreBase):
             "backline": (backline[0], backline[1]),
             "source_type": str(row["source_type"]),
             "model": str(row["model"]),
+            "chosen_package": row["chosen_package"],
+            "chosen_package_name": row["chosen_package_name"],
+            "intended_mega": row["intended_mega"],
+            "selection_reason": row["selection_reason"],
         }
 
     def append_applied_selection(

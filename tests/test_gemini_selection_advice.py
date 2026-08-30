@@ -393,8 +393,7 @@ def test_stale_identity_result_rejected_via_existing_binding_contract(tmp_path: 
     repository.close()
 
 
-# --- 14. timeout -> TIMED_OUT only; HTTP/network/parse error -> FAILED -------
-# All fail-closed: no retry, no fallback, no canonical state mutation.
+# --- 14. transient failures cascade; non-transient parse errors fail closed --
 
 
 @pytest.mark.parametrize(
@@ -406,11 +405,12 @@ def test_stale_identity_result_rejected_via_existing_binding_contract(tmp_path: 
         (ProviderTransportError("GEMINI_RESPONSE_ENVELOPE_MALFORMED"), JobStatus.FAILED),
     ],
 )
-def test_transport_failure_fails_closed_without_retry_or_fallback(
+def test_transport_failure_uses_only_contract_allowed_fallback(
     tmp_path: Path, error: ProviderTransportError, expected_status: JobStatus
 ) -> None:
     qapp = qt_application()
-    transport = FakeSelectionAdviceTransport(responses=[error])
+    eligible = is_selection_fallback_eligible(str(error))
+    transport = FakeSelectionAdviceTransport(responses=[error, error] if eligible else [error])
     repository, application, controller = build_controller(tmp_path, transport)
     ready_selection_open(controller)
     before = repository.load_active_session()
@@ -418,7 +418,7 @@ def test_transport_failure_fails_closed_without_retry_or_fallback(
 
     results = send_and_wait(qapp, controller)
 
-    assert transport.call_count == 1  # no automatic retry
+    assert transport.call_count == (2 if eligible else 1)
     after = repository.load_active_session()
     assert after is not None
     assert after.state is BattleState.SELECTION_OPEN
@@ -473,6 +473,7 @@ def test_load_provider_config_from_env_requires_api_key(monkeypatch: pytest.Monk
 def test_selection_config_has_exact_lane_specific_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED", "1")
     monkeypatch.setenv("MAPLE_NEXT_GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("MAPLE_NEXT_GEMINI_MODEL", "must-not-route-either-lane")
     monkeypatch.delenv("MAPLE_NEXT_GEMINI_SELECTION_PRIMARY_MODEL", raising=False)
@@ -738,4 +739,214 @@ def test_turn_advice_stays_mock_alongside_gemini_selection(tmp_path: Path) -> No
     # exclusively the mock adapter, which never touches a network transport at all.
     assert transport.call_count == 1
     assert controller._mock_turn_adapter.network_call_count == 0  # noqa: SLF001
+
+
+@pytest.fixture
+def block_real_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hard guard: any accidental real HTTP attempt fails the test instantly
+    instead of hanging on a live socket/timeout."""
+
+    import urllib.request
+
+    def _forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("real network access attempted during a hermetic test")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _forbidden)
+
+
+# --- R3R3: Selection provider authorization safety gate ---------------------
+#
+# Incident: a runtime with MAPLE_NEXT_GEMINI_TURN_AUTHORIZED=0 but a real
+# MAPLE_NEXT_GEMINI_API_KEY in the environment still made one live Selection
+# Advice HTTP request (GEMINI_TIMEOUT after 30s), because
+# load_selection_provider_config_from_env() only ever checked the API key.
+# Merely possessing a key must never authorize network access -- Selection
+# now requires its own explicit MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED=="1",
+# independent of the Turn lane's own MAPLE_NEXT_GEMINI_TURN_AUTHORIZED.
+
+
+def test_selection_auth_absent_with_key_present_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED", raising=False)
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_API_KEY", "real-looking-key")
+    with pytest.raises(ProviderConfigError, match="GEMINI_SELECTION_NOT_AUTHORIZED"):
+        load_selection_provider_config_from_env()
+
+
+def test_selection_auth_zero_with_key_present_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED", "0")
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_API_KEY", "real-looking-key")
+    with pytest.raises(ProviderConfigError, match="GEMINI_SELECTION_NOT_AUTHORIZED"):
+        load_selection_provider_config_from_env()
+
+
+def test_selection_authorized_but_key_missing_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED", "1")
+    monkeypatch.delenv("MAPLE_NEXT_GEMINI_API_KEY", raising=False)
+    with pytest.raises(ProviderConfigError, match="GEMINI_API_KEY_MISSING"):
+        load_selection_provider_config_from_env()
+
+
+def test_selection_authorized_and_key_present_returns_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED", "1")
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_API_KEY", "real-looking-key")
+    config = load_selection_provider_config_from_env()
+    assert config.api_key == "real-looking-key"
+    assert config.primary_model == DEFAULT_SELECTION_PRIMARY_MODEL
+
+
+def test_legacy_load_provider_config_from_env_inherits_selection_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backward-compatible loader must not be a bypass: an API key alone
+    must never return a network-capable ProviderConfig through this path
+    either."""
+
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED", "0")
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_API_KEY", "real-looking-key")
+    with pytest.raises(ProviderConfigError, match="GEMINI_SELECTION_NOT_AUTHORIZED"):
+        load_provider_config_from_env()
+
+
+def test_production_compatible_send_denied_reaches_zero_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, block_real_network: None
+) -> None:
+    """R3R3 decisive incident regression: the exact incident environment
+    (a real-looking API key present, Selection authorization absent/0, Turn
+    authorization also 0) driven through the real env loader and the real
+    explicit-send adapter path -- not an injected fake config -- must
+    produce zero transport calls and zero new async job rows, and must
+    never surface as a timeout/network-error label."""
+
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_API_KEY", "real-looking-key")
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED", "0")
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_TURN_AUTHORIZED", "0")
+
+    qapp = qt_application()
+    transport = FakeSelectionAdviceTransport()
+    repository, application, controller = build_controller(
+        tmp_path, transport, load_config=load_selection_provider_config_from_env
+    )
+    ready_selection_open(controller)
+
+    jobs_before = repository.connection.execute("SELECT COUNT(*) FROM async_jobs").fetchone()[0]
+    audits_before = repository.connection.execute(
+        "SELECT COUNT(*) FROM provider_attempt_audits"
+    ).fetchone()[0]
+
+    view = controller.send_selection_advice_to_gemini(on_result=lambda _v: None)
+    qapp.processEvents()
+
+    # HTTP/provider transport: zero attempts, zero fallback attempts (the
+    # fake transport records every call regardless of which model/lane).
+    assert transport.call_count == 0
+
+    jobs_after = repository.connection.execute("SELECT COUNT(*) FROM async_jobs").fetchone()[0]
+    audits_after = repository.connection.execute(
+        "SELECT COUNT(*) FROM provider_attempt_audits"
+    ).fetchone()[0]
+    assert jobs_after == jobs_before
+    assert audits_after == audits_before
+
+    assert view.error_message is not None
+    assert "GEMINI_TIMEOUT" not in view.error_message
+    assert "NETWORK_ERROR" not in view.error_message
+    repository.close()
+
+
+def test_fake_authorized_send_reaches_exactly_one_injectable_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repair must not break the normal authorized lane: with
+    MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED=1 and a fake (non-real) key, the
+    real env loader must still resolve and the existing human Selection
+    Advice action must still reach the injectable fake transport exactly
+    once -- never real Gemini."""
+
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_API_KEY", "fake-hermetic-key")
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED", "1")
+
+    qapp = qt_application()
+    transport = FakeSelectionAdviceTransport(
+        responses=[
+            SanitizedProviderResult(
+                payload={"selected_three": list(GEMINI_THREE), "lead": "Meowscarada"},
+                source_type=GEMINI_SOURCE_TYPE,
+                model="test-model",
+            )
+        ]
+    )
+    repository, application, controller = build_controller(
+        tmp_path, transport, load_config=load_selection_provider_config_from_env
+    )
+    ready_selection_open(controller)
+
+    results = send_and_wait(qapp, controller)
+
+    assert transport.call_count == 1
+    assert results[0].error_message is None  # type: ignore[attr-defined]
+    repository.close()
+
+
+@pytest.mark.parametrize(
+    ("selection_auth", "turn_auth", "selection_allowed", "turn_allowed"),
+    [
+        ("0", "0", False, False),
+        ("1", "0", True, False),
+        ("0", "1", False, True),
+        ("1", "1", True, True),
+    ],
+)
+def test_selection_and_turn_authorization_are_independent(
+    monkeypatch: pytest.MonkeyPatch,
+    selection_auth: str,
+    turn_auth: str,
+    selection_allowed: bool,
+    turn_allowed: bool,
+) -> None:
+    from maple_next.providers.turn_transport import load_authorized_turn_provider_config_from_env
+
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_API_KEY", "real-looking-key")
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED", selection_auth)
+    monkeypatch.setenv("MAPLE_NEXT_GEMINI_TURN_AUTHORIZED", turn_auth)
+
+    if selection_allowed:
+        load_selection_provider_config_from_env()
+    else:
+        with pytest.raises(ProviderConfigError, match="GEMINI_SELECTION_NOT_AUTHORIZED"):
+            load_selection_provider_config_from_env()
+
+    if turn_allowed:
+        load_authorized_turn_provider_config_from_env()
+    else:
+        with pytest.raises(ProviderConfigError, match="GEMINI_TURN_NOT_AUTHORIZED"):
+            load_authorized_turn_provider_config_from_env()
+
+
+def test_confirm_and_review_actions_never_dispatch_when_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, block_real_network: None
+) -> None:
+    """Non-send actions (new_match/confirm_selection_facts) must never touch
+    the provider loader at all, authorized or not."""
+
+    monkeypatch.delenv("MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED", raising=False)
+    monkeypatch.delenv("MAPLE_NEXT_GEMINI_API_KEY", raising=False)
+
+    transport = FakeSelectionAdviceTransport()
+    repository, application, controller = build_controller(
+        tmp_path, transport, load_config=load_selection_provider_config_from_env
+    )
+    ready_selection_open(controller)
+
+    assert transport.call_count == 0
+    jobs = repository.connection.execute("SELECT COUNT(*) FROM async_jobs").fetchone()[0]
+    assert jobs == 0
+    repository.close()
     repository.close()

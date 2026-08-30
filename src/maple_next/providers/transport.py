@@ -27,9 +27,17 @@ GEMINI_SOURCE_TYPE = "GEMINI"
 DEFAULT_SELECTION_PRIMARY_MODEL = "gemini-3.6-flash"
 DEFAULT_SELECTION_FALLBACK_MODEL = "gemini-3.5-flash"
 _DEFAULT_TIMEOUT_SECONDS = 30.0
+#: Deliberately separate from Turn Advice's own
+#: ``MAPLE_NEXT_GEMINI_TURN_AUTHORIZED`` flag in ``turn_transport.py``.
+#: Selection and Turn are independent human/provider lanes -- merely having
+#: an API key in the environment can never enable either lane's network
+#: access on its own.
+SELECTION_PROVIDER_AUTHORIZATION_ENV = "MAPLE_NEXT_GEMINI_SELECTION_AUTHORIZED"
 _API_KEY_ENV = "MAPLE_NEXT_GEMINI_API_KEY"
 _SELECTION_PRIMARY_MODEL_ENV = "MAPLE_NEXT_GEMINI_SELECTION_PRIMARY_MODEL"
 _SELECTION_FALLBACK_MODEL_ENV = "MAPLE_NEXT_GEMINI_SELECTION_FALLBACK_MODEL"
+_SELECTION_MODEL_CHAIN_ENV = "MAPLE_NEXT_GEMINI_SELECTION_MODEL_CHAIN"
+_LEGACY_SELECTION_MODEL_CHAIN_ENV = "MAPLE_SELECTION_MODEL_CHAIN"
 _TIMEOUT_ENV = "MAPLE_NEXT_GEMINI_TIMEOUT_SECONDS"
 _HTTP_ERROR_BODY_MAX_BYTES = 16_384
 _ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo"
@@ -75,6 +83,7 @@ class SelectionProviderConfig:
     primary_model: str = DEFAULT_SELECTION_PRIMARY_MODEL
     fallback_model: str = DEFAULT_SELECTION_FALLBACK_MODEL
     timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS
+    additional_models: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         ProviderConfig(
@@ -86,6 +95,9 @@ class SelectionProviderConfig:
             raise ProviderConfigError("GEMINI_MODEL_MISSING")
         if self.primary_model == self.fallback_model:
             raise ProviderConfigError("GEMINI_SELECTION_MODELS_NOT_DISTINCT")
+        models = (self.primary_model, self.fallback_model, *self.additional_models)
+        if any(not model.strip() for model in models) or len(set(models)) != len(models):
+            raise ProviderConfigError("GEMINI_SELECTION_MODELS_NOT_DISTINCT")
 
     def primary(self) -> ProviderConfig:
         return ProviderConfig(self.api_key, self.primary_model, self.timeout_seconds)
@@ -93,23 +105,61 @@ class SelectionProviderConfig:
     def fallback(self) -> ProviderConfig:
         return ProviderConfig(self.api_key, self.fallback_model, self.timeout_seconds)
 
+    def chain(self) -> tuple[ProviderConfig, ...]:
+        """Return the configured Selection-only model cascade in order."""
+
+        return tuple(
+            ProviderConfig(self.api_key, model, self.timeout_seconds)
+            for model in (self.primary_model, self.fallback_model, *self.additional_models)
+        )
+
+
+def _configured_selection_models() -> tuple[str, ...] | None:
+    """Load one existing comma-separated Gemini chain, excluding local sentinels."""
+
+    raw = (
+        os.environ.get(_SELECTION_MODEL_CHAIN_ENV, "").strip()
+        or os.environ.get(_LEGACY_SELECTION_MODEL_CHAIN_ENV, "").strip()
+    )
+    if not raw:
+        return None
+    models: list[str] = []
+    for value in raw.split(","):
+        model = value.strip()
+        if model == "maple_internal":
+            break
+        if model:
+            models.append(model)
+    if len(models) < 2:
+        raise ProviderConfigError("GEMINI_SELECTION_MODELS_NOT_DISTINCT")
+    return tuple(models)
+
 
 def load_selection_provider_config_from_env() -> SelectionProviderConfig:
-    """Read Selection-only model policy from the runtime environment.
+    """Fail closed unless real Selection Advice was explicitly authorized.
 
-    Raises :class:`ProviderConfigError` when the API key is unset so callers
-    can fail closed with zero network calls and a corrective Japanese message.
+    The flag is deliberately separate from the API key. Merely having a key
+    in the environment can never enable Selection Advice network access.
+    Checked before the API key so an unauthorized runtime never even reveals
+    whether a key is configured.
     """
 
+    if os.environ.get(SELECTION_PROVIDER_AUTHORIZATION_ENV, "").strip() != "1":
+        raise ProviderConfigError("GEMINI_SELECTION_NOT_AUTHORIZED")
     api_key = os.environ.get(_API_KEY_ENV, "").strip()
     if not api_key:
         raise ProviderConfigError("GEMINI_API_KEY_MISSING")
+    configured_chain = _configured_selection_models()
     primary_model = (
-        os.environ.get(_SELECTION_PRIMARY_MODEL_ENV, "").strip()
+        configured_chain[0]
+        if configured_chain is not None
+        else os.environ.get(_SELECTION_PRIMARY_MODEL_ENV, "").strip()
         or DEFAULT_SELECTION_PRIMARY_MODEL
     )
     fallback_model = (
-        os.environ.get(_SELECTION_FALLBACK_MODEL_ENV, "").strip()
+        configured_chain[1]
+        if configured_chain is not None
+        else os.environ.get(_SELECTION_FALLBACK_MODEL_ENV, "").strip()
         or DEFAULT_SELECTION_FALLBACK_MODEL
     )
     raw_timeout = os.environ.get(_TIMEOUT_ENV, "").strip()
@@ -122,6 +172,7 @@ def load_selection_provider_config_from_env() -> SelectionProviderConfig:
         primary_model=primary_model,
         fallback_model=fallback_model,
         timeout_seconds=timeout_seconds,
+        additional_models=configured_chain[2:] if configured_chain is not None else (),
     )
 
 

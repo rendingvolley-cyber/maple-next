@@ -65,16 +65,25 @@ def select_ugreen_device(descriptions: Sequence[str], selector: str) -> int | No
 class QtMultimediaUgreenBackend:
     """VideoCaptureBackend implementation backed by QMediaDevices/QCamera.
 
-    The Qt callback never touches Python image data. It stores only the newest
-    admitted QVideoFrame reference and advances a monotonically increasing
-    sequence. The physical driver may callback at 60 fps even after accepting
-    a 720p/30 format request; those raw callbacks are latest-only thinned to a
-    maximum processing cadence of about 30 fps before any QImage conversion.
+    Admission still stores only the newest admitted QVideoFrame reference and
+    advances a monotonically increasing sequence; the physical driver may
+    callback at 60 fps even after accepting a 720p/30 format request, and
+    those raw callbacks are latest-only thinned to a maximum processing
+    cadence of about 30 fps before any QImage conversion. When a caller (in
+    production, ``CaptureService``) registers ``on_frame``, an admitted frame
+    is then converted immediately, on the same callback, so it *does* touch
+    Python image data at that point - conversion is no longer deferred until
+    a later poll. Without an ``on_frame`` callback, admission remains
+    conversion-free and the existing lazy, pull-based ``get_latest_frame()``
+    behavior is unchanged.
 
     ``get_latest_frame()`` performs ``toImage()``/``copy()`` lazily and at most
     once for each admitted callback sequence, whether conversion succeeds or
-    fails. A stalled malformed frame therefore cannot create a 10 ms retry
-    loop, while a later distinct valid callback recovers normally.
+    fails - this is the single conversion path shared by both the immediate
+    push-on-admission call above and any later pull-based read of the same
+    sequence, so a sequence is never converted twice. A stalled malformed
+    frame therefore cannot create a 10 ms retry loop, while a later distinct
+    valid callback recovers normally.
 
     The operator-selected low-load policy requests exact 1280x720 at about
     30 fps and falls back to Qt/driver auto-negotiation if that format cannot
@@ -289,9 +298,23 @@ class QtMultimediaUgreenBackend:
     def _on_qt_frame(
         self,
         qt_frame: object,
-        _on_frame: Callable[[SourceFramePacket], None] | None,
+        on_frame: Callable[[SourceFramePacket], None] | None,
     ) -> None:
-        """Latest-only callback with a 30 fps pre-conversion admission cap."""
+        """Latest-only callback with a 30 fps pre-conversion admission cap.
+
+        When ``on_frame`` is registered, this triggers the same lazy
+        conversion ``get_latest_frame()`` performs and forwards the result to
+        ``on_frame`` exactly once, but only when THIS admitted sequence is
+        what produced a genuinely new packet - never a stale packet left over
+        from a previous sequence's conversion failure. Detected by comparing
+        the successful-conversion counter before and after the call: a
+        conversion failure bumps the failed counter instead and leaves the
+        successful counter (and therefore this check) untouched, so nothing
+        is forwarded and no packet is fabricated. Because ``get_latest_frame``
+        itself is guarded to convert at most once per sequence, a later pull
+        read (or a later push callback, which never happens twice for the
+        same sequence) cannot trigger a second conversion here either.
+        """
 
         if not self._running:
             return
@@ -302,6 +325,13 @@ class QtMultimediaUgreenBackend:
         self._incoming_frame_count += 1
         self._pending_frame_sequence += 1
         self._pending_qt_frame = qt_frame
+
+        if on_frame is None:
+            return
+        successful_before = self._successful_conversion_count
+        packet = self.get_latest_frame()
+        if packet is not None and self._successful_conversion_count > successful_before:
+            on_frame(packet)
 
     def _teardown(self) -> None:
         if self._camera is not None:

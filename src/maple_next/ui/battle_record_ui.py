@@ -23,6 +23,7 @@ OCR polling, match export, or the turn-snapshot fixed-image flow. It only:
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -50,11 +51,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from maple_next.application.service import DomainError
 from maple_next.capture.contracts import VideoCaptureBackend
 from maple_next.domain.battle_events import (
+    COMMON_STAGE_EVENT_PRESETS,
     MAJOR_STATUS_CLEAR_LABEL,
     MAJOR_STATUS_PRESETS,
+    MAX_STAGE,
+    MIN_STAGE,
     STAGE_EVENT_PRESETS,
+    StageEventPreset,
+    clamp_stage,
 )
 from maple_next.domain.effect_catalog import (
     EFFECT_CATALOG,
@@ -65,6 +72,7 @@ from maple_next.domain.effect_catalog import (
 )
 from maple_next.domain.enums import HpBucket, MatchOutcome
 from maple_next.domain.legal_switches import LegalSwitchStatus
+from maple_next.domain.mega_evolution import MegaSide, deterministic_mega_form
 from maple_next.domain.move_catalog import MoveMatcher, normalize_move_query
 from maple_next.domain.opponent_intel import (
     ChainedOpponentMetaProvider,
@@ -83,6 +91,7 @@ from maple_next.domain.turn_state import (
     ProvenanceStep,
     SideDelta,
     SideState,
+    TurnIdentity,
 )
 from maple_next.opponent_intel_db.generation_store import GenerationStoreError
 from maple_next.opponent_intel_db.runtime_intel import (
@@ -95,19 +104,86 @@ from maple_next.opponent_intel_db.runtime_paths import (
 )
 from maple_next.selection_roi.contracts import SelectionSlotMatch
 from maple_next.selection_roi.input_policy import SelectionInputOrigin
-from maple_next.ui.controller import OperatorView
+from maple_next.turn_ocr import TurnSnapshotStatus
+from maple_next.ui.controller import OperatorView, TurnAdviceView
 from maple_next.ui.move_autocomplete import MoveAutocompletePopup
 from maple_next.ui.opponent_intel_charts import (
-    BarChartWidget,
-    DonutChartWidget,
+    ReadableRankedListWidget,
     render_entries_as_text,
+    top_ranked_entries,
 )
 from maple_next.ui.turn_snapshot_official_window import TurnSnapshotMatchFlowWindow
+from maple_next.ui.turn_snapshot_window import _TURN_SNAPSHOT_ORIGIN_OCR
 from maple_next.ui.turn_state_flow import TurnStateFlowController, TurnStateSummaryView
+
+_TURN_OCR_ERROR_STATUSES = frozenset(
+    {
+        TurnSnapshotStatus.NO_FRAME,
+        TurnSnapshotStatus.FRAME_STALE,
+        TurnSnapshotStatus.FRAME_NOT_CANONICAL,
+        TurnSnapshotStatus.SCENE_NOT_READY,
+        TurnSnapshotStatus.OCR_UNAVAILABLE,
+        TurnSnapshotStatus.OCR_FAILED,
+        TurnSnapshotStatus.STALE_RESULT_DISCARDED,
+    }
+)
 
 
 def _normalize_move_name(name: str) -> str:
     return normalize_move_query(name)
+
+
+#: Opponent INTEL chart visible limits -- tail data remains available in the
+#: INTEL detail dialog, which reads the full unranked lists separately.
+_CHART_MOVES_LIMIT = 5
+_CHART_ABILITIES_LIMIT = 3
+_CHART_ITEMS_LIMIT = 5
+
+_RankedChartEntries = tuple[
+    list[tuple[str, float | None, bool]],
+    list[tuple[str, float | None, bool]],
+    list[tuple[str, float | None, bool]],
+]
+
+
+def _ranked_chart_entries(view: OpponentIntelView) -> _RankedChartEntries:
+    """Sorted, top-N, observed-flagged entries for the moves/abilities/items
+    bar charts -- the one place visible-limit truncation happens, shared by
+    the real chart build and its plain-text fail-soft fallback. A move is
+    "observed" when actually used this match; an ability/item is "observed"
+    when it is this match's human-confirmed one -- the same badge the bar
+    chart already draws for moves, now applied consistently to all three."""
+
+    meta = view.meta
+    if meta is None:
+        return [], [], []
+    observed_moves = {_normalize_move_name(name) for name in view.observed_moves}
+    move_entries = top_ranked_entries(
+        [
+            (entry.name, entry.percentage, _normalize_move_name(entry.name) in observed_moves)
+            for entry in meta.moves
+        ],
+        _CHART_MOVES_LIMIT,
+    )
+    ability_entries = top_ranked_entries(
+        [
+            (
+                entry.name,
+                entry.percentage,
+                view.ability_confirmed and entry.name == view.ability,
+            )
+            for entry in meta.abilities
+        ],
+        _CHART_ABILITIES_LIMIT,
+    )
+    item_entries = top_ranked_entries(
+        [
+            (entry.name, entry.percentage, view.item_confirmed and entry.name == view.item)
+            for entry in meta.items
+        ],
+        _CHART_ITEMS_LIMIT,
+    )
+    return move_entries, ability_entries, item_entries
 
 
 def _looks_stale(date_text: str | None) -> bool:
@@ -160,14 +236,52 @@ _STAGE_FIELDS: tuple[tuple[str, str], ...] = (
     ("evasion_stage", "回避率"),
 )
 
+#: Tournament hotfix (直接スタット・ステージ入力): the direct-entry dialog's
+#: own row labels/order -- matches the operator-facing spec exactly, kept
+#: separate from ``_STAGE_FIELDS`` (used by the pre-existing compact grids)
+#: so this new surface never changes wording anywhere else.
+_DIRECT_STAGE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("attack_stage", "攻撃"),
+    ("defense_stage", "防御"),
+    ("special_attack_stage", "特攻"),
+    ("special_defense_stage", "特防"),
+    ("speed_stage", "素早さ"),
+    ("accuracy_stage", "命中率"),
+    ("evasion_stage", "回避率"),
+)
+
 _RICH_STATUS_LABELS = {
     "UNAVAILABLE": "利用不可",
     "IDLE": "待機中",
     "PENDING": "送信中…",
     "SUCCESS": "受領済み",
     "FAILED": "失敗",
-    "STALE_OR_INVALID": "STALE/INVALID",
+    "STALE": "STALE（盤面が進んだため無効）",
+    "INVALID_PAYLOAD": "INVALID_PAYLOAD（応答内容が不正）",
+    "REJECTED": "REJECTED（拒否・重複）",
 }
+
+#: Statuses meaning the last real Turn Gemini send did not succeed. These
+#: remain visible as an explicit retry state for the same human-controlled
+#: send surface.
+_TURN_ADVICE_FAILURE_STATUSES = frozenset({"FAILED", "STALE", "INVALID_PAYLOAD", "REJECTED"})
+
+_TURN_ADVICE_PLAYER_FAILURE_MESSAGES = {
+    "FAILED": "Gemini送信に失敗しました。再送してください。",
+    "STALE": "盤面が更新されたため、この提案は無効です。",
+    "INVALID_PAYLOAD": "Geminiの応答を使用できませんでした。再送してください。",
+    "REJECTED": "Geminiの提案を使用できませんでした。再送してください。",
+}
+
+_TECHNICAL_PREDICTION_TOKENS = frozenset(
+    {
+        "DAMAGING_MOVE",
+        "NON_DAMAGING_MOVE",
+        "POPULATION_PRIOR",
+        "support_basis",
+        "support_level",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +516,22 @@ class _DeltaHpField(QWidget):
             return FieldDelta.unchanged()
         return FieldDelta.unknown()
 
+    def set_fainted(self) -> None:
+        """Quick-set this result-delta HP field to a confirmed faint.
+
+        A faint is not a separate concept here: it is exactly
+        ``hp_bucket -> HpBucket.ZERO`` on the same CHANGED ``FieldDelta``
+        channel :meth:`to_delta` already produces, so the value flows
+        through the unchanged "行動・結果記録" -> :class:`ActionResultDelta`
+        persistence and, downstream, the existing
+        ``domain.legal_switches.is_confirmed_fainted`` predicate. No faint
+        flag, no second value.
+        """
+
+        self.unknown_box.setChecked(False)
+        self.value_box.setCurrentText(HpBucket.ZERO.value)
+        self.mode_box.setCurrentText("CHANGED")
+
     def reset(self) -> None:
         self.unknown_box.setChecked(False)
         self.value_box.setCurrentIndex(0)
@@ -546,9 +676,10 @@ class _SideDeltaEditor(QGroupBox):
     active identity changes only via a human-confirmed actual SWITCH action,
     computed automatically by
     :meth:`~maple_next.ui.turn_state_flow.TurnStateFlowController.compute_confirmed_switch_side_delta`
-    and never read from here (:meth:`to_side_delta` always reports
-    ``active=UNCHANGED``; the caller substitutes the computed delta when a
-    switch was confirmed).
+    and never read from here. Legacy callers retain ``active=UNCHANGED``;
+    Result Entry requests ``active=UNKNOWN`` for its intentionally unobserved
+    event-only draft, while the caller still substitutes the computed delta
+    when an explicit switch was confirmed.
     """
 
     def __init__(
@@ -684,9 +815,22 @@ class _SideDeltaEditor(QGroupBox):
         self.status_field.mode_box.setCurrentText("CHANGED")
         self.status_field.line.setText(value)
 
-    def to_side_delta(self) -> SideDelta:
+    def mark_fainted(self) -> None:
+        """Record this side's active Pokemon as fainted on the normal
+        result-delta surface. Delegates to :meth:`_DeltaHpField.set_fainted`
+        -- the only state touched is the existing HP ``FieldDelta`` this
+        editor already contributes to :meth:`to_side_delta`; the operator's
+        subsequent "行動・結果記録" click is still the sole persistence."""
+
+        self.hp_field.set_fainted()
+
+    def to_side_delta(self, *, unobserved_as_unknown: bool = False) -> SideDelta:
         return SideDelta(
-            active=FieldDelta.unchanged(),
+            active=(
+                FieldDelta.unknown()
+                if unobserved_as_unknown
+                else FieldDelta.unchanged()
+            ),
             hp_bucket=self.hp_field.to_delta(),
             status=self.status_field.to_delta(),
             attack_stage=self.stage_fields["attack_stage"].to_delta(),
@@ -699,7 +843,7 @@ class _SideDeltaEditor(QGroupBox):
             side_effects=self.side_effects_field.to_delta(),
         )
 
-    def reset(self) -> None:
+    def reset(self, *, unobserved_as_unknown: bool = False) -> None:
         """Identity-bound reset (00 R2 lifecycle fix): every CHANGED/
         UNKNOWN value a human entered for one Turn's result must never
         survive into the next Turn's own result-delta draft. A confirmed
@@ -717,6 +861,12 @@ class _SideDeltaEditor(QGroupBox):
         self._pending_stage_preview = {}
         for field in self.stage_fields.values():
             field.reset()
+        if unobserved_as_unknown:
+            self.hp_field.mode_box.setCurrentText("UNKNOWN")
+            self.status_field.mode_box.setCurrentText("UNKNOWN")
+            self.side_effects_field.mode_box.setCurrentText("UNKNOWN")
+            for field in self.stage_fields.values():
+                field.mode_box.setCurrentText("UNKNOWN")
 
 
 class _CollapsibleSection(QWidget):
@@ -867,6 +1017,424 @@ class _StateEventDialog(QDialog):
         self.accept()
 
 
+_TARGET_SIDE_LABELS: dict[str, str] = {"self": "自分", "opponent": "相手"}
+
+
+@dataclass(frozen=True, slots=True)
+class _ResultEventDraft:
+    """UI-only description of one human-confirmed result event.
+
+    Ordinary result events are projected back into the existing ``SideDelta``
+    editors. A ``mega`` event is deliberately match-level draft metadata and
+    is passed through the typed action commit boundary instead; it is never a
+    SideDelta field or a persisted parallel UI model.
+    """
+
+    event_id: str
+    target_side: str
+    pokemon_name: str
+    kind: str
+    field_name: str
+    value: int | str
+    current_form: str | None = None
+    source_move: str | None = None
+    candidate_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _MoveResultCandidate:
+    candidate_id: str
+    source_side: str
+    source_pokemon: str
+    source_move: str
+    target_side: str
+    target_pokemon: str
+    kind: str
+    field_name: str
+    value: int | str
+    display_effect: str
+
+
+class _MoveResultCandidateCard(QGroupBox):
+    """Direct OCCURRED / DID_NOT_OCCUR control for one possible effect."""
+
+    def __init__(
+        self,
+        candidate: _MoveResultCandidate,
+        decide: Callable[[_MoveResultCandidate, str], None],
+    ) -> None:
+        super().__init__()
+        self.candidate = candidate
+        self.setObjectName("moveResultCandidate")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(7, 4, 7, 4)
+        description = QLabel(
+            f"{_TARGET_SIDE_LABELS[candidate.target_side]}：{candidate.display_effect}\n"
+            f"原因：{candidate.source_move}"
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description, 1)
+        self.occurred_button = QPushButton("起きた")
+        self.did_not_occur_button = QPushButton("起きてない")
+        self.occurred_button.setCheckable(True)
+        self.did_not_occur_button.setCheckable(True)
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        group.addButton(self.occurred_button)
+        group.addButton(self.did_not_occur_button)
+        self.occurred_button.clicked.connect(
+            lambda: decide(self.candidate, "OCCURRED")
+        )
+        self.did_not_occur_button.clicked.connect(
+            lambda: decide(self.candidate, "DID_NOT_OCCUR")
+        )
+        layout.addWidget(self.occurred_button)
+        layout.addWidget(self.did_not_occur_button)
+
+    def set_decision(self, decision: str) -> None:
+        self.occurred_button.setChecked(decision == "OCCURRED")
+        self.did_not_occur_button.setChecked(decision == "DID_NOT_OCCUR")
+
+
+class _ManualResultDialog(QDialog):
+    """Small manual fallback for canonical stage and major-status events."""
+
+    def __init__(
+        self,
+        parent: QWidget,
+        *,
+        add_event: Callable[[str, str, int | str], None],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("手入力で結果を追加")
+        self.setModal(False)
+        self._add_event = add_event
+        layout = QFormLayout(self)
+        self.target_box = QComboBox()
+        self.target_box.addItem("自分", "self")
+        self.target_box.addItem("相手", "opponent")
+        self.kind_box = QComboBox()
+        self.kind_box.addItem("能力変化", "stage")
+        self.kind_box.addItem("状態変化", "status")
+        self.stage_box = QComboBox()
+        for field_name, label in _DIRECT_STAGE_FIELDS:
+            self.stage_box.addItem(label, field_name)
+        self.amount_box = QComboBox()
+        for amount in (-2, -1, 1, 2):
+            self.amount_box.addItem(f"{amount:+d}", amount)
+        self.status_box = QComboBox()
+        self.status_box.addItems(MAJOR_STATUS_PRESETS)
+        layout.addRow("対象", self.target_box)
+        layout.addRow("種類", self.kind_box)
+        layout.addRow("能力", self.stage_box)
+        layout.addRow("変化量", self.amount_box)
+        layout.addRow("状態", self.status_box)
+        buttons = QHBoxLayout()
+        add_button = QPushButton("追加")
+        cancel_button = QPushButton("キャンセル")
+        add_button.clicked.connect(self._on_add)
+        cancel_button.clicked.connect(self.close)
+        buttons.addWidget(add_button)
+        buttons.addWidget(cancel_button)
+        layout.addRow(buttons)
+        self.kind_box.currentIndexChanged.connect(self._sync_kind)
+        self._sync_kind()
+
+    def _sync_kind(self, _index: int = 0) -> None:
+        is_stage = self.kind_box.currentData() == "stage"
+        self.stage_box.setVisible(is_stage)
+        self.amount_box.setVisible(is_stage)
+        self.status_box.setVisible(not is_stage)
+
+    def _on_add(self, _checked: bool = False) -> None:
+        side = str(self.target_box.currentData())
+        if self.kind_box.currentData() == "stage":
+            self._add_event(
+                side,
+                str(self.stage_box.currentData()),
+                int(self.amount_box.currentData()),
+            )
+        else:
+            self._add_event(side, "status", self.status_box.currentText())
+        self.accept()
+
+
+class _DirectStageEditorDialog(QDialog):
+    """Tournament hotfix: the first-visible surface behind "＋ 状態変化を
+    記録" for the Action Result draft. No effect-catalog search, no
+    sub-menu -- target side, common ability-change presets, and direct
+    per-stat +1/-1 rank buttons are all on screen immediately.
+
+    This dialog never persists anything itself. Every preset click and
+    every +1/-1 click only edits an in-dialog pending-changes draft. In the
+    redesigned Result Entry, "適用" hands those values to its canonical
+    result-event draft callback; the legacy action surface still writes the
+    existing ``_SideDeltaEditor`` widgets directly. Both ultimately use the
+    same ``SideDelta`` persistence path and invent no second battle model.
+
+    A field whose current confirmed stage is UNKNOWN never has an assumed
+    baseline of 0: its row shows "現在ランク不明" and its +1/-1 buttons
+    stay disabled until a known value exists (via the secondary
+    その他/詳細 route's manual entry) or a preset that does not touch it.
+
+    Presets are atomic: a preset touches several fields at once (e.g.
+    からをやぶる touches five), and a real ability-stage move either
+    happens in full or not at all. If any one required baseline is
+    UNKNOWN, or any one component would exceed +6/-6, *none* of the
+    preset's fields are queued -- a partial apply would misrepresent the
+    actual battle state (e.g. recording からをやぶる's +2/+2/+2 without
+    its -1/-1 drops). Direct individual +1/-1 entry is unaffected by this
+    rule -- it only ever touches the one field the operator clicked.
+    """
+
+    def __init__(
+        self,
+        parent: QWidget,
+        *,
+        self_editor: _SideDeltaEditor,
+        opponent_editor: _SideDeltaEditor,
+        known_stages_fn: Callable[[str], dict[str, Known[int]]],
+        open_legacy: Callable[[], None],
+        apply_stage_changes: Callable[[dict[str, dict[str, int]]], bool] | None = None,
+        initial_target: str = "self",
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("状態変化を記録")
+        self.setModal(False)
+        self._editors: dict[str, _SideDeltaEditor] = {
+            "self": self_editor,
+            "opponent": opponent_editor,
+        }
+        self._known: dict[str, dict[str, Known[int]]] = {
+            "self": known_stages_fn("self"),
+            "opponent": known_stages_fn("opponent"),
+        }
+        self._apply_stage_changes = apply_stage_changes
+        self._pending: dict[str, dict[str, int]] = {"self": {}, "opponent": {}}
+        self._target = initial_target if initial_target in ("self", "opponent") else "self"
+
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("対象"))
+        target_row = QHBoxLayout()
+        self.target_self_button = QPushButton(_TARGET_SIDE_LABELS["self"])
+        self.target_opponent_button = QPushButton(_TARGET_SIDE_LABELS["opponent"])
+        self.target_self_button.setCheckable(True)
+        self.target_opponent_button.setCheckable(True)
+        self._target_group = QButtonGroup(self)
+        self._target_group.setExclusive(True)
+        self._target_group.addButton(self.target_self_button)
+        self._target_group.addButton(self.target_opponent_button)
+        (
+            self.target_self_button
+            if self._target == "self"
+            else self.target_opponent_button
+        ).setChecked(True)
+        self.target_self_button.clicked.connect(lambda: self._set_target("self"))
+        self.target_opponent_button.clicked.connect(lambda: self._set_target("opponent"))
+        target_row.addWidget(self.target_self_button)
+        target_row.addWidget(self.target_opponent_button)
+        target_row.addStretch(1)
+        layout.addLayout(target_row)
+
+        preset_group = QGroupBox("よく使う能力変化")
+        preset_layout = QHBoxLayout(preset_group)
+        for preset in COMMON_STAGE_EVENT_PRESETS:
+            button = QPushButton(preset.label)
+            button.clicked.connect(
+                lambda _checked=False, candidate=preset: self._on_preset_clicked(candidate)
+            )
+            preset_layout.addWidget(button)
+        layout.addWidget(preset_group)
+
+        direct_group = QGroupBox("能力ランクを直接変更")
+        direct_grid = QGridLayout(direct_group)
+        self._value_labels: dict[str, QLabel] = {}
+        self._minus_buttons: dict[str, QPushButton] = {}
+        self._plus_buttons: dict[str, QPushButton] = {}
+        for row, (field_name, label) in enumerate(_DIRECT_STAGE_FIELDS):
+            direct_grid.addWidget(QLabel(label), row, 0)
+            value_label = QLabel()
+            value_label.setMinimumWidth(90)
+            direct_grid.addWidget(value_label, row, 1)
+            minus_button = QPushButton("-1")
+            minus_button.clicked.connect(
+                lambda _checked=False, name=field_name: self._on_adjust(name, -1)
+            )
+            direct_grid.addWidget(minus_button, row, 2)
+            plus_button = QPushButton("+1")
+            plus_button.clicked.connect(
+                lambda _checked=False, name=field_name: self._on_adjust(name, 1)
+            )
+            direct_grid.addWidget(plus_button, row, 3)
+            self._value_labels[field_name] = value_label
+            self._minus_buttons[field_name] = minus_button
+            self._plus_buttons[field_name] = plus_button
+        layout.addWidget(direct_group)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("font-size: 9px; color: #2563eb;")
+        layout.addWidget(self.status_label)
+
+        layout.addWidget(QLabel("変更予定:"))
+        self.pending_label = QLabel()
+        self.pending_label.setWordWrap(True)
+        layout.addWidget(self.pending_label)
+
+        actions = QHBoxLayout()
+        self.apply_button = QPushButton("適用")
+        self.apply_button.clicked.connect(self._on_apply)
+        self.cancel_button = QPushButton("キャンセル")
+        self.cancel_button.clicked.connect(self.close)
+        actions.addWidget(self.apply_button)
+        actions.addWidget(self.cancel_button)
+        layout.addLayout(actions)
+
+        legacy_row = QHBoxLayout()
+        legacy_row.addStretch(1)
+        self.legacy_button = QPushButton("その他 / 詳細")
+        self.legacy_button.clicked.connect(lambda: open_legacy())
+        legacy_row.addWidget(self.legacy_button)
+        layout.addLayout(legacy_row)
+
+        self._refresh()
+
+    def _set_target(self, side: str) -> None:
+        self._target = side
+        self._refresh()
+
+    def _known_value(self, side: str, field_name: str) -> int | None:
+        known = self._known[side].get(field_name)
+        if known is not None and known.is_confirmed and known.value is not None:
+            return known.value
+        return None
+
+    def _effective_baseline(self, side: str, field_name: str) -> int | None:
+        pending_value = self._pending[side].get(field_name)
+        if pending_value is not None:
+            return pending_value
+        return self._known_value(side, field_name)
+
+    def _preset_plan(
+        self, side: str, preset: StageEventPreset
+    ) -> tuple[dict[str, int], list[str], list[str]]:
+        """Read-only: the candidate absolute stage values a preset *would*
+        set for ``side``, plus any fields blocked by an UNKNOWN baseline or
+        a +6/-6 boundary violation. Never mutates ``self._pending`` --
+        computing the whole plan up front, before touching any state, is
+        what makes "block the whole preset" possible instead of a previous
+        field's queued value surviving a later field's failure."""
+
+        candidates: dict[str, int] = {}
+        unknown_fields: list[str] = []
+        overflow_fields: list[str] = []
+        for field_name, delta in preset.deltas:
+            baseline = self._effective_baseline(side, field_name)
+            if baseline is None:
+                unknown_fields.append(field_name)
+                continue
+            raw = baseline + delta
+            if raw > MAX_STAGE or raw < MIN_STAGE:
+                overflow_fields.append(field_name)
+                continue
+            candidates[field_name] = raw
+        return candidates, unknown_fields, overflow_fields
+
+    def _on_preset_clicked(self, preset: StageEventPreset) -> None:
+        side = self._target
+        candidates, unknown_fields, overflow_fields = self._preset_plan(side, preset)
+        if unknown_fields or overflow_fields:
+            # Atomic: からをやぶる etc. either queues all of its fields or
+            # none of them -- never a partial move that would misrepresent
+            # what actually happened in the battle. The existing draft
+            # (self._pending) is left completely untouched.
+            label_by_key = dict(_DIRECT_STAGE_FIELDS)
+            messages = []
+            if unknown_fields:
+                names = "、".join(label_by_key.get(name, name) for name in unknown_fields)
+                messages.append(
+                    f"現在ランク不明の能力があるためプリセットを適用できません（{names}）。"
+                )
+            if overflow_fields:
+                names = "、".join(label_by_key.get(name, name) for name in overflow_fields)
+                messages.append(
+                    f"上限(+6)/下限(-6)を超えるためプリセットを適用できません（{names}）。"
+                )
+            self.status_label.setText(f"{preset.label}: " + " ".join(messages))
+            self._refresh()
+            return
+        self._pending[side].update(candidates)
+        target_label = _TARGET_SIDE_LABELS[side]
+        self.status_label.setText(f"{preset.label} を{target_label}に反映しました。")
+        self._refresh()
+
+    def _on_adjust(self, field_name: str, delta: int) -> None:
+        side = self._target
+        baseline = self._effective_baseline(side, field_name)
+        if baseline is None:
+            return
+        self._pending[side][field_name] = clamp_stage(baseline + delta)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        for button, side in (
+            (self.target_self_button, "self"),
+            (self.target_opponent_button, "opponent"),
+        ):
+            button.setChecked(side == self._target)
+        side = self._target
+        for field_name, _label in _DIRECT_STAGE_FIELDS:
+            known_value = self._known_value(side, field_name)
+            pending_value = self._pending[side].get(field_name)
+            value_label = self._value_labels[field_name]
+            if pending_value is not None:
+                known_display = "不明" if known_value is None else f"{known_value:+d}"
+                value_label.setText(f"{known_display} → {pending_value:+d}")
+            elif known_value is not None:
+                value_label.setText(f"{known_value:+d}")
+            else:
+                value_label.setText("現在ランク不明")
+            effective = pending_value if pending_value is not None else known_value
+            self._minus_buttons[field_name].setEnabled(
+                effective is not None and effective > MIN_STAGE
+            )
+            self._plus_buttons[field_name].setEnabled(
+                effective is not None and effective < MAX_STAGE
+            )
+        self.pending_label.setText(self._pending_summary())
+        self.apply_button.setEnabled(any(self._pending.values()))
+
+    def _pending_summary(self) -> str:
+        label_by_key = dict(_DIRECT_STAGE_FIELDS)
+        lines: list[str] = []
+        for side in ("self", "opponent"):
+            pending = self._pending[side]
+            if not pending:
+                continue
+            parts = []
+            for field_name, candidate in pending.items():
+                known_value = self._known_value(side, field_name)
+                current_display = "不明" if known_value is None else f"{known_value:+d}"
+                label = label_by_key.get(field_name, field_name)
+                parts.append(f"{label} {current_display}→{candidate:+d}")
+            lines.append(f"{_TARGET_SIDE_LABELS[side]}: " + " / ".join(parts))
+        return "\n".join(lines) if lines else "（変更予定なし）"
+
+    def _on_apply(self, _checked: bool = False) -> None:
+        if self._apply_stage_changes is not None:
+            pending = {side: dict(changes) for side, changes in self._pending.items()}
+            if self._apply_stage_changes(pending):
+                self.accept()
+            return
+        for side, editor in self._editors.items():
+            for field_name, candidate in self._pending[side].items():
+                field = editor.stage_fields[field_name]
+                field.mode_box.setCurrentText("CHANGED")
+                field.spin.setValue(candidate)
+        self.accept()
+
+
 _STALE_SNAPSHOT_AGE_DAYS = 14  # freshness warning threshold; never blocks any Turn control.
 
 
@@ -915,8 +1483,14 @@ class _OpponentIntelWidget(QGroupBox):
         layout.addWidget(self.facts_label)
 
         # Population-statistics charts: secondary to the fact chips above.
+        # Vertically stacked categories (moves / abilities / items), never
+        # side-by-side columns -- a 3-across layout leaves too little
+        # horizontal room for a full Japanese move/item name and forces
+        # truncation. Each row below shows the complete name; only the
+        # visible-limit truncation in _ranked_chart_entries (top N per
+        # category, unchanged) decides which rows appear at all.
         self.chart_section = QWidget()
-        self.chart_layout = QHBoxLayout(self.chart_section)
+        self.chart_layout = QVBoxLayout(self.chart_section)
         self.chart_layout.setSpacing(8)
         self.chart_layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.chart_section, 1)
@@ -941,14 +1515,12 @@ class _OpponentIntelWidget(QGroupBox):
         self.facts_label.setText(
             f"この対戦で判明：特性 {view.ability} / 持ち物 {view.item} / 観測技 {moves}"
         )
-        ability_confirmed = view.ability != "不明" and " / " not in view.ability
-        item_confirmed = view.item != "不明"
         moves_confirmed = bool(view.observed_moves)
         self.fact_chips["ability"].setText(
-            f"特性: {view.ability} {'✓' if ability_confirmed else '(未確認)'}"
+            f"特性: {view.ability} {'✓' if view.ability_confirmed else '(未確認)'}"
         )
         self.fact_chips["item"].setText(
-            f"持ち物: {view.item} {'✓' if item_confirmed else '(未確認)'}"
+            f"持ち物: {view.item} {'✓' if view.item_confirmed else '(未確認)'}"
         )
         self.fact_chips["moves"].setText(
             f"観測技: {moves} {'✓' if moves_confirmed else '(未確認)'}"
@@ -982,13 +1554,7 @@ class _OpponentIntelWidget(QGroupBox):
         meta = view.meta
         if meta is None:
             return "データなし"
-        observed = {_normalize_move_name(name) for name in view.observed_moves}
-        move_entries = [
-            (entry.name, entry.percentage, _normalize_move_name(entry.name) in observed)
-            for entry in meta.moves[:8]
-        ]
-        ability_entries = [(entry.name, entry.percentage) for entry in meta.abilities]
-        item_entries = [(entry.name, entry.percentage) for entry in meta.items]
+        move_entries, ability_entries, item_entries = _ranked_chart_entries(view)
         return "\n\n".join(
             (
                 "採用技:\n" + render_entries_as_text(move_entries),
@@ -998,49 +1564,19 @@ class _OpponentIntelWidget(QGroupBox):
         )
 
     def _build_charts(self, view: OpponentIntelView) -> None:
-        meta = view.meta
-        observed = {_normalize_move_name(name) for name in view.observed_moves}
+        move_entries, ability_entries, item_entries = _ranked_chart_entries(view)
 
-        moves_group = QGroupBox("採用技")
-        moves_layout = QVBoxLayout(moves_group)
-        moves_chart = BarChartWidget()
-        if meta is not None:
-            entries = [
-                (entry.name, entry.percentage, _normalize_move_name(entry.name) in observed)
-                for entry in meta.moves[:8]
-            ]
-        else:
-            entries = []
-        moves_chart.set_entries(entries)
-        moves_layout.addWidget(moves_chart)
-        self.chart_layout.addWidget(moves_group, 1)
-
-        abilities_group = QGroupBox("特性")
-        abilities_layout = QVBoxLayout(abilities_group)
-        abilities_chart = DonutChartWidget()
-        abilities_chart.set_center_text(
-            f"確認済み: {view.ability}" if view.ability != "不明" else "候補"
-        )
-        abilities_chart.set_entries(
-            [(entry.name, entry.percentage) for entry in meta.abilities] if meta else []
-        )
-        abilities_layout.addWidget(abilities_chart)
-        self.chart_layout.addWidget(abilities_group, 1)
-
-        items_group = QGroupBox("持ち物")
-        items_layout = QVBoxLayout(items_group)
-        item_entries = list(meta.items) if meta else []
-        items_chart: DonutChartWidget | BarChartWidget
-        if len(item_entries) <= 5:
-            items_chart = DonutChartWidget()
-            items_chart.set_entries([(entry.name, entry.percentage) for entry in item_entries])
-        else:
-            items_chart = BarChartWidget()
-            items_chart.set_entries(
-                [(entry.name, entry.percentage, False) for entry in item_entries[:8]]
-            )
-        items_layout.addWidget(items_chart)
-        self.chart_layout.addWidget(items_group, 1)
+        for title, entries in (
+            ("採用技", move_entries),
+            ("特性", ability_entries),
+            ("持ち物", item_entries),
+        ):
+            group = QGroupBox(title)
+            layout = QVBoxLayout(group)
+            chart = ReadableRankedListWidget()
+            chart.set_entries(entries)
+            layout.addWidget(chart)
+            self.chart_layout.addWidget(group)
 
     def _render_footer(self, view: OpponentIntelView) -> None:
         meta = view.meta
@@ -1155,12 +1691,25 @@ class _OpponentIntelWidget(QGroupBox):
             section = QGroupBox(section_title)
             section.setObjectName(f"intelDetail_{key}")
             section_layout = QVBoxLayout(section)
+            # Full ranking, never truncated -- the main panel's top-N bars
+            # are the only intentionally-limited view; this dialog exists
+            # specifically to expose the rest. Scrolls rather than
+            # overflowing the dialog's fixed size when the source data has
+            # many entries.
             lines = value.split(", ") if value != "データなし" else ["データなし"]
-            for line in lines[:5]:
+            rows_container = QWidget()
+            rows_layout = QVBoxLayout(rows_container)
+            rows_layout.setContentsMargins(0, 0, 0, 0)
+            rows_layout.setSpacing(1)
+            for line in lines:
                 row = QLabel(line)
                 row.setProperty("rankRow", True)
-                section_layout.addWidget(row)
-            section_layout.addStretch(1)
+                rows_layout.addWidget(row)
+            rows_layout.addStretch(1)
+            rows_scroll = QScrollArea()
+            rows_scroll.setWidgetResizable(True)
+            rows_scroll.setWidget(rows_container)
+            section_layout.addWidget(rows_scroll)
             self._detail_sections[key] = section
             ranking_row.addWidget(section, 1)
         layout.addLayout(ranking_row, 1)
@@ -1232,6 +1781,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._active_ability_entry_event_id: str | None = None
         self._provisional_ability_species: str | None = None
         self._pending_ocr_ability_confirmation: tuple[str, str] | None = None
+        self._turn_ocr_status_code: str = TurnSnapshotStatus.IDLE
         self._move_matcher_cache = self._matcher_from_runtime_bundle(
             self._runtime_intel_bundle
         )
@@ -1370,11 +1920,41 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.review_state_event_button.clicked.connect(self._open_common_state_event_dialog)
         editor_layout.addWidget(self.review_state_event_button)
 
-        # Bundle 2 (Gemini V2): explicit legal-switch confirmation workbench.
-        # Factual only -- no strategy content, no Opponent INTEL, no
-        # mechanics inference. An empty selection alone is never
-        # CONFIRMED_NONE; that requires the separate explicit button below.
+        # Tournament P0: the "交代できるポケモン" turn-facts checkboxes
+        # (self.switch_checkboxes, mirrored by self.parity_switch_chips) were
+        # labeled once from the raw selected_three and never re-derived
+        # against active/fainted, and the parity mirror buttons' text was
+        # never resynced after their one-time construction at all -- see
+        # _sync_switch_candidates. Tracks the last-applied derived candidate
+        # tuple so an unrelated re-render doesn't wipe an in-progress
+        # operator checkmark.
+        self._switch_checkbox_last_candidates: tuple[str, ...] | None = None
+
+        # Bundle 2 (Gemini V2) R3R1: editable legal-switch prefill/confirm
+        # workbench. Factual only -- no strategy content, no Opponent
+        # INTEL, no mechanics inference. Before CONFIRM TURN FACTS this
+        # list shows a CANDIDATE prefill (selected_three - active -
+        # confirmed-fainted) the operator can correct; it is never itself a
+        # confirmation. The same CONFIRM TURN FACTS click reads exactly
+        # this visible/edited selection and persists it as the final
+        # CONFIRMED_NONEMPTY/CONFIRMED_NONE legal-switch confirmation, in
+        # the same revision as the rest of Turn facts -- no second click.
+        # The two buttons below remain for an explicit correction after
+        # that confirmation has already landed.
+        self._legal_switch_prefill_candidates: tuple[str, ...] = ()
+        self._legal_switch_prefill_active_text: str | None = None
+        #: R3R2: the complete canonical TurnIdentity the current prefill/edit
+        #: was derived under. A new session/match/generation/turn/revision
+        #: must invalidate the prefill even when the active Pokemon name is
+        #: unchanged -- see ``_render_legal_switch_workbench``.
+        self._legal_switch_prefill_identity: TurnIdentity | None = None
         self.legal_switch_group = QGroupBox("交代可能なポケモン（Legal Switches）")
+        self.legal_switch_group.setToolTip(
+            "候補は自動で表示されますが、それ自体は確定ではありません。"
+            "必要ならチェックを直してからCONFIRM TURN FACTSを押すと、"
+            "その時点で見えている選択がそのまま確定されます。"
+            "確定後の修正は下のリストとボタンで行えます。"
+        )
         legal_switch_layout = QVBoxLayout(self.legal_switch_group)
         legal_switch_layout.setContentsMargins(2, 2, 2, 2)
         legal_switch_layout.setSpacing(2)
@@ -1385,11 +1965,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.legal_switch_list.setMaximumHeight(70)
         legal_switch_layout.addWidget(self.legal_switch_list)
         legal_switch_buttons_row = QHBoxLayout()
-        self.confirm_legal_switches_selected_button = QPushButton("選択した交代先を確定")
+        self.confirm_legal_switches_selected_button = QPushButton("選択した交代先を確定（修正）")
         self.confirm_legal_switches_selected_button.clicked.connect(
             self._on_confirm_legal_switches_selected
         )
-        self.confirm_legal_switches_none_button = QPushButton("交代先なしを確定")
+        self.confirm_legal_switches_none_button = QPushButton("交代先なしを確定（修正）")
         self.confirm_legal_switches_none_button.clicked.connect(
             self._on_confirm_legal_switches_none
         )
@@ -1397,6 +1977,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         legal_switch_buttons_row.addWidget(self.confirm_legal_switches_none_button)
         legal_switch_layout.addLayout(legal_switch_buttons_row)
         editor_layout.addWidget(self.legal_switch_group)
+        # Refresh the pre-confirmation prefill whenever the operator's
+        # in-progress active-Pokemon choice changes -- mirrors the existing
+        # _on_turn_active_changed/_prefill_legal_moves_for_active pattern
+        # for legal moves.
+        self.self_active_box.currentTextChanged.connect(
+            self._on_self_active_changed_for_legal_switches
+        )
 
         state_layout.addWidget(self.current_state_editor_container)
 
@@ -1426,12 +2013,40 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         delta_sides_row.addWidget(self.self_delta_editor)
         delta_sides_row.addWidget(self.opponent_delta_editor)
         delta_layout.addLayout(delta_sides_row)
+
+        # Faint / KO quick-record (Tournament P0). No catalog, search, or
+        # submenu: each button only quick-sets its side's result-delta HP to
+        # HpBucket.ZERO on the editor above (_SideDeltaEditor.mark_fainted).
+        # Canonical persistence is unchanged -- the operator's existing
+        # "行動・結果記録" click reads to_side_delta() and writes the one
+        # ActionResultDelta, from which is_confirmed_fainted() then governs
+        # legal switches, the provider-ready gate, and match export.
+        faint_row = QHBoxLayout()
+        self.record_opponent_faint_button = QPushButton("相手ひんし")
+        self.record_opponent_faint_button.setProperty("faintControl", True)
+        self.record_opponent_faint_button.setMinimumSize(128, 36)
+        self.record_opponent_faint_button.setAccessibleName("相手ひんし")
+        self.record_opponent_faint_button.setToolTip(
+            "相手の場のポケモンをHP0（ひんし）として結果に記録します（行動・結果記録で確定）。"
+        )
+        self.record_opponent_faint_button.clicked.connect(self._on_record_opponent_faint)
+        self.record_self_faint_button = QPushButton("自分ひんし")
+        self.record_self_faint_button.setProperty("faintControl", True)
+        self.record_self_faint_button.setMinimumSize(128, 36)
+        self.record_self_faint_button.setAccessibleName("自分ひんし")
+        self.record_self_faint_button.setToolTip(
+            "自分の場のポケモンをHP0（ひんし）として結果に記録します（行動・結果記録で確定）。"
+        )
+        self.record_self_faint_button.clicked.connect(self._on_record_self_faint)
+        faint_row.addWidget(self.record_opponent_faint_button)
+        faint_row.addWidget(self.record_self_faint_button)
+        faint_row.addStretch(1)
+        delta_layout.addLayout(faint_row)
+
         self.result_effect_candidate = _EffectCandidateCard(self._apply_result_effect)
         delta_layout.addWidget(self.result_effect_candidate)
         self.result_state_event_button = QPushButton("＋ 状態変化を記録")
-        self.result_state_event_button.clicked.connect(
-            lambda: self._open_state_event_dialog("result")
-        )
+        self.result_state_event_button.clicked.connect(self._open_direct_stage_editor_dialog)
         delta_layout.addWidget(self.result_state_event_button)
 
         self.rich_gemini_group = QGroupBox("Gemini Turn Advice — rich state")
@@ -1516,25 +2131,16 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self.turn_gemini_box.setVisible(False)
 
         self.start_turn_button.setText("Turn撮影")
-        # Bundle 2 (Gemini V2) R2: this button is CONFIRM TURN FACTS only --
-        # it no longer sends. It previously read "SEND TURN TO GEMINI" back
-        # when v5 conflated the two into one trusted click; that label would
-        # now be a lie, since a distinct explicit send action (below) is
-        # required after it.
+        # CONFIRM TURN FACTS persists reviewed facts. Provider dispatch is a
+        # separate explicit action on the trusted SEND TURN TO GEMINI control.
         self.confirm_turn_facts_button.setText("CONFIRM TURN FACTS")
         self.record_action_button.setText("行動・結果記録")
         self.next_turn_button.setText("NEXT TURN")
 
         if gemini_send_button is not None:
-            # Bundle 2 (Gemini V2) R2: reuse this pre-existing, already-
-            # correctly-wired (via the inherited ``_on_trusted_send_turn_to_
-            # gemini`` override -> ``send_rich_turn_advice_to_gemini``)
-            # explicit send control instead of inventing a new one. v5 had
-            # hidden it because confirming facts used to double as sending;
-            # now that confirming facts and confirming legal switches are
-            # both purely factual, this is the one and only path to a
-            # provider dispatch. Placed in the rich-state status group it
-            # already reports readiness/denial reasons for.
+            # Reuse the pre-existing trusted send control and place it in the
+            # rich-state status group, where it remains adjacent to the
+            # readiness/denial state it acts on.
             gemini_send_button.setText("SEND TURN TO GEMINI")
             self._rich_gemini_layout.addRow(gemini_send_button)
             self._bundle_c_gemini_send_button = gemini_send_button
@@ -1544,6 +2150,15 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # laid out 2-per-row instead of 1-per-row so the fixed,
         # non-scrolling center column can fit 1280x720/1440x900.
         switch_widget = self.switch_checkboxes[0].parentWidget()
+        # These 3 boxes only feed the legacy Turn-facts memo field, not the
+        # actual send gate below -- label them as such so they never read as
+        # unexplained blank/undifferentiated boxes next to the real,
+        # CONFIRM TURN FACTS-driven "Legal Switches" workbench.
+        for checkbox in self.switch_checkboxes:
+            checkbox.setToolTip(
+                "記録用メモのみ。実際の送信可否は下部の「Legal Switches」欄"
+                "（CONFIRM TURN FACTSで自動確定）で判定されます。"
+            )
         turn_facts_form = self.turn_facts_group.layout()
         if isinstance(turn_facts_form, QFormLayout) and switch_widget is not None:
             self._reflow_form_into_grid(
@@ -1631,6 +2246,18 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             if turn_snapshot_roi_label is not None:
                 frame_id_layout.addRow("ROI", QLabel(turn_snapshot_roi_label.text()))
             self.diagnostics_drawer.add_widget(frame_id_row)
+
+        # P0 diagnostic (OCR recapture incident follow-up): sanitized
+        # capture/OCR milestone trail -- see
+        # TurnSnapshotMatchFlowWindow._record_turn_ocr_milestone. Read-only
+        # display; refreshed in render_view() below.
+        self.turn_ocr_milestone_log_label = QLabel("(まだ記録なし)")
+        self.turn_ocr_milestone_log_label.setWordWrap(True)
+        self.turn_ocr_milestone_log_label.setStyleSheet("font-size: 9px; font-family: monospace;")
+        milestone_group = QGroupBox("Turn OCR milestones（診断専用・生データなし）")
+        milestone_layout = QVBoxLayout(milestone_group)
+        milestone_layout.addWidget(self.turn_ocr_milestone_log_label)
+        self.diagnostics_drawer.add_widget(milestone_group)
 
         # These specific detail rows are always visible below the two
         # compact evidentiary thumbnails and duplicated (above) in the
@@ -1736,8 +2363,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._detach_from_parent_layout(self.turn_advice_group)
         self._compose_turn_advice_hierarchy()
         self._rich_gemini_layout.addRow(self.turn_advice_group)
-        self.rich_gemini_status_audit = QWidget()
-        self.rich_gemini_status_audit.setProperty("audit", True)
+        # Keep the status/gate labels alive for the existing controller-bound
+        # display contract, but move them to an invisible owner. They are
+        # audit/operator diagnostics, not live player advice.
+        self.rich_gemini_status_audit = QWidget(self)
+        self.rich_gemini_status_audit.setVisible(False)
         status_audit_layout = QVBoxLayout(self.rich_gemini_status_audit)
         status_audit_layout.setContentsMargins(0, 2, 0, 0)
         status_audit_layout.setSpacing(1)
@@ -1745,8 +2375,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             old_label = self._rich_gemini_layout.labelForField(field)
             if old_label is not None:
                 old_label.setVisible(False)
+            self._rich_gemini_layout.setRowVisible(field, False)
             status_audit_layout.addWidget(field)
-        self._rich_gemini_layout.addRow(self.rich_gemini_status_audit)
         self._detach_from_parent_layout(self.rich_gemini_group)
         self._detach_from_parent_layout(self.opponent_intel_widget)
         self._right_column_layout.insertWidget(0, self.rich_gemini_group)
@@ -1866,9 +2496,122 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         action_page_layout = QVBoxLayout(self.action_workbench_page)
         action_page_layout.setContentsMargins(0, 0, 0, 0)
         action_page_layout.setSpacing(3)
+        self.action_result_step_stack = QStackedWidget()
+        self.action_entry_step_page = QWidget()
+        action_entry_step_layout = QVBoxLayout(self.action_entry_step_page)
+        action_entry_step_layout.setContentsMargins(0, 0, 0, 0)
         self._detach_from_parent_layout(self.actual_action_group)
-        action_page_layout.addWidget(self.actual_action_group)
-        action_page_layout.addWidget(self.action_result_delta_group)
+        action_entry_step_layout.addWidget(self.actual_action_group)
+        action_entry_step_layout.addStretch(1)
+        self.action_result_step_stack.addWidget(self.action_entry_step_page)
+        action_page_layout.addWidget(self.action_result_step_stack)
+
+        # Tournament P0 Result Entry: action input and result confirmation
+        # are two genuinely separate operator pages.  The generic delta
+        # editors remain alive as the canonical SideDelta projection target,
+        # but are no longer visible in the normal result workflow.
+        self._result_entry_active = False
+        self._result_event_sequence = 0
+        self._result_events: list[_ResultEventDraft] = []
+        self._result_candidate_decisions: dict[str, str] = {}
+        self._result_candidate_cards: dict[str, _MoveResultCandidateCard] = {}
+        self._result_candidates: tuple[_MoveResultCandidate, ...] = ()
+        self._result_hidden_holder = QWidget(self)
+        self._result_hidden_holder.setVisible(False)
+        hidden_result_layout = QVBoxLayout(self._result_hidden_holder)
+        self._detach_from_parent_layout(self.action_result_delta_group)
+        hidden_result_layout.addWidget(self.action_result_delta_group)
+        self.self_delta_editor.setVisible(False)
+        self.opponent_delta_editor.setVisible(False)
+        self.weather_delta_field.setVisible(False)
+        self.terrain_delta_field.setVisible(False)
+
+        self.result_workbench_page = QWidget()
+        result_page_layout = QVBoxLayout(self.result_workbench_page)
+        result_page_layout.setContentsMargins(6, 4, 6, 4)
+        result_page_layout.setSpacing(4)
+        result_title = QLabel("結果記録")
+        result_title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        result_page_layout.addWidget(result_title)
+        self.result_actions_label = QLabel()
+        self.result_actions_label.setWordWrap(True)
+        result_page_layout.addWidget(self.result_actions_label)
+
+        candidates_group = QGroupBox("起こり得る結果")
+        self.result_candidates_layout = QVBoxLayout(candidates_group)
+        self.result_candidates_layout.setContentsMargins(4, 4, 4, 4)
+        self.result_candidates_layout.setSpacing(2)
+        result_page_layout.addWidget(candidates_group)
+
+        faint_group = QGroupBox("ひんし")
+        faint_layout = QHBoxLayout(faint_group)
+        self._detach_from_parent_layout(self.record_self_faint_button)
+        self._detach_from_parent_layout(self.record_opponent_faint_button)
+        self.record_self_faint_button.setToolTip("Turn開始時の自分Activeをひんしとして記録")
+        self.record_opponent_faint_button.setToolTip("Turn開始時の相手Activeをひんしとして記録")
+        faint_layout.addWidget(self.record_self_faint_button)
+        faint_layout.addWidget(self.record_opponent_faint_button)
+        faint_layout.addStretch(1)
+        result_page_layout.addWidget(faint_group)
+
+        mega_group = QGroupBox("メガ進化")
+        mega_group.setObjectName("megaEvolutionResultGroup")
+        mega_layout = QHBoxLayout(mega_group)
+        mega_layout.setContentsMargins(4, 3, 4, 3)
+        mega_layout.setSpacing(4)
+        self.self_mega_button = QPushButton("自分メガ進化")
+        self.self_mega_button.setObjectName("selfMegaEvolutionButton")
+        self.self_mega_button.setCheckable(True)
+        self.self_mega_button.setToolTip(
+            "このTurnの自分Activeが実際にメガ進化した事実を記録します。"
+        )
+        self.self_mega_button.clicked.connect(
+            lambda _checked=False: self._toggle_mega_event(MegaSide.SELF)
+        )
+        self.opponent_mega_button = QPushButton("相手メガ進化")
+        self.opponent_mega_button.setObjectName("opponentMegaEvolutionButton")
+        self.opponent_mega_button.setCheckable(True)
+        self.opponent_mega_button.setToolTip(
+            "このTurnの相手Activeが実際にメガ進化した事実を記録します。"
+        )
+        self.opponent_mega_button.clicked.connect(
+            lambda _checked=False: self._toggle_mega_event(MegaSide.OPPONENT)
+        )
+        mega_layout.addWidget(self.self_mega_button)
+        mega_layout.addWidget(self.opponent_mega_button)
+        mega_layout.addStretch(1)
+        self.mega_result_group = mega_group
+        result_page_layout.addWidget(mega_group)
+
+        self.manual_result_button = QPushButton("＋手入力で結果を追加")
+        self.manual_result_button.clicked.connect(self._open_manual_result_dialog)
+        result_page_layout.addWidget(self.manual_result_button)
+
+        summary_group = QGroupBox("このTurnの結果")
+        self.result_summary_layout = QVBoxLayout(summary_group)
+        self.result_summary_layout.setContentsMargins(4, 4, 4, 4)
+        self.result_summary_empty_label = QLabel("追加イベントなし")
+        self.result_summary_layout.addWidget(self.result_summary_empty_label)
+        result_page_layout.addWidget(summary_group)
+
+        result_navigation = QHBoxLayout()
+        self.back_to_action_button = QPushButton("← 行動入力に戻る")
+        self.back_to_action_button.clicked.connect(self._on_back_to_action_entry)
+        result_navigation.addWidget(self.back_to_action_button)
+        result_navigation.addStretch(1)
+        result_page_layout.addLayout(result_navigation)
+        self.action_result_step_stack.addWidget(self.result_workbench_page)
+
+        # Base construction connected these shared buttons to the old
+        # persist/advance handlers.  Rebind only their genuine UI clicks:
+        # result navigation performs no write; the Result-page NEXT TURN
+        # click performs the existing atomic action+delta write and then one
+        # existing atomic turn advance.  Direct handler calls remain useful
+        # to legacy focused tests and internal recovery tools.
+        self.record_action_button.clicked.disconnect()
+        self.record_action_button.clicked.connect(self._on_open_result_entry)
+        self.next_turn_button.clicked.disconnect()
+        self.next_turn_button.clicked.connect(self._on_result_next_turn)
 
         self.recorded_workbench_page = QWidget()
         recorded_page_layout = QVBoxLayout(self.recorded_workbench_page)
@@ -2213,6 +2956,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.live_current_state_label = QLabel("自分: —  HP—    相手: —  HP—")
         self.live_current_state_label.setProperty("muted", True)
         tools.addWidget(self.live_current_state_label, 1)
+        self.turn_ocr_status_indicator_label = QLabel("OCR待機")
+        self.turn_ocr_status_indicator_label.setProperty("statusChip", True)
+        tools.addWidget(self.turn_ocr_status_indicator_label)
         self.evidence_open_button.setText("撮影画像を確認")
         self.review_state_event_button.setText("＋ 状態変化を記録")
         self.review_state_event_button.setProperty("strong", True)
@@ -2247,7 +2993,20 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
         self.capture_workbench_page = self._build_parity_capture_page()
         self.review_workbench_page = self._build_parity_review_page()
-        self.action_workbench_page = self._build_parity_action_page()
+        parity_action_entry_page = self._build_parity_action_page()
+        self.action_entry_step_page = parity_action_entry_page
+        self.action_result_step_stack = QStackedWidget()
+        self.action_result_step_stack.addWidget(parity_action_entry_page)
+        # Result Entry is the second step inside the one canonical Action
+        # lifecycle workbench.  Keeping this nested preserves the accepted
+        # four outer lifecycle pages while making the genuine parity UI (not
+        # the hidden legacy composition) display the new result surface.
+        self.action_result_step_stack.addWidget(self.result_workbench_page)
+        action_step_wrapper = QWidget()
+        action_step_layout = QVBoxLayout(action_step_wrapper)
+        action_step_layout.setContentsMargins(0, 0, 0, 0)
+        action_step_layout.addWidget(self.action_result_step_stack)
+        self.action_workbench_page = action_step_wrapper
         self.recorded_workbench_page = self._build_parity_recorded_page()
         for workbench_page in (
             self.capture_workbench_page,
@@ -2324,6 +3083,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             "QPushButton:disabled { color: #91a8bb; background: #091623; border-color: #20384e; }"
             "QPushButton:checked, QPushButton[selected=\"true\"], QPushButton[strong=\"true\"] { "
             "background: #1a3c5d; font-weight: 800; }"
+            "QPushButton[faintControl=\"true\"] { min-width: 128px; min-height: 36px; "
+            "padding: 7px 14px; font-size: 13px; font-weight: 800; "
+            "background: #26384d; color: #f8fafc; border: 2px solid #64748b; }"
+            "QPushButton[faintControl=\"true\"]:checked { background: #991b1b; "
+            "color: #ffffff; border-color: #f87171; }"
+            "QPushButton[faintControl=\"true\"]:disabled { background: #17212d; "
+            "color: #718096; border-color: #334155; }"
             "QPushButton[lifecycle=\"true\"] { min-height: 28px; font-size: 11px; "
             "font-weight: 800; }"
             "QPushButton[lifecycle=\"true\"][active=\"true\"] { background: #1a3c5d; "
@@ -2342,7 +3108,13 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._apply_selection_v3_composition()
 
     def _compose_turn_advice_hierarchy(self) -> None:
-        """Reparent existing bound labels into an operator-first hierarchy."""
+        """Compose only the information needed during live play.
+
+        The labels for robustness, alternatives, and provenance remain
+        controller-bound objects so the existing read path and persistence
+        contract stay intact, but they are owned by an invisible holder and
+        are deliberately absent from the normal Battle Record composition.
+        """
 
         form = self.turn_advice_group.layout()
         assert isinstance(form, QFormLayout)
@@ -2359,10 +3131,27 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self.turn_advice_legality_label,
             self.turn_advice_schema_version_label,
         )
+        player_labels = (
+            self.turn_advice_action_label,
+            self.turn_advice_prediction_label,
+            self.turn_advice_rationale_label,
+            self.turn_advice_warnings_label,
+        )
+        hidden_labels = tuple(field for field in bound_labels if field not in player_labels)
         for field in bound_labels:
             row_label = form.labelForField(field)
             if row_label is not None:
                 row_label.setVisible(False)
+        for field in hidden_labels:
+            form.setRowVisible(field, False)
+
+        hidden_holder = QWidget(self)
+        hidden_holder.setVisible(False)
+        hidden_layout = QVBoxLayout(hidden_holder)
+        hidden_layout.setContentsMargins(0, 0, 0, 0)
+        for field in hidden_labels:
+            hidden_layout.addWidget(field)
+        self._turn_advice_hidden_labels = hidden_holder
 
         self.turn_advice_primary_card = QWidget()
         self.turn_advice_primary_card.setObjectName("advicePrimaryCard")
@@ -2383,23 +3172,6 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         primary_layout.addWidget(primary_heading)
         primary_layout.addWidget(self.turn_advice_action_label)
 
-        # Gemini V2 Bundle 6: additive, hidden by default (see the
-        # visibility toggle alongside ``turn_advice_warning_card`` below) --
-        # a legacy v1 row never shows this card, so v1 rendering is
-        # unchanged. recommendation_robustness is distinct from any
-        # prediction's support level; it modifies the recommended action
-        # above, so it sits directly beneath it.
-        self.turn_advice_robustness_card = QWidget()
-        self.turn_advice_robustness_card.setObjectName("adviceRobustnessCard")
-        robustness_layout = QVBoxLayout(self.turn_advice_robustness_card)
-        robustness_layout.setContentsMargins(10, 4, 10, 4)
-        robustness_layout.setSpacing(2)
-        robustness_heading = QLabel("推奨の頑健性")
-        robustness_heading.setProperty("muted", True)
-        self.turn_advice_robustness_label.setObjectName("adviceRobustness")
-        robustness_layout.addWidget(robustness_heading)
-        robustness_layout.addWidget(self.turn_advice_robustness_label)
-
         prediction_card = QWidget()
         prediction_card.setObjectName("advicePredictionCard")
         prediction_layout = QVBoxLayout(prediction_card)
@@ -2410,20 +3182,8 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.turn_advice_prediction_label.setObjectName("advicePrediction")
         prediction_layout.addWidget(prediction_heading)
         prediction_layout.addWidget(self.turn_advice_prediction_label)
-
-        # Additive, hidden by default (zero/one/two alternatives -- never a
-        # fabricated filler entry). Directly beneath the primary prediction
-        # it is an alternative to.
-        self.turn_advice_alternatives_card = QWidget()
-        self.turn_advice_alternatives_card.setObjectName("adviceAlternativesCard")
-        alternatives_layout = QVBoxLayout(self.turn_advice_alternatives_card)
-        alternatives_layout.setContentsMargins(10, 4, 10, 4)
-        alternatives_layout.setSpacing(2)
-        alternatives_heading = QLabel("代替の相手予測")
-        alternatives_heading.setProperty("muted", True)
-        self.turn_advice_alternatives_label.setObjectName("adviceAlternatives")
-        alternatives_layout.addWidget(alternatives_heading)
-        alternatives_layout.addWidget(self.turn_advice_alternatives_label)
+        prediction_card.setVisible(False)
+        self.turn_advice_prediction_card = prediction_card
 
         reasons_card = QWidget()
         reasons_layout = QVBoxLayout(reasons_card)
@@ -2445,45 +3205,15 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.turn_advice_warnings_label.setObjectName("adviceWarnings")
         warning_layout.addWidget(warning_heading)
         warning_layout.addWidget(self.turn_advice_warnings_label)
-
-        self.turn_advice_audit_group = QGroupBox("詳細 / AUDIT")
-        self.turn_advice_audit_group.setProperty("audit", True)
-        self.turn_advice_audit_group.setCheckable(True)
-        self.turn_advice_audit_group.setChecked(False)
-        audit_contents = QWidget()
-        audit_layout = QGridLayout(audit_contents)
-        audit_layout.setContentsMargins(2, 2, 2, 2)
-        audit_layout.setSpacing(3)
-        for index, (title, value) in enumerate(
-            (
-                ("Source", self.turn_advice_source_label),
-                ("Model", self.turn_advice_model_label),
-                ("Binding", self.turn_advice_binding_label),
-                ("Legality", self.turn_advice_legality_label),
-                ("Response Schema", self.turn_advice_schema_version_label),
-            )
-        ):
-            title_label = QLabel(title)
-            title_label.setProperty("muted", True)
-            value.setProperty("muted", True)
-            audit_layout.addWidget(title_label, index // 2, (index % 2) * 2)
-            audit_layout.addWidget(value, index // 2, (index % 2) * 2 + 1)
-        group_layout = QVBoxLayout(self.turn_advice_audit_group)
-        group_layout.setContentsMargins(7, 7, 7, 7)
-        group_layout.addWidget(audit_contents)
-        audit_contents.setVisible(False)
-        self.turn_advice_audit_group.toggled.connect(audit_contents.setVisible)
+        self.turn_advice_warning_card.setVisible(False)
 
         self.turn_advice_group.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
         form.addRow(self.turn_advice_primary_card)
-        form.addRow(self.turn_advice_robustness_card)
-        form.addRow(prediction_card)
-        form.addRow(self.turn_advice_alternatives_card)
         form.addRow(reasons_card)
+        form.addRow(prediction_card)
         form.addRow(self.turn_advice_warning_card)
-        form.addRow(self.turn_advice_audit_group)
 
     def _apply_selection_v3_composition(self) -> None:
         """Build the accepted Selection UX from the existing bound controls."""
@@ -2625,6 +3355,9 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.selection_v3_change_button.setCheckable(True)
         self.selection_v3_change_button.toggled.connect(self._toggle_selection_v3_team_editor)
         self.edit_self_team_build_button.setText("詳細編集")
+        # Reparented from window.py's preset group; the v3 workbench frames the
+        # action as adopting a saved build into the current self-team six.
+        self.use_self_team_preset_button.setText("この構築を採用")
         self.selection_v3_manage_button = QPushButton("構築管理…")
         self.selection_v3_manage_button.setCheckable(True)
         self.selection_v3_manage_button.toggled.connect(self._toggle_selection_v3_management)
@@ -2635,6 +3368,26 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         ):
             actions.addWidget(button)
         layout.addLayout(actions)
+
+        # BUILD SWITCH SAFETY (Tournament P0): once selection facts are
+        # confirmed the base render (window.py) locks every build-management
+        # control to protect the match-bound self-team snapshot. That lock was
+        # a silent dead-end -- this notice plus one explicit lifecycle action
+        # give the operator a visible reason and a safe way forward without
+        # ever mutating the active match's bound team in place.
+        self.selection_v3_build_lock_notice = QLabel("対戦中のため構築を変更できません")
+        self.selection_v3_build_lock_notice.setWordWrap(True)
+        self.selection_v3_build_lock_notice.setProperty("diagnostic", True)
+        self.selection_v3_build_lock_notice.setVisible(False)
+        layout.addWidget(self.selection_v3_build_lock_notice)
+        self.selection_v3_discard_match_button = QPushButton(
+            "この試合を破棄して構築を変更"
+        )
+        self.selection_v3_discard_match_button.clicked.connect(
+            self._on_selection_v3_discard_match_for_build_change
+        )
+        self.selection_v3_discard_match_button.setVisible(False)
+        layout.addWidget(self.selection_v3_discard_match_button)
 
         self.selection_v3_team_editor = QWidget()
         editor_grid = QGridLayout(self.selection_v3_team_editor)
@@ -2772,22 +3525,40 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.selection_v3_advice_waiting.setProperty("muted", True)
         advice_layout.addWidget(self.selection_v3_advice_waiting)
         advice_grid = QGridLayout()
+        advice_grid.addWidget(QLabel("選出プラン"), 0, 0)
+        self.selection_v3_advice_package = QLabel("—")
+        self.selection_v3_advice_package.setProperty("cardTitle", True)
+        advice_grid.addWidget(self.selection_v3_advice_package, 0, 1)
         self.selection_v3_advice_pick_labels: list[QLabel] = []
         for index in range(3):
             number = QLabel(str(index + 1))
             number.setProperty("orderBadge", True)
             value = QLabel("—")
             value.setProperty("cardTitle", True)
-            advice_grid.addWidget(number, index, 0)
-            advice_grid.addWidget(value, index, 1)
+            advice_grid.addWidget(number, index + 1, 0)
+            advice_grid.addWidget(value, index + 1, 1)
             self.selection_v3_advice_pick_labels.append(value)
-        advice_grid.addWidget(QLabel("推奨先発"), 3, 0)
+        advice_grid.addWidget(QLabel("推奨先発"), 4, 0)
         self.selection_v3_advice_lead = QLabel("—")
-        advice_grid.addWidget(self.selection_v3_advice_lead, 3, 1)
-        advice_grid.addWidget(QLabel("Source / validity"), 4, 0)
+        advice_grid.addWidget(self.selection_v3_advice_lead, 4, 1)
+        advice_grid.addWidget(QLabel("Mega予定"), 5, 0)
+        self.selection_v3_advice_intended_mega = QLabel("—")
+        advice_grid.addWidget(self.selection_v3_advice_intended_mega, 5, 1)
+        advice_grid.addWidget(QLabel("選出理由"), 6, 0)
+        self.selection_v3_advice_reason = QLabel("—")
+        self.selection_v3_advice_reason.setWordWrap(True)
+        self.selection_v3_advice_reason.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        advice_grid.addWidget(self.selection_v3_advice_reason, 6, 1)
+        advice_grid.addWidget(QLabel("提供元 / モデル"), 7, 0)
+        self.selection_v3_advice_provider_model = QLabel("—")
+        self.selection_v3_advice_provider_model.setWordWrap(True)
+        advice_grid.addWidget(self.selection_v3_advice_provider_model, 7, 1)
+        advice_grid.addWidget(QLabel("Source / validity"), 8, 0)
         self.selection_v3_advice_validity = QLabel("WAITING")
         self.selection_v3_advice_validity.setProperty("muted", True)
-        advice_grid.addWidget(self.selection_v3_advice_validity, 4, 1)
+        advice_grid.addWidget(self.selection_v3_advice_validity, 8, 1)
         advice_layout.addLayout(advice_grid)
         layout.addWidget(advice_card)
 
@@ -2845,6 +3616,23 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self.selection_v3_manage_button.setText(
             "構築管理を閉じる" if checked else "構築管理…"
         )
+
+    def _on_selection_v3_discard_match_for_build_change(
+        self, _checked: bool = False
+    ) -> None:
+        """Operator chose to leave the active match so a build swap is safe.
+
+        Delegates to the existing human-confirmed abort lifecycle
+        (``MatchFlowWindow._on_abort_match`` -> ``abort_match``): the current
+        session moves to ABORTED, every saved build and canonical record is
+        preserved, and the refreshed render returns to the pre-match
+        NO_ACTIVE_MATCH state where the build selector and この構築を採用 are
+        enabled again. The active match's bound team is never mutated here.
+        """
+
+        if not self._mutation_slots_allowed():
+            return
+        self._on_abort_match()
 
     def _activate_selection_v3_manual_input(self, slot: int) -> None:
         field = self.opponent_team_inputs[slot - 1]
@@ -2906,18 +3694,42 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
     def _render_selection_v3(self, current: OperatorView) -> None:
         if not getattr(self, "_selection_v3_ready", False):
             return
-        build = current.self_team_build or self._staged_self_team_build
         entered_team = tuple(field.text().strip() for field in self.self_team_inputs)
-        if build is not None:
+        draft_is_authoritative = getattr(self, "_self_team_editable", True)
+        if draft_is_authoritative:
+            team = entered_team
+            build = self._staged_self_team_build
+        else:
+            team = current.self_team or entered_team
+            build = current.self_team_build or self._staged_self_team_build
+        draft_display_name = getattr(self, "_self_team_draft_display_name", None)
+        if draft_is_authoritative and draft_display_name:
+            build_name = draft_display_name
+        elif build is not None:
             build_name = build.name
-        elif len(current.self_team) == 6:
+        elif not draft_is_authoritative and len(current.self_team) == 6:
             build_name = "現在のPT（名前登録）"
         elif all(entered_team):
             build_name = "編集中のPT（未確定）"
         else:
             build_name = "PT未登録"
         self.selection_v3_build_name.setText(build_name)
-        team = current.self_team or entered_team
+
+        # BUILD SWITCH SAFETY (Tournament P0): the base render sets
+        # ``_self_team_editable`` False exactly once the current session has a
+        # bound self-team snapshot (selection facts confirmed and beyond).
+        # Surface why the build controls are locked and offer the one safe
+        # explicit exit -- discard the match, then swap the build pre-match.
+        session_active = current.projection.session_state is not None
+        build_change_locked = session_active and not getattr(
+            self, "_self_team_editable", True
+        )
+        self.selection_v3_build_lock_notice.setVisible(build_change_locked)
+        self.selection_v3_discard_match_button.setVisible(build_change_locked)
+        self.selection_v3_discard_match_button.setEnabled(
+            build_change_locked and current.persistence_reads_allowed
+        )
+
         for index, (name_label, detail_label) in enumerate(
             zip(
                 self.selection_v3_team_name_labels,
@@ -2934,16 +3746,21 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 detail = f"{item} · {member.ability}\n{' / '.join(member.moves)}"
             detail_label.setText(detail)
 
-        human_origins = {
+        # OCR_AUTO is included here because it is only ever assigned by
+        # should_auto_fill() when the OCR top candidate's confidence is
+        # already >= AUTO_FILL_THRESHOLD (80.0%) -- an auto-filled slot is
+        # therefore just as confirmed as one a human typed or clicked.
+        confirmed_origins = {
             SelectionInputOrigin.CANDIDATE_CLICK,
             SelectionInputOrigin.MANUAL_TEXT,
             SelectionInputOrigin.RESTORED,
+            SelectionInputOrigin.OCR_AUTO,
         }
         confirmed_count = 0
         for slot in range(1, 7):
             state = self._state_for_current_field(slot)
             value = self.opponent_team_inputs[slot - 1].text().strip()
-            confirmed = bool(value) and state.origin in human_origins
+            confirmed = bool(value) and state.origin in confirmed_origins
             confirmed_count += int(confirmed)
             badge = self.selection_v3_slot_badges[slot - 1]
             badge.setText("確認済み" if confirmed else "要確認")
@@ -3013,7 +3830,18 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 strict=True,
             ):
                 label.setText(name)
+            package_label = advice.chosen_package or "—"
+            if advice.chosen_package_name:
+                package_label = f"{package_label} {advice.chosen_package_name}"
+            self.selection_v3_advice_package.setText(package_label)
             self.selection_v3_advice_lead.setText(advice.lead)
+            self.selection_v3_advice_intended_mega.setText(advice.intended_mega or "—")
+            self.selection_v3_advice_reason.setText(
+                advice.selection_reason or "（理由情報なし）"
+            )
+            self.selection_v3_advice_provider_model.setText(
+                f"{advice_status.source_type} · {advice_status.model}"
+            )
             self.selection_v3_advice_validity.setText(
                 f"{advice_status.source_type} · {display_binding} · {display_legality}"
             )
@@ -3026,7 +3854,11 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         else:
             for label in self.selection_v3_advice_pick_labels:
                 label.setText("—")
+            self.selection_v3_advice_package.setText("—")
             self.selection_v3_advice_lead.setText("—")
+            self.selection_v3_advice_intended_mega.setText("—")
+            self.selection_v3_advice_reason.setText("—")
+            self.selection_v3_advice_provider_model.setText("—")
             if advice_status is None:
                 self.selection_v3_advice_validity.setText(
                     "UNAVAILABLE · NOT_CHECKED · NOT_CHECKED"
@@ -3541,8 +4373,51 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         finally:
             self.self_switch_target_box.blockSignals(False)
 
-    def _refresh_self_switch_targets(self, current: OperatorView) -> None:
-        legal_switches = current.turn_facts.legal_switches if current.turn_facts is not None else ()
+    def _refresh_self_switch_targets(
+        self, current: OperatorView, summary: TurnStateSummaryView | None = None
+    ) -> None:
+        """Refresh the actual SELF action selector from the exact binding.
+
+        ``TurnFactsView.legal_switches`` is a legacy reviewed-facts field and
+        may be empty even after the human has confirmed the legal-switch set
+        in the Bundle 2 exact binding. An absent/mismatched confirmation is
+        deliberately kept distinct from ``CONFIRMED_NONE``.
+        """
+
+        if summary is None:
+            summary = self._bundle_c_controller.turn_state_summary()
+        confirmation = summary.legal_switch_confirmation
+        confirmed_state = summary.confirmed_state
+        confirmation_is_current = bool(
+            confirmation is not None
+            and summary.identity is not None
+            and confirmed_state is not None
+            and confirmation.identity == confirmed_state.identity
+            and self._same_turn_binding_for_ui(confirmation.identity, summary.identity)
+            and confirmation.based_on_confirmed_state_id
+            == confirmed_state.confirmed_state_id
+            and current.projection.current_applied_selection_id
+            == confirmation.applied_selection_id
+        )
+        if not confirmation_is_current:
+            confirmation = None
+
+        if confirmation is None:
+            legal_switches: tuple[str, ...] = ()
+            unavailable_message = "交代候補が未確認です"
+        elif confirmation.status is LegalSwitchStatus.CONFIRMED_NONE:
+            legal_switches = ()
+            unavailable_message = "交代できるポケモンはいません"
+        else:
+            # The exact confirmation is the source of truth. The current
+            # summary's derived candidates are used only as a safety filter
+            # for active/selected-three/confirmed-fainted invariants; they
+            # never fill or replace the confirmed set.
+            safe_candidates = set(summary.legal_switch_candidates)
+            legal_switches = tuple(
+                name for name in confirmation.legal_switches if name in safe_candidates
+            )
+            unavailable_message = "" if legal_switches else "交代候補を確認してください"
         selected = (
             self.actual_action_name_box.currentText()
             if self.actual_action_type_box.currentText() == "SWITCH"
@@ -3560,7 +4435,73 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self.self_switch_target_box.blockSignals(False)
         has_legal_switch = bool(legal_switches)
         self.self_switch_target_box.setEnabled(has_legal_switch)
+        self.self_switch_unavailable_label.setText(unavailable_message)
         self.self_switch_unavailable_label.setVisible(not has_legal_switch)
+
+    @staticmethod
+    def _same_turn_binding_for_ui(left: TurnIdentity, right: TurnIdentity) -> bool:
+        """Allow same-Turn metadata revisions without accepting stale Turns."""
+
+        return (
+            left.session_id == right.session_id
+            and left.match_id == right.match_id
+            and left.generation == right.generation
+            and left.turn_id == right.turn_id
+            and left.turn_number == right.turn_number
+        )
+
+    @staticmethod
+    def _player_turn_advice_action(advice: TurnAdviceView) -> str:
+        if advice.unavailable_reason is not None:
+            return "Geminiの応答を使用できませんでした。再送してください。"
+        if advice.action_type == "SWITCH":
+            return f"交代 → {advice.action_name}"
+        return advice.action_name
+
+    @staticmethod
+    def _player_turn_advice_prediction(advice: TurnAdviceView) -> str:
+        if advice.structured_v2 is not None:
+            line = advice.structured_v2.opponent_prediction.primary
+            if line.category == "UNKNOWN":
+                return ""
+            prediction = line.summary.strip()
+        else:
+            prediction = advice.opponent_prediction.strip()
+            if prediction.upper() in {"UNKNOWN", "—"}:
+                return ""
+        if not prediction or any(token in prediction for token in _TECHNICAL_PREDICTION_TOKENS):
+            return ""
+        return prediction
+
+    def _render_turn_advice_player_surface(
+        self, advice: TurnAdviceView, summary: TurnStateSummaryView
+    ) -> None:
+        """Render only live decision content; keep provenance out of view."""
+
+        if advice.unavailable_reason is not None:
+            self.turn_advice_action_label.setText(
+                "Geminiの応答を使用できませんでした。再送してください。"
+            )
+            self.turn_advice_rationale_label.setText("")
+            self.turn_advice_prediction_label.setText("")
+            self.turn_advice_prediction_card.setVisible(False)
+            self.turn_advice_warning_card.setVisible(False)
+            return
+
+        self.turn_advice_action_label.setText(self._player_turn_advice_action(advice))
+        self.turn_advice_rationale_label.setText(advice.rationale.strip())
+        prediction = self._player_turn_advice_prediction(advice)
+        self.turn_advice_prediction_label.setText(prediction)
+        self.turn_advice_prediction_card.setVisible(bool(prediction))
+
+        actionable_warning = ""
+        if (
+            advice.action_type == "SWITCH"
+            and summary.legal_switch_confirmation is None
+        ):
+            actionable_warning = "交代候補を確認してください"
+        self.turn_advice_warnings_label.setText(actionable_warning)
+        self.turn_advice_warning_card.setVisible(bool(actionable_warning))
 
     def _capture_action_result_draft(self) -> tuple[str, str, bool, str, str, str]:
         return (
@@ -3644,6 +4585,65 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if parent_layout is not None:
             parent_layout.removeWidget(widget)
 
+    # -- Turn OCR compact status indicator (display-only) ------------------------
+
+    def _set_turn_snapshot_status(self, status: str, message: str) -> None:
+        # Display bookkeeping only: records the raw status code the base
+        # class already computed (via the identity-gated capture/OCR flow
+        # unchanged below) so the compact indicator can reflect it. Never
+        # itself decides freshness/identity -- that guarantee already comes
+        # from _on_turn_snapshot_result's existing _identity_is_current()
+        # check, which is what determines whether this even gets called for
+        # a given result.
+        self._turn_ocr_status_code = status
+        super()._set_turn_snapshot_status(status, message)
+
+    def _on_turn_snapshot_result(self, payload: object) -> None:
+        # The base callback (_identity_is_current-gated) has already updated
+        # _turn_ocr_status_code / _turn_snapshot_origins by the time this
+        # returns, but it never calls render_view() -- so without this, the
+        # compact indicator stays on "OCR中…" until something unrelated
+        # happens to trigger a full re-render, even though the OCR-derived
+        # fields are already visible. Refresh just this label immediately.
+        super()._on_turn_snapshot_result(payload)
+        self._refresh_turn_ocr_status_indicator()
+        self._refresh_turn_ocr_milestone_log()
+
+    def _refresh_turn_ocr_status_indicator(self) -> None:
+        if not hasattr(self, "turn_ocr_status_indicator_label"):
+            return
+        if not hasattr(self, "_bundle_c_controller"):
+            return
+        session_state = self._bundle_c_controller.refresh().projection.session_state
+        self.turn_ocr_status_indicator_label.setText(
+            self._turn_ocr_status_indicator_text(session_state)
+        )
+
+    def _refresh_turn_ocr_milestone_log(self) -> None:
+        if not hasattr(self, "turn_ocr_milestone_log_label"):
+            return
+        milestones = getattr(self, "_turn_ocr_milestones", None)
+        if not milestones:
+            self.turn_ocr_milestone_log_label.setText("(まだ記録なし)")
+            return
+        self.turn_ocr_milestone_log_label.setText("\n".join(milestones))
+
+    def _turn_ocr_status_indicator_text(self, session_state: str | None) -> str:
+        if session_state != "TURN_CAPTURE_PENDING":
+            return "OCR待機"
+        code = self._turn_ocr_status_code
+        if code in _TURN_OCR_ERROR_STATUSES:
+            return "OCRエラー"
+        if code == TurnSnapshotStatus.READY:
+            needs_review = any(
+                origin == _TURN_SNAPSHOT_ORIGIN_OCR
+                for origin in self._turn_snapshot_origins.values()
+            )
+            return "OCR要確認" if needs_review else "OCR完了"
+        # IDLE / CAPTURED / ANALYZING: a capture has been requested for this
+        # Turn and OCR has not yet produced (or failed to produce) a result.
+        return "OCR中…"
+
     # -- render ------------------------------------------------------------------
 
     def render_view(self, view: OperatorView | None = None) -> None:
@@ -3684,10 +4684,18 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             # into the *current state* editor; only this reusable capture
             # widget needs clearing.
             self._reset_action_result_delta_editors()
+            if hasattr(self, "_result_entry_active"):
+                self._result_entry_active = False
+                self._result_events.clear()
+                self._result_candidate_decisions.clear()
 
         super().render_view(current)
         if hasattr(self, "match_end_local_group"):
-            endable = projection.session_state in {"BATTLE_READY", "TURN_RECORDED"}
+            endable = projection.session_state in {
+                "BATTLE_READY",
+                "TURN_REVIEWED",
+                "TURN_RECORDED",
+            }
             self.match_end_group.setVisible(False)
             self.match_end_local_group.setVisible(endable)
             for outcome_button in (self.match_win_button, self.match_loss_button):
@@ -3718,6 +4726,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._render_selection_v3(current)
         if hasattr(self, "legal_switch_group"):
             self._render_legal_switch_workbench(summary)
+        self._sync_switch_candidates(self.self_active_box.currentText())
 
         # The base class's
         # setEnabled(...) for these three buttons was written for a UI
@@ -3752,7 +4761,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         # GEMINI" here would be false: confirming facts never sends (see
         # R2). Only the distinct explicit-send control below may say that.
         self.confirm_turn_facts_button.setText("CONFIRM TURN FACTS")
-        self.record_action_button.setText("行動・結果記録")
+        self.record_action_button.setText("結果記録")
         self.next_turn_button.setText("NEXT TURN")
 
         active_button_by_cta = {
@@ -3846,6 +4855,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if evidence_status_label is not None and turn_snapshot_status_label is not None:
             evidence_status_label.setText(turn_snapshot_status_label.text())
         self.evidence_open_button.setEnabled(turn_state)
+        self._refresh_turn_ocr_milestone_log()
         self.review_state_event_button.setEnabled(
             current.persistence_reads_allowed
             and (editable or projection.primary_cta == "RECORD_ACTUAL_ACTION")
@@ -3879,7 +4889,10 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if legacy_gemini_box is not None:
             legacy_gemini_box.setVisible(False)
 
-        self.action_result_delta_group.setVisible(projection.primary_cta == "RECORD_ACTUAL_ACTION")
+        # The generic HP/Active/state delta editor is intentionally absent
+        # from the normal Result Entry workflow.  Its hidden widgets remain
+        # the projection target for the existing canonical SideDelta path.
+        self.action_result_delta_group.setVisible(False)
 
         # The center follows the completed HTML's lifecycle composition:
         # LIVE is persistent and exactly one compact work surface sits below
@@ -3893,63 +4906,64 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         else:
             workbench_page = self.review_workbench_page
         self.workbench_stack.setCurrentWidget(workbench_page)
+        if not self._result_entry_active:
+            self.action_result_step_stack.setCurrentWidget(self.action_entry_step_page)
         self.workbench_stack.setMinimumHeight(350)
         self.workbench_stack.setMaximumHeight(350)
         self.recorded_summary_label.setText(
             f"Turn {projection.turn_number} の行動と結果を保存しました。"
             "左の確定履歴を確認し、次のTurnへ進んでください。"
         )
+        if self._result_entry_active and projection.primary_cta == "RECORD_ACTUAL_ACTION":
+            self._show_result_entry_page(current.persistence_reads_allowed)
 
         # The v5 right rail never changes hierarchy: Gemini owns the upper
         # slot even while empty/waiting, with compact INTEL directly below.
+        status = self._bundle_c_controller.rich_turn_advice_gemini_status()
+        # Keep the existing controller-bound status values populated for the
+        # hidden audit owner, but never compose them into the live player
+        # panel. Success is represented by the advice itself; failures use
+        # one concise recovery message below.
+        status_text = _RICH_STATUS_LABELS.get(status.status, status.status)
+        self.rich_gemini_status_label.setText(f"送信状態: {status_text}")
+        self.rich_gemini_denial_label.setText("")
+        failure_message = _TURN_ADVICE_PLAYER_FAILURE_MESSAGES.get(status.status)
+        advice_visible = (
+            projection.primary_cta in {"RECORD_ACTUAL_ACTION", "NEXT_TURN"}
+            and current.turn_advice is not None
+        )
         self.rich_gemini_group.setVisible(True)
-        advice_visible = projection.primary_cta in {"RECORD_ACTUAL_ACTION", "NEXT_TURN"}
         self.gemini_empty_label.setVisible(not advice_visible)
         self.turn_advice_group.setVisible(advice_visible)
-        self.turn_advice_warning_card.setVisible(
-            current.turn_advice is not None and bool(current.turn_advice.warnings)
-        )
-        # Gemini V2 Bundle 6: additive cards, visible only for a row whose
-        # structured v2 detail actually decoded (never for a legacy v1 row,
-        # and never fabricated for a v2 row whose advice_json failed to
-        # decode -- see ``ui/controller.py``'s operator-view construction).
-        structured_v2 = current.turn_advice.structured_v2 if current.turn_advice else None
-        self.turn_advice_robustness_card.setVisible(structured_v2 is not None)
-        self.turn_advice_alternatives_card.setVisible(
-            structured_v2 is not None and bool(structured_v2.opponent_prediction.alternatives)
-        )
-        self.gemini_empty_label.setText(
-            "Turn撮影後に確認へ"
-            if projection.primary_cta == "START_TURN_CAPTURE"
-            else "SEND TURN TO GEMINI 待ち"
-        )
-        status = self._bundle_c_controller.rich_turn_advice_gemini_status()
-        self.rich_gemini_status_label.setText(
-            f"送信状態: {_RICH_STATUS_LABELS.get(status.status, status.status)}"
-        )
-        if summary.provider_ready:
-            self.rich_gemini_denial_label.setText("Gate: provider-ready")
-        else:
-            reasons = ", ".join(
-                self._bundle_c_controller.denial_reason_message(code)
-                for code in summary.provider_ready_denial_reasons
+        if not advice_visible:
+            self.gemini_empty_label.setText(
+                failure_message
+                or (
+                    "Turn撮影後に確認へ"
+                    if projection.primary_cta == "START_TURN_CAPTURE"
+                    else "SEND TURN TO GEMINI 待ち"
+                )
             )
-            self.rich_gemini_denial_label.setText(f"Gate: {reasons or '確認中'}")
+        if current.turn_advice is not None:
+            self._render_turn_advice_player_surface(current.turn_advice, summary)
+        self._refresh_turn_ocr_status_indicator()
 
         gemini_button = getattr(self, "_bundle_c_gemini_send_button", None)
         if gemini_button is not None:
-            # Bundle 2 (Gemini V2) R2: this is the one distinct, explicit
-            # send action -- visible/enabled only once every provider-ready
-            # prerequisite (including legal-switch confirmation) already
-            # holds. Confirming facts or confirming legal switches never
-            # sets these themselves; only this control's own click does.
-            gemini_button.setVisible(projection.primary_cta == "REQUEST_TURN_ADVICE")
-            gemini_button.setEnabled(
-                current.persistence_reads_allowed
-                and projection.primary_cta == "REQUEST_TURN_ADVICE"
+            # Sending is a separate trusted human action. Keep the control
+            # available whenever the freshly confirmed binding is provider
+            # ready, and relabel it as a retry only after a failed send.
+            failed_last_send = status.status in _TURN_ADVICE_FAILURE_STATUSES
+            send_available = (
+                projection.primary_cta == "REQUEST_TURN_ADVICE"
+                and current.persistence_reads_allowed
                 and summary.provider_ready
                 and status.status != "PENDING"
+                and status.status != "SUCCESS"
             )
+            gemini_button.setText("Gemini再送信" if failed_last_send else "SEND TURN TO GEMINI")
+            gemini_button.setVisible(send_available)
+            gemini_button.setEnabled(send_available)
 
         species = self.opponent_active_input.text().strip()
         try:
@@ -3963,7 +4977,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         self._refresh_opponent_action_assist(
             current, species=species, match_facts=match_facts
         )
-        self._refresh_self_switch_targets(current)
+        self._refresh_self_switch_targets(current, summary)
         self._update_v5_action_disclosure()
         self._sync_parity_action_selection()
         self.live_current_state_label.setText(
@@ -3973,9 +4987,16 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             f"HP{self.opponent_hp_box.currentText() or '—'}"
         )
 
-        self.next_turn_button.setEnabled(
-            self.next_turn_button.isEnabled() and projection.primary_cta == "NEXT_TURN"
-        )
+        if self._result_entry_active and projection.primary_cta == "RECORD_ACTUAL_ACTION":
+            # Result Entry is a second step of the current action lifecycle;
+            # its NEXT TURN click performs the atomic result commit first.
+            # A harmless render must not disable that live control merely
+            # because the legacy primary CTA is still RECORD_ACTUAL_ACTION.
+            self.next_turn_button.setEnabled(current.persistence_reads_allowed)
+        else:
+            self.next_turn_button.setEnabled(
+                self.next_turn_button.isEnabled() and projection.primary_cta == "NEXT_TURN"
+            )
 
         if not current.persistence_reads_allowed:
             for lockable_widget in (
@@ -4009,40 +5030,33 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             self._bind_turn_snapshot_draft_field(
                 "self_active",
                 self_active.value,
-                ocr_replaceable=(
-                    ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD
-                    in self_active.provenance_chain
-                ),
+                # Every value in an OPEN draft belongs to the previous Turn
+                # (including a result-derived CHANGED ZERO). It is only a
+                # starting point for this new board capture; current-Turn
+                # human input remains locked and current-Turn OCR may replace
+                # the carry-forward value.
+                ocr_replaceable=True,
             )
         opponent_active = draft.opponent_side.active
         if opponent_active.is_confirmed and opponent_active.value is not None:
             self._bind_turn_snapshot_draft_field(
                 "opponent_active",
                 opponent_active.value,
-                ocr_replaceable=(
-                    ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD
-                    in opponent_active.provenance_chain
-                ),
+                ocr_replaceable=True,
             )
         self_hp = draft.self_side.hp_bucket
         if self_hp.is_confirmed and self_hp.value is not None:
             self._bind_turn_snapshot_draft_field(
                 "self_hp",
                 self_hp.value.value,
-                ocr_replaceable=(
-                    ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD
-                    in self_hp.provenance_chain
-                ),
+                ocr_replaceable=True,
             )
         opponent_hp = draft.opponent_side.hp_bucket
         if opponent_hp.is_confirmed and opponent_hp.value is not None:
             self._bind_turn_snapshot_draft_field(
                 "opponent_hp",
                 opponent_hp.value.value,
-                ocr_replaceable=(
-                    ProvenanceStep.PREVIOUS_CONFIRMED_CARRY_FORWARD
-                    in opponent_hp.provenance_chain
-                ),
+                ocr_replaceable=True,
             )
 
     # -- overridden handlers: gather the new widgets, then delegate ------------
@@ -4051,7 +5065,21 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         if not self._mutation_slots_allowed():
             return
         moves = [field.text().strip() for field in self.move_inputs if field.text().strip()]
-        switches = [checkbox.text() for checkbox in self.switch_checkboxes if checkbox.isChecked()]
+        # A hidden/excluded slot (see _sync_switch_candidates) can only be
+        # checked if something checked it before it was hidden -- guard
+        # against ever submitting a blank switch name regardless.
+        switches = [
+            checkbox.text()
+            for checkbox in self.switch_checkboxes
+            if checkbox.isChecked() and checkbox.text()
+        ]
+        # The exact legal-switch candidates currently visible/edited in the
+        # workbench list -- CONFIRM TURN FACTS confirms exactly this, never
+        # a freshly re-derived set. See confirm_turn_facts's
+        # legal_switch_selection parameter.
+        legal_switch_selection = tuple(
+            item.text() for item in self.legal_switch_list.selectedItems()
+        )
         self_active_known = _active_known_from_combo(self.self_active_box)
         opponent_active_known = _active_known_from_line(self.opponent_active_input)
         self_hp_known = _hp_known_from_combo(self.self_hp_box)
@@ -4075,6 +5103,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             opponent_side=opponent_side,
             weather=self.weather_field.to_known(),
             terrain=self.terrain_field.to_known(),
+            legal_switch_selection=legal_switch_selection,
         )
         pending_confirmation = self._pending_ocr_ability_confirmation
         if pending_confirmation is not None:
@@ -4098,16 +5127,585 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                         )
                 view = self._bundle_c_controller.refresh()
         self.render_view(view)
-        # Bundle 2 (Gemini V2) R2: confirming Turn facts is purely a factual
-        # persistence step -- it never dispatches, whether or not this exact
-        # binding's legal-switch truth happens to already be resolved (in
-        # practice it never is: confirming facts always mints a fresh
-        # binding, so any prior legal-switch confirmation can no longer
-        # match it -- see LegalSwitchStoreMixin.get_legal_switch_confirmation's
-        # exact-binding lookup). The only path to a provider dispatch is the
-        # distinct, explicit send control in ``rich_gemini_group`` below
-        # (``_on_trusted_send_turn_to_gemini``), which the operator invokes
-        # as its own separate action once provider-ready.
+        # CONFIRM TURN FACTS is a factual persistence action only. Provider
+        # dispatch remains a separate trusted human action so a re-render,
+        # retry, or legal-switch correction cannot silently double-send.
+
+    def _current_result_active_names(self) -> dict[str, str]:
+        summary = self._bundle_c_controller.turn_state_summary()
+        state = summary.confirmed_state
+        if state is None:
+            return {"self": "不明", "opponent": "不明"}
+        return {
+            "self": state.self_side.active.value or "不明",
+            "opponent": state.opponent_side.active.value or "不明",
+        }
+
+    def _on_open_result_entry(self, _checked: bool = False) -> None:
+        """Navigate from Action Entry to Result Entry without persistence."""
+
+        if not self._mutation_slots_allowed():
+            return
+        action_type = self.actual_action_type_box.currentText()
+        action_name = self.actual_action_name_box.currentText().strip()
+        opponent_type = self.opponent_action_type_box.currentText()
+        opponent_name = self.opponent_action_name_input.text().strip()
+        if action_type not in {"MOVE", "SWITCH"} or not action_name:
+            self.error_label.setText("自分の実行行動を選択してください。")
+            return
+        if not self.actual_action_confirm_checkbox.isChecked():
+            self.error_label.setText("実行行動を人間が確認してください。")
+            return
+        if opponent_type in {"MOVE", "SWITCH"} and not opponent_name:
+            self.error_label.setText("相手の実行行動名を入力してください。")
+            return
+        self.error_label.clear()
+        self._result_entry_active = True
+        self._result_events.clear()
+        self._result_candidate_decisions.clear()
+        self._result_validation_error = ""
+        self._build_move_result_candidates()
+        self._project_result_events()
+        self.weather_delta_field.mode_box.setCurrentText("UNKNOWN")
+        self.terrain_delta_field.mode_box.setCurrentText("UNKNOWN")
+        self._show_result_entry_page()
+
+    def _on_back_to_action_entry(self, _checked: bool = False) -> None:
+        self._result_entry_active = False
+        self.render_view()
+
+    def _show_result_entry_page(self, persistence_reads_allowed: bool = True) -> None:
+        self.workbench_stack.setCurrentWidget(self.action_workbench_page)
+        self.action_result_step_stack.setCurrentWidget(self.result_workbench_page)
+        self.record_action_button.setText("結果記録")
+        self.record_action_button.setEnabled(False)
+        self.next_turn_button.setVisible(True)
+        self.next_turn_button.setEnabled(True)
+        self.next_turn_button.setProperty("active", True)
+        self.next_turn_button.style().unpolish(self.next_turn_button)
+        self.next_turn_button.style().polish(self.next_turn_button)
+        self.record_self_faint_button.setCheckable(True)
+        self.record_opponent_faint_button.setCheckable(True)
+        self.record_self_faint_button.setText("自分ひんし")
+        self.record_opponent_faint_button.setText("相手ひんし")
+        self.record_self_faint_button.setVisible(True)
+        self.record_opponent_faint_button.setVisible(True)
+        self.record_self_faint_button.setEnabled(persistence_reads_allowed)
+        self.record_opponent_faint_button.setEnabled(persistence_reads_allowed)
+        self.record_self_faint_button.setChecked(
+            any(
+                event.kind == "faint" and event.target_side == "self"
+                for event in self._result_events
+            )
+        )
+        self.record_opponent_faint_button.setChecked(
+            any(
+                event.kind == "faint" and event.target_side == "opponent"
+                for event in self._result_events
+            )
+        )
+        self.mega_result_group.setVisible(True)
+        self._render_mega_controls(persistence_reads_allowed)
+
+    def _current_result_active_for_mega(self, side: MegaSide) -> str | None:
+        """Return only a nonblank, human-confirmed active Pokemon name."""
+
+        confirmed = self._bundle_c_controller.turn_state_summary().confirmed_state
+        if confirmed is None:
+            return None
+        known = (
+            confirmed.self_side.active
+            if side is MegaSide.SELF
+            else confirmed.opponent_side.active
+        )
+        if not known.is_confirmed or not isinstance(known.value, str):
+            return None
+        active_name = known.value.strip()
+        if not active_name or active_name == "UNKNOWN":
+            return None
+        return active_name
+
+    def _staged_mega_event(self, side: MegaSide) -> _ResultEventDraft | None:
+        target_side = "self" if side is MegaSide.SELF else "opponent"
+        return next(
+            (
+                event
+                for event in self._result_events
+                if event.kind == "mega" and event.target_side == target_side
+            ),
+            None,
+        )
+
+    def _render_mega_controls(self, persistence_reads_allowed: bool = True) -> None:
+        """Render controls from persisted resource state plus draft events."""
+
+        if not hasattr(self, "mega_result_group"):
+            return
+        try:
+            persisted = self._bundle_c_controller.mega_battle_state()
+        except (DomainError, KeyError, ValueError, RuntimeError):
+            for button in (self.self_mega_button, self.opponent_mega_button):
+                button.setChecked(False)
+                button.setEnabled(False)
+            return
+
+        for side, button in (
+            (MegaSide.SELF, self.self_mega_button),
+            (MegaSide.OPPONENT, self.opponent_mega_button),
+        ):
+            staged = self._staged_mega_event(side)
+            already_used = persisted.side(side).mega_used
+            button.setChecked(staged is not None)
+            button.setEnabled(
+                self._result_entry_active
+                and persistence_reads_allowed
+                and not already_used
+                and (staged is not None or self._current_result_active_for_mega(side) is not None)
+            )
+
+    def _toggle_mega_event(self, side: MegaSide) -> None:
+        """Stage/cancel one explicit actual Mega confirmation for this Turn."""
+
+        if not self._result_entry_active:
+            return
+        try:
+            persisted = self._bundle_c_controller.mega_battle_state()
+        except (DomainError, KeyError, ValueError, RuntimeError):
+            self._render_mega_controls(False)
+            return
+        if persisted.side(side).mega_used:
+            self._render_mega_controls()
+            return
+
+        existing = self._staged_mega_event(side)
+        if existing is not None:
+            self._result_events.remove(existing)
+            self._project_result_events()
+            self._render_mega_controls()
+            return
+
+        active_name = self._current_result_active_for_mega(side)
+        if active_name is None:
+            self._result_validation_error = (
+                "確認済みのActiveがないため、メガ進化を記録できません。"
+            )
+            self._render_result_summary()
+            self._render_mega_controls()
+            return
+
+        current_form = deterministic_mega_form(active_name)
+        self._result_event_sequence += 1
+        self._result_events.append(
+            _ResultEventDraft(
+                event_id=f"mega-{self._result_event_sequence}",
+                target_side="self" if side is MegaSide.SELF else "opponent",
+                pokemon_name=active_name,
+                kind="mega",
+                field_name="mega",
+                value=current_form or "MEGA",
+                current_form=current_form,
+            )
+        )
+        self._project_result_events()
+        self._render_mega_controls()
+
+    def _confirmed_mega_sides(self) -> tuple[MegaSide, ...]:
+        """Derive typed Mega confirmations from the canonical Result draft."""
+
+        sides: list[MegaSide] = []
+        for event in self._result_events:
+            if event.kind == "mega":
+                sides.append(
+                    MegaSide.SELF if event.target_side == "self" else MegaSide.OPPONENT
+                )
+        return tuple(sides)
+
+    def _build_move_result_candidates(self) -> None:
+        while self.result_candidates_layout.count():
+            item = self.result_candidates_layout.takeAt(0)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.deleteLater()
+        self._result_candidate_cards.clear()
+        active_names = self._current_result_active_names()
+        own_move = self.actual_action_name_box.currentText().strip()
+        opponent_move = self.opponent_action_name_input.text().strip()
+        own_display = own_move or "—"
+        opponent_display = opponent_move or "UNKNOWN"
+        self.result_actions_label.setText(
+            f"このTurnの行動    自分：{own_display}    相手：{opponent_display}"
+        )
+        candidates: list[_MoveResultCandidate] = []
+        action_specs = (
+            ("self", self.actual_action_type_box.currentText(), own_move),
+            ("opponent", self.opponent_action_type_box.currentText(), opponent_move),
+        )
+        for source_side, action_type, move_name in action_specs:
+            if action_type != "MOVE" or not move_name:
+                continue
+            entry = find_effect(move_name)
+            if entry is None:
+                continue
+            if entry.target is EffectTarget.BATTLEFIELD:
+                continue
+            target_side = source_side
+            if entry.target is EffectTarget.OPPONENT:
+                target_side = "opponent" if source_side == "self" else "self"
+            for effect_index, effect in enumerate(entry.deterministic_effects):
+                field_name: str
+                value: int | str
+                kind: str
+                stage = self._stage_effect(effect)
+                if stage is not None:
+                    field_name, value = stage
+                    kind = "stage"
+                elif effect in {*MAJOR_STATUS_PRESETS, "もうどく"}:
+                    field_name, value, kind = "status", effect, "status"
+                else:
+                    continue
+                candidate = _MoveResultCandidate(
+                    candidate_id=f"{source_side}:{entry.id}:{effect_index}",
+                    source_side=source_side,
+                    source_pokemon=active_names[source_side],
+                    source_move=move_name,
+                    target_side=target_side,
+                    target_pokemon=active_names[target_side],
+                    kind=kind,
+                    field_name=field_name,
+                    value=value,
+                    display_effect=effect,
+                )
+                candidates.append(candidate)
+                card = _MoveResultCandidateCard(candidate, self._decide_result_candidate)
+                self._result_candidate_cards[candidate.candidate_id] = card
+                self.result_candidates_layout.addWidget(card)
+        self._result_candidates = tuple(candidates)
+        if not candidates:
+            self.result_candidates_layout.addWidget(
+                QLabel("既存metadataから提示できる候補はありません。必要なら手入力してください。")
+            )
+
+    def _decide_result_candidate(
+        self, candidate: _MoveResultCandidate, decision: str
+    ) -> None:
+        self._result_events = [
+            event
+            for event in self._result_events
+            if event.candidate_id != candidate.candidate_id
+        ]
+        self._result_candidate_decisions[candidate.candidate_id] = decision
+        if decision == "OCCURRED":
+            self._result_event_sequence += 1
+            self._result_events.append(
+                _ResultEventDraft(
+                    event_id=f"candidate-{self._result_event_sequence}",
+                    target_side=candidate.target_side,
+                    pokemon_name=candidate.target_pokemon,
+                    kind=candidate.kind,
+                    field_name=candidate.field_name,
+                    value=candidate.value,
+                    source_move=candidate.source_move,
+                    candidate_id=candidate.candidate_id,
+                )
+            )
+        if not self._project_result_events():
+            self._result_events = [
+                event
+                for event in self._result_events
+                if event.candidate_id != candidate.candidate_id
+            ]
+            self._result_candidate_decisions[candidate.candidate_id] = "UNDECIDED"
+            self._project_result_events()
+        for candidate_id, card in self._result_candidate_cards.items():
+            card.set_decision(self._result_candidate_decisions.get(candidate_id, "UNDECIDED"))
+
+    def _open_manual_result_dialog(self, _checked: bool = False) -> None:
+        dialog = _ManualResultDialog(self, add_event=self._add_manual_result_event)
+        self._manual_result_dialog = dialog
+        dialog.show()
+
+    def _add_manual_result_event(
+        self, target_side: str, field_name: str, value: int | str
+    ) -> None:
+        self._result_event_sequence += 1
+        names = self._current_result_active_names()
+        event = _ResultEventDraft(
+            event_id=f"manual-{self._result_event_sequence}",
+            target_side=target_side,
+            pokemon_name=names[target_side],
+            kind="status" if field_name == "status" else "stage",
+            field_name=field_name,
+            value=value,
+        )
+        self._result_events.append(event)
+        if not self._project_result_events():
+            self._result_events.remove(event)
+            self._project_result_events()
+
+    def _result_stage_known_values(self, side: str) -> dict[str, Known[int]]:
+        """Return the effective Result Entry draft stages for direct editing.
+
+        Canonical confirmed state remains the baseline. Already-staged result
+        events are folded in only for the dialog's next preview, so reopening
+        the dialog composes with (rather than duplicates) earlier applies.
+        """
+
+        values = dict(self._bundle_c_controller.stage_known_values(side=side))
+        totals: dict[str, int] = {}
+        for event in self._result_events:
+            if event.kind == "stage" and event.target_side == side:
+                totals[event.field_name] = totals.get(event.field_name, 0) + int(event.value)
+        for field_name, amount in totals.items():
+            known = values.get(field_name)
+            if known is not None and known.is_confirmed and known.value is not None:
+                values[field_name] = Known.confirmed(
+                    known.value + amount,
+                    provenance_chain=_HUMAN_INPUT,
+                )
+        return values
+
+    def _apply_direct_result_stage_changes(
+        self, pending: dict[str, dict[str, int]]
+    ) -> bool:
+        """Convert explicit dialog applies into canonical Result Entry events."""
+
+        names = self._current_result_active_names()
+        staged: list[_ResultEventDraft] = []
+        for side in ("self", "opponent"):
+            effective = self._result_stage_known_values(side)
+            for field_name, candidate in pending[side].items():
+                known = effective.get(field_name)
+                if known is None or not known.is_confirmed or known.value is None:
+                    return False
+                amount = candidate - known.value
+                if amount == 0:
+                    continue
+                self._result_event_sequence += 1
+                staged.append(
+                    _ResultEventDraft(
+                        event_id=f"direct-{self._result_event_sequence}",
+                        target_side=side,
+                        pokemon_name=names[side],
+                        kind="stage",
+                        field_name=field_name,
+                        value=amount,
+                    )
+                )
+        self._result_events.extend(staged)
+        if self._project_result_events():
+            return True
+        staged_ids = {event.event_id for event in staged}
+        self._result_events = [
+            event for event in self._result_events if event.event_id not in staged_ids
+        ]
+        self._project_result_events()
+        return False
+
+    def _toggle_faint_event(self, target_side: str) -> None:
+        existing = next(
+            (
+                event
+                for event in self._result_events
+                if event.kind == "faint" and event.target_side == target_side
+            ),
+            None,
+        )
+        if existing is not None:
+            self._result_events.remove(existing)
+        else:
+            self._result_event_sequence += 1
+            self._result_events.append(
+                _ResultEventDraft(
+                    event_id=f"faint-{self._result_event_sequence}",
+                    target_side=target_side,
+                    pokemon_name=self._current_result_active_names()[target_side],
+                    kind="faint",
+                    field_name="hp_bucket",
+                    value=HpBucket.ZERO.value,
+                )
+            )
+        self._project_result_events()
+
+    def _project_result_events(self) -> bool:
+        stage_totals: dict[tuple[str, str], int] = {}
+        for event in self._result_events:
+            if event.kind == "stage":
+                key = (event.target_side, event.field_name)
+                stage_totals[key] = stage_totals.get(key, 0) + int(event.value)
+        stage_values: dict[tuple[str, str], int] = {}
+        for (side, field_name), amount in stage_totals.items():
+            known = self._bundle_c_controller.stage_known_values(side=side).get(field_name)
+            if known is None or not known.is_confirmed or known.value is None:
+                self._result_validation_error = "現在ランク不明のため能力変化を追加できません。"
+                self._render_result_summary()
+                return False
+            candidate_value = known.value + amount
+            if candidate_value < MIN_STAGE or candidate_value > MAX_STAGE:
+                self._result_validation_error = "能力ランクが -6～+6 の範囲を超えます。"
+                self._render_result_summary()
+                return False
+            stage_values[(side, field_name)] = candidate_value
+
+        self._result_validation_error = ""
+        self.self_delta_editor.reset()
+        self.opponent_delta_editor.reset()
+
+        for editor in (self.self_delta_editor, self.opponent_delta_editor):
+            editor.hp_field.mode_box.setCurrentText("UNKNOWN")
+            editor.status_field.mode_box.setCurrentText("UNKNOWN")
+            editor.side_effects_field.mode_box.setCurrentText("UNKNOWN")
+            for field in editor.stage_fields.values():
+                field.mode_box.setCurrentText("UNKNOWN")
+        self.weather_delta_field.mode_box.setCurrentText("UNKNOWN")
+        self.terrain_delta_field.mode_box.setCurrentText("UNKNOWN")
+
+        for (side, field_name), value in stage_values.items():
+            editor = self.self_delta_editor if side == "self" else self.opponent_delta_editor
+            field = editor.stage_fields[field_name]
+            field.mode_box.setCurrentText("CHANGED")
+            field.spin.setValue(value)
+        for event in self._result_events:
+            editor = (
+                self.self_delta_editor
+                if event.target_side == "self"
+                else self.opponent_delta_editor
+            )
+            if event.kind == "status":
+                editor.status_field.mode_box.setCurrentText("CHANGED")
+                editor.status_field.line.setText(str(event.value))
+            elif event.kind == "faint":
+                editor.mark_fainted()
+            elif event.kind == "mega":
+                # Mega is a match-level resource, not a SideDelta field.
+                continue
+        for result_candidate in self._result_candidates:
+            if (
+                self._result_candidate_decisions.get(result_candidate.candidate_id)
+                != "DID_NOT_OCCUR"
+            ):
+                continue
+            editor = (
+                self.self_delta_editor
+                if result_candidate.target_side == "self"
+                else self.opponent_delta_editor
+            )
+            if result_candidate.kind == "stage":
+                field = editor.stage_fields[result_candidate.field_name]
+                if field.mode_box.currentText() != "CHANGED":
+                    field.mode_box.setCurrentText("UNCHANGED")
+            elif result_candidate.kind == "status" and (
+                editor.status_field.mode_box.currentText() != "CHANGED"
+            ):
+                editor.status_field.mode_box.setCurrentText("UNCHANGED")
+        self.record_self_faint_button.setChecked(
+            any(
+                event.kind == "faint" and event.target_side == "self"
+                for event in self._result_events
+            )
+        )
+        self.record_opponent_faint_button.setChecked(
+            any(
+                event.kind == "faint" and event.target_side == "opponent"
+                for event in self._result_events
+            )
+        )
+        self._render_result_summary()
+        return True
+
+    def _render_result_summary(self) -> None:
+        while self.result_summary_layout.count() > 1:
+            item = self.result_summary_layout.takeAt(1)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.deleteLater()
+        self.result_summary_empty_label.setVisible(not self._result_events)
+        if self._result_validation_error:
+            self.result_summary_empty_label.setVisible(True)
+            self.result_summary_empty_label.setText(self._result_validation_error)
+        else:
+            self.result_summary_empty_label.setText("追加イベントなし")
+        labels = dict(_DIRECT_STAGE_FIELDS)
+        for event in self._result_events:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            if event.kind == "stage":
+                detail = f"{labels[event.field_name]} {int(event.value):+d}"
+            elif event.kind == "status":
+                detail = f"状態：{event.value}"
+            elif event.kind == "mega":
+                detail = (
+                    f"→ {event.current_form}"
+                    if event.current_form is not None
+                    else "→ メガ進化（形態未確定）"
+                )
+            else:
+                detail = "ひんし"
+            source = f"  原因：{event.source_move}" if event.source_move else ""
+            label = QLabel(
+                f"✓ {_TARGET_SIDE_LABELS[event.target_side]}：{event.pokemon_name} "
+                f"{detail}{source}"
+            )
+            remove_button = QPushButton("取消")
+            remove_button.clicked.connect(
+                lambda _checked=False, event_id=event.event_id: self._remove_result_event(event_id)
+            )
+            row_layout.addWidget(label, 1)
+            row_layout.addWidget(remove_button)
+            self.result_summary_layout.addWidget(row)
+
+    def _remove_result_event(self, event_id: str) -> None:
+        removed = next((event for event in self._result_events if event.event_id == event_id), None)
+        self._result_events = [event for event in self._result_events if event.event_id != event_id]
+        if removed is not None and removed.candidate_id is not None:
+            self._result_candidate_decisions[removed.candidate_id] = "UNDECIDED"
+            card = self._result_candidate_cards.get(removed.candidate_id)
+            if card is not None:
+                card.set_decision("UNDECIDED")
+        self._project_result_events()
+
+    def _on_result_next_turn(self, _checked: bool = False) -> None:
+        if not self._result_entry_active:
+            super()._on_next_turn(_checked)
+            return
+        self._on_record_action()
+        if self._bundle_c_controller.refresh().projection.session_state != "TURN_RECORDED":
+            self._show_result_entry_page()
+            return
+        self._result_entry_active = False
+        super()._on_next_turn(_checked)
+        if self._bundle_c_controller.refresh().projection.session_state == "TURN_CAPTURE_PENDING":
+            self._result_events.clear()
+            self._result_candidate_decisions.clear()
+
+    def _on_record_opponent_faint(self, _checked: bool = False) -> None:
+        """相手ひんし: quick-set the opponent result-delta HP to HpBucket.ZERO.
+
+        Draft-only, exactly like every other control on this surface -- the
+        canonical write is still the operator's "行動・結果記録" click, which
+        reads ``opponent_delta_editor.to_side_delta()``. From there the
+        existing lifecycle (ActionResultDelta -> next confirmed SideState ->
+        PokemonLocalMemory) and ``is_confirmed_fainted`` do the rest.
+        """
+
+        if self._result_entry_active:
+            self._toggle_faint_event("opponent")
+        else:
+            self.opponent_delta_editor.mark_fainted()
+
+    def _on_record_self_faint(self, _checked: bool = False) -> None:
+        """自分ひんし: quick-set the self result-delta HP to HpBucket.ZERO.
+
+        See :meth:`_on_record_opponent_faint`. Once persisted and carried
+        into match-local memory, the fainted self Pokemon is excluded from
+        legal-switch candidates by the existing
+        ``domain.legal_switches.derive_legal_switch_candidates``.
+        """
+
+        if self._result_entry_active:
+            self._toggle_faint_event("self")
+        else:
+            self.self_delta_editor.mark_fainted()
 
     def _on_record_action(self, _checked: bool = False) -> None:
         if not self._mutation_slots_allowed():
@@ -4134,13 +5732,17 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
                 side="self", destination_pokemon_name=action_name
             )
         else:
-            self_side_delta = self.self_delta_editor.to_side_delta()
+            self_side_delta = self.self_delta_editor.to_side_delta(
+                unobserved_as_unknown=self._result_entry_active
+            )
         if opponent_type == "SWITCH" and opponent_name:
             opponent_side_delta = self._bundle_c_controller.compute_confirmed_switch_side_delta(
                 side="opponent", destination_pokemon_name=opponent_name
             )
         else:
-            opponent_side_delta = self.opponent_delta_editor.to_side_delta()
+            opponent_side_delta = self.opponent_delta_editor.to_side_delta(
+                unobserved_as_unknown=self._result_entry_active
+            )
 
         view = self._bundle_c_controller.record_actual_action(
             action_type=action_type,
@@ -4153,6 +5755,7 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             opponent_side_delta=opponent_side_delta,
             weather_delta=self.weather_delta_field.to_delta(),
             terrain_delta=self.terrain_delta_field.to_delta(),
+            confirmed_mega_sides=self._confirmed_mega_sides(),
         )
         self.render_view(view)
 
@@ -4356,15 +5959,140 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
         )
         self.render_view(view)
 
+    def _on_self_active_changed_for_legal_switches(self, _text: str = "") -> None:
+        """Nudge the legal-switch prefill to refresh when the operator's
+        in-progress active-Pokemon choice changes. Display-only -- never
+        persists anything; see :meth:`_render_legal_switch_workbench`."""
+
+        self._sync_switch_candidates(_text)
+        if self._last_rendered_session_state != "TURN_CAPTURE_PENDING":
+            return
+        self._render_legal_switch_workbench(self._bundle_c_controller.turn_state_summary())
+
+    def _sync_switch_candidates(self, active_name: str) -> None:
+        """Keep the turn-facts switch checkboxes/mirror chips on the
+        canonical ``selected_three - active - confirmed-fainted`` derivation.
+
+        Tournament P0 fix. Two separate defects, fixed together:
+
+        1. ``self.switch_checkboxes`` were labeled with the raw
+           ``selected_three`` (all three members, including the active
+           Pokemon itself) by ``_populate_turn_selection_controls`` -- never
+           excluding the current active or a confirmed-fainted member. This
+           re-derives via the exact same canonical helper
+           (``domain.legal_switches.derive_legal_switch_candidates``, via the
+           controller's already-existing ``derive_legal_switch_candidates_
+           for_active``) the sibling Legal Switch Confirmation workbench
+           already uses -- one canonical derivation, not a second one.
+        2. ``self.parity_switch_chips`` (the actual on-screen "交代できる
+           ポケモン" buttons in this v5 window) are built exactly once at
+           ``__init__`` time from ``checkbox.text()``, which is always empty
+           at that point -- QCheckBox has no textChanged signal, so nothing
+           ever resynced their label afterward. Every real match therefore
+           showed three permanently blank/unlabeled buttons, which is why
+           the field operator could never correctly identify -- and always
+           ended up confirming zero -- legal switches. This is the only
+           place either widget's text is set again after construction.
+
+        Text/visibility are reapplied unconditionally on every call --
+        cheap, idempotent, and necessary because
+        ``_populate_turn_selection_controls`` (base class) still writes the
+        raw, unfiltered ``selected_three`` onto the same checkboxes earlier
+        in the same render pass; this must always run after it and win.
+        Only the *checked* state is preserved across calls where the
+        derived candidate tuple is unchanged, so an unrelated re-render
+        (typing in another field) never wipes an in-progress operator
+        checkmark.
+        """
+
+        if not hasattr(self, "_bundle_c_controller"):
+            return
+        name = active_name.strip()
+        candidates: tuple[str, ...] = ()
+        if name:
+            try:
+                candidates = self._bundle_c_controller.derive_legal_switch_candidates_for_active(
+                    name
+                )
+            except DomainError:
+                candidates = ()
+        candidates_changed = candidates != self._switch_checkbox_last_candidates
+        self._switch_checkbox_last_candidates = candidates
+        for index, checkbox in enumerate(self.switch_checkboxes):
+            candidate_name = candidates[index] if index < len(candidates) else ""
+            checkbox.setText(candidate_name)
+            checkbox.setVisible(bool(candidate_name))
+            if candidates_changed:
+                checkbox.setChecked(False)
+        if hasattr(self, "parity_switch_chips"):
+            for index, chip in enumerate(self.parity_switch_chips):
+                candidate_name = candidates[index] if index < len(candidates) else ""
+                chip.setText(candidate_name)
+                chip.setVisible(bool(candidate_name))
+                if candidates_changed:
+                    chip.setChecked(False)
+
     def _render_legal_switch_workbench(self, summary: TurnStateSummaryView) -> None:
-        """Bundle 2: reflect the current binding's derived candidates and
-        confirmed/unresolved status. Always re-derives from ``summary``
-        (never carries forward stale selection state) -- a new TurnIdentity
-        or invalidated binding renders as fresh candidates / unresolved,
-        exactly like every other identity-bound workbench control here."""
+        """R3R1: before CONFIRM TURN FACTS, show an editable CANDIDATE
+        PREFILL (never itself a confirmation) for whatever active Pokemon
+        is currently displayed; CONFIRM TURN FACTS reads exactly this
+        visible/edited selection to persist the final confirmation (see
+        ``_on_confirm_turn_facts``). After confirmation, reflect (and allow
+        the two buttons below to override) the actual persisted
+        ``LegalSwitchConfirmation`` -- never re-derived candidates.
+
+        A new TurnIdentity/binding (session/match/generation/turn/revision --
+        even with the identical active Pokemon name) or a fresh active
+        choice always replaces whatever was shown before; an unrelated
+        same-identity, same-active re-render (e.g. editing another field)
+        preserves the operator's own edit.
+        """
 
         confirmation = summary.legal_switch_confirmation
-        candidates = summary.legal_switch_candidates
+        session_state = self._last_rendered_session_state
+        pre_confirm_editable = confirmation is None and session_state == "TURN_CAPTURE_PENDING"
+        fresh_prefill = False
+        if pre_confirm_editable:
+            current_identity = summary.identity
+            active_text = self.self_active_box.currentText().strip()
+            identity_changed = current_identity != self._legal_switch_prefill_identity
+            active_changed = active_text != self._legal_switch_prefill_active_text
+            if identity_changed or active_changed:
+                self._legal_switch_prefill_identity = current_identity
+                self._legal_switch_prefill_active_text = active_text
+                fresh_prefill = True
+                if not active_text or self.self_active_box.currentIndex() <= 0:
+                    self._legal_switch_prefill_candidates = ()
+                else:
+                    try:
+                        self._legal_switch_prefill_candidates = (
+                            self._bundle_c_controller.derive_legal_switch_candidates_for_active(
+                                active_text
+                            )
+                        )
+                    except DomainError:
+                        self._legal_switch_prefill_candidates = ()
+            candidates = self._legal_switch_prefill_candidates
+        else:
+            # Facts are already confirmed (or no Turn/candidate context
+            # exists at all) -- ``summary.legal_switch_candidates`` is
+            # already canonically re-derived from ``applied.selected_three``
+            # / the confirmed active / confirmed-fainted members (see
+            # ``TurnStateFlowController.turn_state_summary``), independent
+            # of whether a ``LegalSwitchConfirmation`` itself exists yet for
+            # this exact binding. Never collapse an unresolved-but-derivable
+            # candidate set to an empty list here -- that silently hid a
+            # real, non-fainted backline behind a blank workbench, which is
+            # the historical defect this method exists to prevent.
+            candidates = summary.legal_switch_candidates
+            current_identity = summary.identity
+            if confirmation is None:
+                fresh_prefill = current_identity != self._legal_switch_prefill_identity
+                self._legal_switch_prefill_identity = current_identity
+            else:
+                self._legal_switch_prefill_identity = None
+            self._legal_switch_prefill_active_text = None
+
         previously_selected = {item.text() for item in self.legal_switch_list.selectedItems()}
         self.legal_switch_list.clear()
         for name in candidates:
@@ -4373,22 +6101,36 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             for index in range(self.legal_switch_list.count()):
                 item = self.legal_switch_list.item(index)
                 item.setSelected(item.text() in confirmation.legal_switches)
+        elif fresh_prefill:
+            # A fresh prefill -- either a newly-chosen active pre-confirm, or
+            # the first render of a new-identity unresolved binding: every
+            # candidate starts selected, since a prefill is not yet a
+            # deliberate operator removal of anything.
+            for index in range(self.legal_switch_list.count()):
+                self.legal_switch_list.item(index).setSelected(True)
         else:
             # Same-binding re-render (e.g. an unrelated field edit) keeps
             # the operator's unfinished selection; a genuinely new
-            # candidate set (new TurnIdentity/binding) cannot contain it.
+            # candidate set (new TurnIdentity/binding/active) cannot
+            # contain it.
             for index in range(self.legal_switch_list.count()):
                 item = self.legal_switch_list.item(index)
                 item.setSelected(item.text() in previously_selected)
+
         if confirmation is None:
-            self.legal_switch_status_label.setText("未確認 (UNRESOLVED)")
+            self.legal_switch_status_label.setText(
+                "未確認 (この一覧のままCONFIRM TURN FACTSで確定します)"
+                if pre_confirm_editable
+                else "未確認 (UNRESOLVED)"
+            )
         elif confirmation.status is LegalSwitchStatus.CONFIRMED_NONE:
             self.legal_switch_status_label.setText("確定: 交代先なし (CONFIRMED_NONE)")
         else:
             names = "、".join(confirmation.legal_switches)
             self.legal_switch_status_label.setText(f"確定 (CONFIRMED_NONEMPTY): {names}")
-        has_confirmed_state = summary.confirmed_state is not None
-        self.legal_switch_group.setEnabled(has_confirmed_state)
+        self.legal_switch_group.setEnabled(
+            session_state in {"TURN_CAPTURE_PENDING", "TURN_REVIEWED"}
+        )
 
     def _open_state_event_dialog(self, context: str) -> None:
         callback = self._apply_review_effect if context == "review" else self._apply_result_effect
@@ -4398,8 +6140,40 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
 
     def _open_common_state_event_dialog(self, _checked: bool = False) -> None:
         primary_cta = self._bundle_c_controller.refresh().projection.primary_cta
-        context = "result" if primary_cta == "RECORD_ACTUAL_ACTION" else "review"
-        self._open_state_event_dialog(context)
+        if primary_cta == "RECORD_ACTUAL_ACTION":
+            # The production composition keeps ``review_state_event_button``
+            # as the one visible ＋状態変化 entrypoint and hides the duplicate
+            # result button.  Route that actual visible button to the direct
+            # Action Result stage editor once the lifecycle reaches result
+            # entry; its その他/詳細 action still opens the existing effect
+            # catalog dialog below.
+            self._open_direct_stage_editor_dialog()
+            return
+        self._open_state_event_dialog("review")
+
+    def _open_direct_stage_editor_dialog(self, _checked: bool = False) -> None:
+        """Tournament hotfix primary route for the Action Result draft's
+        "＋ 状態変化を記録" -- target + common presets + direct per-stat
+        rank buttons are the first visible surface, no catalog search
+        required. The pre-existing catalog dialog stays reachable from
+        this dialog's own "その他 / 詳細" button."""
+
+        dialog = _DirectStageEditorDialog(
+            self,
+            self_editor=self.self_delta_editor,
+            opponent_editor=self.opponent_delta_editor,
+            known_stages_fn=(
+                self._result_stage_known_values
+                if self._result_entry_active
+                else lambda side: self._bundle_c_controller.stage_known_values(side=side)
+            ),
+            open_legacy=lambda: self._open_state_event_dialog("result"),
+            apply_stage_changes=(
+                self._apply_direct_result_stage_changes if self._result_entry_active else None
+            ),
+        )
+        self._direct_stage_editor_dialog = dialog
+        dialog.show()
 
     def _propose_actual_action_effect(self, name: str) -> None:
         if self.actual_action_type_box.currentText() != "MOVE":
@@ -4443,6 +6217,43 @@ class BattleRecordUiWindow(TurnSnapshotMatchFlowWindow):
             and find_effect(self.opponent_action_name_input.text()) == entry
             else "self"
         )
+        if self._result_entry_active:
+            target_side = source_side
+            if entry.target is EffectTarget.OPPONENT:
+                target_side = "self" if source_side == "opponent" else "opponent"
+            names = self._current_result_active_names()
+            staged: list[_ResultEventDraft] = []
+            for effect in entry.deterministic_effects:
+                stage = self._stage_effect(effect)
+                if stage is not None:
+                    field_name, amount = stage
+                    kind = "stage"
+                    value: int | str = amount
+                elif effect in {*MAJOR_STATUS_PRESETS, "もうどく"}:
+                    field_name, value, kind = "status", effect, "status"
+                else:
+                    continue
+                self._result_event_sequence += 1
+                staged.append(
+                    _ResultEventDraft(
+                        event_id=f"catalog-{self._result_event_sequence}",
+                        target_side=target_side,
+                        pokemon_name=names[target_side],
+                        kind=kind,
+                        field_name=field_name,
+                        value=value,
+                        source_move=entry.display_name_ja,
+                    )
+                )
+            if staged:
+                self._result_events.extend(staged)
+                if not self._project_result_events():
+                    staged_ids = {event.event_id for event in staged}
+                    self._result_events = [
+                        event for event in self._result_events if event.event_id not in staged_ids
+                    ]
+                    self._project_result_events()
+                return
         self._apply_effect(entry, source_side=source_side, result_phase=True)
 
     def _apply_effect(

@@ -4,13 +4,56 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 23
 
 
 def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
     existing = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
     if column not in existing:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _widen_selection_provider_attempt_audits(connection: sqlite3.Connection) -> None:
+    """Upgrade the former two-model audit constraint without losing evidence."""
+
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ("provider_attempt_audits",),
+    ).fetchone()
+    if row is None or "attempt_ordinal IN (1, 2)" not in str(row[0]):
+        return
+    connection.execute(
+        "ALTER TABLE provider_attempt_audits RENAME TO provider_attempt_audits_v21"
+    )
+    connection.execute(
+        """
+        CREATE TABLE provider_attempt_audits (
+            audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            lane TEXT NOT NULL,
+            attempt_ordinal INTEGER NOT NULL CHECK (attempt_ordinal >= 1),
+            model TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK (outcome IN ('STARTED', 'SUCCEEDED', 'FAILED')),
+            reason TEXT NOT NULL DEFAULT '',
+            started_at_utc TEXT NOT NULL,
+            completed_at_utc TEXT NULL,
+            UNIQUE(job_id, lane, attempt_ordinal),
+            FOREIGN KEY(job_id) REFERENCES async_jobs(job_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO provider_attempt_audits (
+            audit_id, job_id, lane, attempt_ordinal, model, outcome, reason,
+            started_at_utc, completed_at_utc
+        )
+        SELECT audit_id, job_id, lane, attempt_ordinal, model, outcome, reason,
+               started_at_utc, completed_at_utc
+        FROM provider_attempt_audits_v21
+        """
+    )
+    connection.execute("DROP TABLE provider_attempt_audits_v21")
 
 
 def migrate(connection: sqlite3.Connection) -> None:
@@ -36,6 +79,7 @@ def migrate(connection: sqlite3.Connection) -> None:
             current_observation_id TEXT NULL,
             current_reviewed_board_id TEXT NULL,
             current_turn_advice_id TEXT NULL,
+            mega_state_json TEXT NOT NULL DEFAULT '{}',
             active_slot INTEGER NULL CHECK (active_slot IS NULL OR active_slot = 1)
         );
         CREATE UNIQUE INDEX IF NOT EXISTS ux_single_active_session
@@ -61,6 +105,10 @@ def migrate(connection: sqlite3.Connection) -> None:
             backline_json TEXT NOT NULL,
             source_type TEXT NOT NULL DEFAULT 'MOCK',
             model TEXT NOT NULL DEFAULT '',
+            chosen_package TEXT NULL,
+            chosen_package_name TEXT NULL,
+            intended_mega TEXT NULL,
+            selection_reason TEXT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY(session_id) REFERENCES battle_sessions(session_id)
         );
@@ -225,7 +273,7 @@ def migrate(connection: sqlite3.Connection) -> None:
             audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
             job_id TEXT NOT NULL,
             lane TEXT NOT NULL,
-            attempt_ordinal INTEGER NOT NULL CHECK (attempt_ordinal IN (1, 2)),
+            attempt_ordinal INTEGER NOT NULL CHECK (attempt_ordinal >= 1),
             model TEXT NOT NULL,
             outcome TEXT NOT NULL CHECK (outcome IN ('STARTED', 'SUCCEEDED', 'FAILED')),
             reason TEXT NOT NULL DEFAULT '',
@@ -541,6 +589,10 @@ def migrate(connection: sqlite3.Connection) -> None:
         "self_team_build_json",
         "TEXT NULL",
     )
+    _ensure_column(connection, "selection_advices", "chosen_package", "TEXT NULL")
+    _ensure_column(connection, "selection_advices", "chosen_package_name", "TEXT NULL")
+    _ensure_column(connection, "selection_advices", "intended_mega", "TEXT NULL")
+    _ensure_column(connection, "selection_advices", "selection_reason", "TEXT NULL")
     _ensure_column(
         connection,
         "reviewed_selection_facts",
@@ -613,6 +665,16 @@ def migrate(connection: sqlite3.Connection) -> None:
         "TEXT NOT NULL DEFAULT 'maple-turn-advice-response.v1'",
     )
     _ensure_column(connection, "turn_advices", "advice_json", "TEXT NULL")
+    # Tournament Battle Mega: one additive, match-level canonical actual
+    # state. Historical sessions intentionally retain the empty JSON default;
+    # no event is inferred or backfilled from Selection intent or prior rows.
+    _ensure_column(
+        connection,
+        "battle_sessions",
+        "mega_state_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )
+    _widen_selection_provider_attempt_audits(connection)
     _sanitize_async_job_result_payloads(connection)
     connection.execute(
         "UPDATE schema_meta SET schema_version = ? WHERE singleton_id = 1",

@@ -78,7 +78,8 @@ def main(output_directory: Path) -> int:
     )
     window.show()
 
-    window.header_tabs.setCurrentIndex(1)
+    if window.header_tabs.currentIndex() != 1:
+        raise RuntimeError("standard landing did not open Battle Record")
     _capture(app, window, output_directory / "01-battle-no-active-new-match.png")
     if not window.new_match_button.isVisible() or not window.new_match_button.isEnabled():
         raise RuntimeError("NO_ACTIVE_MATCH NEW MATCH is not field-ready")
@@ -103,9 +104,17 @@ def main(output_directory: Path) -> int:
     window._on_apply()  # noqa: SLF001 - explicit fixture confirmation
     window.header_tabs.setCurrentIndex(1)
     _capture(app, window, output_directory / "03-battle-v5-active-no-new-match.png")
+    window.match_win_button.click()
+    _capture(app, window, output_directory / "04-match-end-win-selected.png")
+    window.match_loss_button.click()
+    _capture(app, window, output_directory / "05-match-end-loss-selected.png")
 
     if controller.refresh().session_state != "BATTLE_READY":
         raise RuntimeError("fixture did not reach BATTLE_READY")
+    if not window.match_loss_button.isChecked() or window.match_win_button.isChecked():
+        raise RuntimeError("WIN / LOSS controls are not exclusive")
+    if window.end_match_button.isEnabled():
+        raise RuntimeError("MATCH END enabled without explicit confirmation")
     if window.new_match_button.isEnabled() or window.new_match_after_export_button.isEnabled():
         raise RuntimeError("active match exposes destructive NEW MATCH")
     if repository.count_sessions() != 1:
@@ -115,10 +124,13 @@ def main(output_directory: Path) -> int:
     if capture_backend.start_count != 0:
         raise RuntimeError("capture backend unexpectedly started")
 
-    print("screenshots=3 size=1920x1080 new_match_clicks=1 sessions=1")
+    print("screenshots=5 size=1920x1080 new_match_clicks=1 sessions=1")
     print("no_active_new_match=visible_enabled selection_new_match=absent")
-    print("selection_v3=three_column battle_record_v5=preserved")
-    print("real_provider_network=0 real_capture=0 automatic_new_match=0 game_action=0")
+    print("default_view=battle_record match_end=local win_loss=exclusive")
+    print(
+        "real_provider_network=0 real_capture=0 automatic_new_match=0 "
+        "match_end_send=0 game_action=0"
+    )
     window.close()
     repository.close()
     return 0

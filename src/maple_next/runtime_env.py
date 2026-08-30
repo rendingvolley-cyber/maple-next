@@ -17,12 +17,17 @@ _CURRENT_KEYS = frozenset(
         "MAPLE_NEXT_GEMINI_API_KEY",
         "MAPLE_NEXT_GEMINI_SELECTION_PRIMARY_MODEL",
         "MAPLE_NEXT_GEMINI_SELECTION_FALLBACK_MODEL",
+        "MAPLE_NEXT_GEMINI_SELECTION_MODEL_CHAIN",
         "MAPLE_NEXT_GEMINI_TIMEOUT_SECONDS",
         "MAPLE_NEXT_GEMINI_TURN_AUTHORIZED",
         "MAPLE_NEXT_GEMINI_TURN_MODEL",
+        "MAPLE_NEXT_MATCH_FEEDBACK_GITHUB_ENABLED",
+        "MAPLE_NEXT_MATCH_FEEDBACK_GITHUB_REPO",
+        "MAPLE_NEXT_MATCH_FEEDBACK_GITHUB_BRANCH",
     }
 )
 _LEGACY_SELECTION_KEY = "MAPLE_SELECTION_ADVISOR_API_KEY"
+_LEGACY_SELECTION_MODEL_CHAIN_KEY = "MAPLE_SELECTION_MODEL_CHAIN"
 _LEGACY_TURN_KEY = "MAPLE_TURN_ADVISOR_API_KEY"
 
 
@@ -50,7 +55,11 @@ def _parse_repo_dotenv(path: Path) -> dict[str, str]:
         key = key.strip()
         if not separator or not key:
             continue
-        if key not in _CURRENT_KEYS | {_LEGACY_SELECTION_KEY, _LEGACY_TURN_KEY}:
+        if key not in _CURRENT_KEYS | {
+            _LEGACY_SELECTION_KEY,
+            _LEGACY_SELECTION_MODEL_CHAIN_KEY,
+            _LEGACY_TURN_KEY,
+        }:
             continue
         parsed[key] = _decode_value(raw_value)
     return parsed
@@ -70,6 +79,16 @@ def bootstrap_repo_root_dotenv(repo_root: Path) -> tuple[str, ...]:
 
     values = _parse_repo_dotenv(repo_root.resolve() / ".env")
     loaded: list[str] = []
+
+    current_chain = "MAPLE_NEXT_GEMINI_SELECTION_MODEL_CHAIN"
+    legacy_chain = values.get(_LEGACY_SELECTION_MODEL_CHAIN_KEY, "").strip()
+    if (
+        legacy_chain
+        and not os.environ.get(current_chain, "").strip()
+        and not values.get(current_chain, "").strip()
+    ):
+        os.environ[current_chain] = legacy_chain
+        loaded.append(current_chain)
 
     for key in sorted(_CURRENT_KEYS):
         value = values.get(key, "").strip()

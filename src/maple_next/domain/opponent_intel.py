@@ -245,6 +245,15 @@ class OpponentIntelView:
     observed_moves: tuple[str, ...]
     possible_abilities: tuple[str, ...]
     meta: OpponentMetaSnapshot | None
+    #: True only when ``ability``/``item`` came from a genuine match-bound
+    #: human-confirmed fact (``MatchOpponentFacts``), never from the legal-
+    #: possibility list or population/catalog metadata. A catalog-derived
+    #: value that happens to equal a usage-stats entry must never be
+    #: mistaken for an observed/confirmed fact -- see the "observed" badge
+    #: in the Opponent INTEL bar charts, which reads these flags rather
+    #: than comparing display strings.
+    ability_confirmed: bool = False
+    item_confirmed: bool = False
 
     @property
     def data_status(self) -> str:
@@ -265,9 +274,11 @@ def build_opponent_intel(
         possible = possible_abilities_for_species(species_key)
     except LookupError:
         possible = ()
+    ability_confirmed = bool(match_facts.ability)
     ability = match_facts.ability
     if not ability:
         ability = " / ".join(possible) if possible else "不明"
+    item_confirmed = bool(match_facts.item)
     item = match_facts.item or "不明"
     return OpponentIntelView(
         species=species_key or "不明",
@@ -276,4 +287,6 @@ def build_opponent_intel(
         observed_moves=match_facts.moves,
         possible_abilities=possible,
         meta=meta,
+        ability_confirmed=ability_confirmed,
+        item_confirmed=item_confirmed,
     )

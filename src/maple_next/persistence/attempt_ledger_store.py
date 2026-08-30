@@ -179,7 +179,7 @@ class AttemptLedgerStoreMixin(StoreBase):
         """Move one current Selection reservation to a new explicit-send job.
 
         The caller must establish transient-failure eligibility inside the
-        same ``BEGIN IMMEDIATE`` transaction. Matching ``expected_job_id``
+        same ``BEGIN IMMEDIATE`` transaction.  Matching ``expected_job_id``
         makes a concurrent/double activation a zero-row update.
         """
 

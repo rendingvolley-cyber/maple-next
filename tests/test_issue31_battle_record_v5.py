@@ -163,7 +163,7 @@ def test_fixed_geometry_exact_four_lifecycle_buttons_and_no_legacy_phase(
     assert tuple(button.text() for button in window.lifecycle_buttons) == (
         "Turn撮影",
         "CONFIRM TURN FACTS",
-        "行動・結果記録",
+        "結果記録",
         "NEXT TURN",
     )
     assert "facts/state確定" not in {button.text() for button in window.lifecycle_buttons}
@@ -769,10 +769,13 @@ def test_self_switch_selector_explicitly_reports_empty_legal_targets(
     _advance_to_turn_capture_pending(controller)
     window.render_view()
     _fill_minimal_current_state(window)
-    for checkbox in window.switch_checkboxes:
-        checkbox.setChecked(False)
+    # The Bundle 2 workbench, not the legacy memo checkboxes, is the source
+    # of the exact legal-switch confirmation. Deliberately clear that list
+    # and use the dedicated human "none" action.
+    for index in range(window.legal_switch_list.count()):
+        window.legal_switch_list.item(index).setSelected(False)
     window._on_confirm_turn_facts()  # noqa: SLF001
-    _confirm_legal_switches_honestly(window)
+    window._on_confirm_legal_switches_none()  # noqa: SLF001
     window.mock_turn_action_type_box.setCurrentText("MOVE")
     window.mock_turn_action_name_box.setCurrentText("Flower Trick")
     window.mock_turn_prediction_input.setText("manual test prediction")
@@ -860,6 +863,65 @@ def test_local_meta_cache_and_absent_cache_fail_soft_without_runtime_network(
     assert confirmed.ability == "じしんかじょう"
     assert confirmed.observed_moves == ("まもる",)
     assert confirmed.meta is not None
+    assert meta_only.ability_confirmed is False
+    assert confirmed.ability_confirmed is True
+
+
+def test_ability_and_item_confirmed_flags_reflect_only_match_facts(
+    tmp_path: Path,
+) -> None:
+    """R3R1 BUG 1: ability/item ``_confirmed`` is true only when the value
+    came from a genuine match-bound human-confirmed fact, never from the
+    legal-possibility fallback or population/catalog metadata -- even when
+    the fallback text happens to equal a real usage-stats entry."""
+
+    cache = tmp_path / "meta.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "regulation": "Champions test",
+                "snapshot_date": "2026-08-08",
+                "source": "verified-local-fixture",
+                "species": {
+                    "ボーマンダ": {
+                        "abilities": [{"name": "いかく", "percentage": 100.0}],
+                        "items": [{"name": "こだわりのハチマキ", "percentage": 30.0}],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    provider = LocalJsonOpponentMetaProvider(cache)
+
+    catalog_only = build_opponent_intel(
+        species="ボーマンダ", match_facts=MatchOpponentFacts(), provider=provider
+    )
+    assert catalog_only.ability_confirmed is False
+    assert catalog_only.item_confirmed is False
+    assert catalog_only.item == "不明"
+
+    # Even when the catalog/legal-possibility fallback text happens to
+    # exactly equal a real usage-stats entry name, it must never be marked
+    # confirmed -- the flag is provenance-based, never a string comparison.
+    coincidental = build_opponent_intel(
+        species="ボーマンダ",
+        match_facts=MatchOpponentFacts(),
+        provider=provider,
+    )
+    assert coincidental.ability == catalog_only.ability
+    assert coincidental.ability_confirmed is False
+
+    match_confirmed = build_opponent_intel(
+        species="ボーマンダ",
+        match_facts=MatchOpponentFacts(ability="いかく", item="こだわりのハチマキ"),
+        provider=provider,
+    )
+    assert match_confirmed.ability == "いかく"
+    assert match_confirmed.ability_confirmed is True
+    assert match_confirmed.item == "こだわりのハチマキ"
+    assert match_confirmed.item_confirmed is True
 
 
 def test_intel_meta_is_not_part_of_rich_gemini_contract() -> None:

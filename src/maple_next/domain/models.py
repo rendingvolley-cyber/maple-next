@@ -122,6 +122,10 @@ class SelfTeamPreset:
             payload["members"] = [
                 member.to_canonical_dict() for member in self.team_build.members
             ]
+            if self.team_build.selection_profile is not None:
+                payload["selection_profile"] = (
+                    self.team_build.selection_profile.to_canonical_dict()
+                )
             payload["team_build_sha256"] = self.team_build_sha256
         return payload
 
@@ -138,8 +142,8 @@ class SelfTeamPreset:
             if self.team_build_sha256 is not None:
                 raise ValueError("names-only preset must not have a build hash")
             return
-        if self.build_schema_version != "maple-team.v2":
-            raise ValueError("detailed preset must use maple-team.v2")
+        if self.build_schema_version != self.team_build.schema_version:
+            raise ValueError("detailed preset schema must match team build")
         if self.team_build.pokemon_names != tuple(self.self_team):
             raise ValueError("preset names and build members must match")
         if self.team_build_sha256 != self.team_build.sha256():

@@ -128,6 +128,14 @@ _MESSAGE_LABELS = {
 }
 
 _PLACEHOLDER = "選択してください"
+
+# ``MATCH_EXPORTED`` still owns the durable active-slot row until the operator
+# explicitly starts the next match.  Operationally, however, the preceding
+# match is complete: its canonical JSON exists and no match-time team snapshot
+# can still be changed.  Treat that terminal phase like NO_ACTIVE_MATCH for
+# build preparation, while keeping the existing NEW MATCH transition that
+# archives the predecessor and creates exactly one new session.
+_BUILD_PREPARATION_SESSION_STATES = frozenset({None, "MATCH_EXPORTED"})
 _PREVIEW_DISPLAY_LABEL = "preview表示中"
 _PREVIEW_UNAVAILABLE_LABEL = (
     "previewなし — drawable frameがありません。manual-safe fallback。"
@@ -171,6 +179,7 @@ class MapleMainWindow(QMainWindow):
         self._controller = controller
         self._loaded_team: tuple[str, ...] = ()
         self._staged_self_team_build: ChampionsTeamBuild | None = None
+        self._self_team_draft_display_name: str | None = None
         self._suspend_team_name_binding = False
         self._suspend_move_prefill = False
         self._move_user_edited = [False, False, False, False]
@@ -883,6 +892,8 @@ class MapleMainWindow(QMainWindow):
             [field.text() for field in self.self_team_inputs],
             self._staged_self_team_build,
         )
+        if view.error_message is None:
+            self._self_team_draft_display_name = self.self_team_preset_name.text().strip()
         self._refresh_self_team_presets()
         self.render_view(view)
 
@@ -897,6 +908,7 @@ class MapleMainWindow(QMainWindow):
             self._copy_self_team_to_inputs(preset.self_team)
             self.self_team_preset_name.setText(preset.name)
             self._staged_self_team_build = preset.team_build
+            self._self_team_draft_display_name = preset.name
             self.team_build_status_label.setText(preset.status)
         self.render_view(self._controller.refresh())
 
@@ -1023,8 +1035,16 @@ class MapleMainWindow(QMainWindow):
         self._staged_self_team_build = imported.team_build
         self._controller.stage_self_team_build(imported.team_build)
         self.team_build_status_label.setText(imported.status)
-        if imported.name is not None:
-            self.self_team_preset_name.setText(imported.name)
+        self.self_team_preset_box.blockSignals(True)
+        try:
+            self.self_team_preset_box.setCurrentIndex(0)
+        finally:
+            self.self_team_preset_box.blockSignals(False)
+        self._update_self_team_preset_buttons()
+        self.self_team_preset_name.setText(imported.name or "")
+        self._self_team_draft_display_name = (
+            imported.name or "インポート済み（未保存）"
+        )
         self.error_label.setText("")
         self.error_label.setVisible(False)
         self.render_view()
@@ -1300,8 +1320,10 @@ class MapleMainWindow(QMainWindow):
         self.new_match_button.setVisible(create_new_match)
         self.new_match_button.setEnabled(create_new_match and projection.primary_cta_enabled)
         selection_open = projection.session_state == "SELECTION_OPEN"
-        no_active_match = projection.session_state is None
-        self_team_prep_visible = no_active_match or selection_open
+        build_preparation_phase = (
+            projection.session_state in _BUILD_PREPARATION_SESSION_STATES
+        )
+        self_team_prep_visible = build_preparation_phase or selection_open
         self.self_team_group.setVisible(self_team_prep_visible)
         self.self_team_presets_group.setVisible(self_team_prep_visible)
         self.opponent_facts_group.setVisible(selection_open)
@@ -1315,18 +1337,20 @@ class MapleMainWindow(QMainWindow):
             "MATCH_ENDED",
             "MATCH_EXPORTED",
         }
-        if projection.session_state in battle_record_states:
-            self.header_tabs.setCurrentIndex(1)
-        elif projection.session_state in {
-            "SELECTION_OPEN",
-            "SELECTION_ADVICE_READY",
-            None,
-        }:
-            self.header_tabs.setCurrentIndex(0)
+        if not getattr(self, "_preserve_operator_tab_selection", False):
+            if projection.session_state in battle_record_states:
+                self.header_tabs.setCurrentIndex(1)
+            elif projection.session_state in {
+                "SELECTION_OPEN",
+                "SELECTION_ADVICE_READY",
+                None,
+            }:
+                self.header_tabs.setCurrentIndex(0)
         facts_editable = projection.primary_cta == "CONFIRM_SELECTION_FACTS"
-        # 自分の6体とpresetはNO_ACTIVE_MATCH（対戦準備）とSELECTION_OPEN未確認時に編集可能。
-        # 確定後（facts_editable=False）はmatch-time snapshotを保護するためロックする。
-        self_team_editable = no_active_match or facts_editable
+        # 自分の6体とpresetは対戦準備（NO_ACTIVE_MATCH / MATCH_EXPORTED）と
+        # SELECTION_OPEN未確認時に編集可能。確定後（facts_editable=False）は
+        # match-time snapshotを保護するためロックする。
+        self_team_editable = build_preparation_phase or facts_editable
         self._self_team_editable = self_team_editable
         self.confirm_facts_button.setEnabled(facts_editable)
         for field in self.opponent_team_inputs:
@@ -1354,11 +1378,21 @@ class MapleMainWindow(QMainWindow):
             preset_controls_enabled and preset_selected
         )
 
-        if current.self_team_build is not None:
-            self._staged_self_team_build = current.self_team_build
-        elif projection.current_reviewed_selection_id is not None:
-            self._staged_self_team_build = None
-        self.team_build_status_label.setText(current.self_team_build_status)
+        # While build preparation is editable, the widgets and staged build
+        # are the current pre-match draft.  A terminal MATCH_EXPORTED view
+        # still exposes the preceding match snapshot through ``current``;
+        # copying it back here would silently discard a just-imported draft.
+        if not self_team_editable:
+            if current.self_team_build is not None:
+                self._staged_self_team_build = current.self_team_build
+            elif projection.current_reviewed_selection_id is not None:
+                self._staged_self_team_build = None
+        draft_status = (
+            "DETAILED" if self._staged_self_team_build is not None else "NAMES_ONLY"
+        )
+        self.team_build_status_label.setText(
+            draft_status if self_team_editable else current.self_team_build_status
+        )
 
         if current.self_team and current.self_team != self._loaded_team:
             self._loaded_team = current.self_team
@@ -1379,7 +1413,23 @@ class MapleMainWindow(QMainWindow):
             self._controller.gemini_send_available
             and projection.primary_cta == "REQUEST_SELECTION_ADVICE"
         )
-        resend_eligible = self._controller.gemini_selection_resend_eligible()
+        # A fallback/no-cache view is rendered without durable reads. Do not
+        # ask the controller for resend/attempt state there because those
+        # helpers consult persistence (and minimal view doubles may not expose
+        # them).
+        resend_eligible = False
+        selection_attempt_consumed = True
+        if current.persistence_reads_allowed:
+            resend_checker = getattr(
+                self._controller, "gemini_selection_resend_eligible", None
+            )
+            if callable(resend_checker):
+                resend_eligible = bool(resend_checker())
+            consumed_checker = getattr(
+                self._controller, "gemini_selection_attempt_consumed", None
+            )
+            if callable(consumed_checker):
+                selection_attempt_consumed = bool(consumed_checker())
         self.gemini_send_button.setText(
             "Gemini再送" if resend_eligible else "SEND SELECTION TO GEMINI"
         )
@@ -1388,7 +1438,7 @@ class MapleMainWindow(QMainWindow):
             and projection.primary_cta == "REQUEST_SELECTION_ADVICE"
             and projection.provider_send_enabled
             and (
-                not self._controller.gemini_selection_attempt_consumed()
+                not selection_attempt_consumed
                 or resend_eligible
             )
         )
@@ -1397,6 +1447,10 @@ class MapleMainWindow(QMainWindow):
             self.advice_source_label.setText(current.advice.source_type)
             self.advice_three_label.setText(" / ".join(current.advice.selected_three))
             self.advice_lead_label.setText(current.advice.lead)
+        else:
+            self.advice_source_label.setText("—")
+            self.advice_three_label.setText("—")
+            self.advice_lead_label.setText("—")
         self.actual_group.setVisible(projection.primary_cta == "APPLY_SELECTION")
 
         self.ready_group.setVisible(current.applied_selection is not None)
@@ -1488,6 +1542,23 @@ class MapleMainWindow(QMainWindow):
             self.turn_advice_schema_version_label.setText(
                 current.turn_advice.response_schema_version
             )
+        else:
+            # A new operator identity must not retain any old recommendation
+            # text in widgets that can later be made visible by the new flow.
+            for label in (
+                self.turn_advice_action_label,
+                self.turn_advice_robustness_label,
+                self.turn_advice_prediction_label,
+                self.turn_advice_alternatives_label,
+                self.turn_advice_rationale_label,
+                self.turn_advice_warnings_label,
+                self.turn_advice_source_label,
+                self.turn_advice_model_label,
+                self.turn_advice_binding_label,
+                self.turn_advice_legality_label,
+                self.turn_advice_schema_version_label,
+            ):
+                label.setText("—")
 
         self.actual_action_group.setVisible(
             projection.primary_cta == "RECORD_ACTUAL_ACTION"
@@ -1789,7 +1860,10 @@ class MapleMainWindow(QMainWindow):
     def _on_trusted_send_to_gemini(self) -> None:
         if not self._mutation_slots_allowed():
             return
-        view = self._controller.send_selection_advice_to_gemini(on_result=self.render_view)
+        view = self._controller.send_selection_advice_to_gemini(
+            on_result=self.render_view,
+            on_progress=self.render_view,
+        )
         self.render_view(view)
 
     def _on_apply(self, _checked: bool = False) -> None:

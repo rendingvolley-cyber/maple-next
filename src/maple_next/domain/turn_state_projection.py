@@ -37,7 +37,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from maple_next.domain.legal_switches import LegalSwitchConfirmation
+from maple_next.domain.enums import ActionType
+from maple_next.domain.legal_switches import LegalSwitchConfirmation, LegalSwitchStatus
 from maple_next.domain.turn_state import (
     ConfirmationMeta,
     ConfirmedLegalActionSelection,
@@ -175,6 +176,9 @@ class GateDenialReason(StrEnum):
     LEGAL_ACTIONS_EMPTY = "LEGAL_ACTIONS_EMPTY"
     LEGAL_ACTIONS_NOT_CONFIRMED = "LEGAL_ACTIONS_NOT_CONFIRMED"
     LEGAL_ACTIONS_IDENTITY_MISMATCH = "LEGAL_ACTIONS_IDENTITY_MISMATCH"
+    LEGAL_SWITCH_ACTIONS_MISMATCH_CONFIRMATION = (
+        "LEGAL_SWITCH_ACTIONS_MISMATCH_CONFIRMATION"
+    )
     #: Bundle 2 (Gemini V2): no matching LegalSwitchConfirmation exists for
     #: this exact binding -- the historical ``legal_switches = []`` defect's
     #: fix. Fires for a genuinely never-addressed switch state just as much
@@ -194,6 +198,18 @@ class GateDenialReason(StrEnum):
     LEGAL_SWITCHES_MEMBER_OUTSIDE_SELECTED_THREE = "LEGAL_SWITCHES_MEMBER_OUTSIDE_SELECTED_THREE"
     LEGAL_SWITCHES_MEMBER_IS_ACTIVE = "LEGAL_SWITCHES_MEMBER_IS_ACTIVE"
     LEGAL_SWITCHES_MEMBER_CONFIRMED_FAINTED = "LEGAL_SWITCHES_MEMBER_CONFIRMED_FAINTED"
+    #: Tournament-week hotfix: a bound-and-current ``CONFIRMED_NONE`` is
+    #: never trusted at face value either -- it is independently checked
+    #: against the same ``selected_three``/active/``confirmed_fainted_
+    #: members`` derivation as every other confirmation. If that derivation
+    #: shows at least one real (non-active, non-fainted) backline member,
+    #: an empty confirmed set contradicts canonical fact and must never
+    #: reach the provider; the gate fails closed and the operator must
+    #: resolve the contradiction (re-derive/re-confirm) rather than have it
+    #: silently sent as "no legal switches" to Gemini.
+    LEGAL_SWITCHES_CONFIRMED_NONE_CONTRADICTS_DERIVATION = (
+        "LEGAL_SWITCHES_CONFIRMED_NONE_CONTRADICTS_DERIVATION"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,6 +341,28 @@ def evaluate_provider_ready_gate(
         if legal_switch_confirmation.based_on_confirmed_state_id != latest_confirmed_state_id:
             reasons.append(GateDenialReason.LEGAL_SWITCHES_STALE_BINDING)
 
+        # The provider-bound legal action list and the separately persisted
+        # exact-binding switch confirmation are two views of one human fact.
+        # They must agree before a request can be built; otherwise a
+        # moves-only request could hide confirmed switch options from the
+        # provider and make a legal SWITCH recommendation impossible.
+        confirmed_switch_action_names = frozenset(
+            selection.action_name
+            for selection in confirmed_legal_actions
+            if (
+                isinstance(selection, ConfirmedLegalActionSelection)
+                and selection.action_type is ActionType.SWITCH
+            )
+        )
+        confirmed_switch_names = frozenset(legal_switch_confirmation.legal_switches)
+        switch_sets_match = (
+            confirmed_switch_action_names == confirmed_switch_names
+            if legal_switch_confirmation.status is LegalSwitchStatus.CONFIRMED_NONEMPTY
+            else not confirmed_switch_action_names
+        )
+        if not switch_sets_match:
+            reasons.append(GateDenialReason.LEGAL_SWITCH_ACTIONS_MISMATCH_CONFIRMATION)
+
     # R3-C defense-in-depth: independently re-derive contextual legality --
     # never trust a bound-and-current confirmation's stored contents alone.
     if selected_three is None:
@@ -341,6 +379,17 @@ def evaluate_provider_ready_gate(
                 reasons.append(GateDenialReason.LEGAL_SWITCHES_MEMBER_IS_ACTIVE)
             if any(name in confirmed_fainted_members for name in members):
                 reasons.append(GateDenialReason.LEGAL_SWITCHES_MEMBER_CONFIRMED_FAINTED)
+            if (
+                legal_switch_confirmation.status is LegalSwitchStatus.CONFIRMED_NONE
+                and active_name is not None
+                and any(
+                    name != active_name and name not in confirmed_fainted_members
+                    for name in selected_three
+                )
+            ):
+                reasons.append(
+                    GateDenialReason.LEGAL_SWITCHES_CONFIRMED_NONE_CONTRADICTS_DERIVATION
+                )
 
     return ProviderReadyGateResult(allowed=not reasons, denial_reasons=tuple(reasons))
 

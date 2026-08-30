@@ -22,7 +22,10 @@ from maple_next.providers.transport import (
     SanitizedProviderResult,
 )
 from maple_next.ui.dev_advice import MockSelectionAdviceAdapter
-from maple_next.ui.gemini_advice import GeminiSelectionAdviceAdapter
+from maple_next.ui.gemini_advice import (
+    GeminiSelectionAdviceAdapter,
+    is_selection_fallback_eligible,
+)
 from maple_next.ui.match_controller import MatchFlowController
 from maple_next.ui.match_window import MatchFlowWindow
 from maple_next.workers.contracts.models import JobEnvelope, ResultEnvelope
@@ -443,8 +446,9 @@ def test_failure_display_is_sanitized_and_secret_never_persisted(
     reason: str,
     expected: str,
 ) -> None:
+    expected_attempts = 2 if is_selection_fallback_eligible(reason) else 1
     transport = FakeSelectionAdviceTransport(
-        responses=[ProviderTransportError(reason)]
+        responses=[ProviderTransportError(reason) for _ in range(expected_attempts)]
     )
     repository, _application, adapter, controller = build_controller(tmp_path, transport)
     ready_selection(controller)
@@ -457,8 +461,8 @@ def test_failure_display_is_sanitized_and_secret_never_persisted(
     assert status.status == "FAILED"
     assert status.sanitized_failure == expected
     assert status.can_apply is False
-    assert adapter.dispatch_count == 1
-    assert transport.call_count == 1
+    assert adapter.dispatch_count == expected_attempts
+    assert transport.call_count == expected_attempts
     if reason != expected:
         assert reason not in database_dump
         error_message = controller.refresh().error_message

@@ -15,6 +15,7 @@ from maple_next.domain.team_build import ChampionsTeamBuild
 MAX_TEAM_IMPORT_BYTES = 64 * 1024
 TEAM_SCHEMA_V1 = "maple-team.v1"
 TEAM_SCHEMA_V2 = "maple-team.v2"
+TEAM_SCHEMA_V3 = "maple-team.v3"
 
 
 class TeamImportError(ValueError):
@@ -37,7 +38,7 @@ class ImportedTeam:
 
     @property
     def build_schema_version(self) -> str:
-        return TEAM_SCHEMA_V2 if self.team_build is not None else TEAM_SCHEMA_V1
+        return self.team_build.schema_version if self.team_build is not None else TEAM_SCHEMA_V1
 
 
 def read_team_import(path: str | Path) -> ImportedTeam:
@@ -64,7 +65,7 @@ def read_team_import(path: str | Path) -> ImportedTeam:
 
 
 def parse_team_import(text: str) -> ImportedTeam:
-    """Parse Maple v1/v2 JSON or six-name text."""
+    """Parse Maple v1/v2/v3 JSON or six-name text."""
 
     if not text.strip():
         raise TeamImportError("team file is empty")
@@ -82,16 +83,18 @@ def parse_team_import(text: str) -> ImportedTeam:
         raise TeamImportError("Maple JSON はオブジェクトで指定してください")
 
     schema_version = payload.get("schema_version")
-    if schema_version == TEAM_SCHEMA_V2:
+    if schema_version in {TEAM_SCHEMA_V2, TEAM_SCHEMA_V3}:
         expected = {"schema_version", "game", "name", "battle_format", "members"}
+        if schema_version == TEAM_SCHEMA_V3:
+            expected.add("selection_profile")
         if set(payload) != expected:
             # This also rejects tera_type/tera/terastal and any future
             # unreviewed field before it can enter a canonical build.
-            raise TeamImportError("Maple JSON v2 fields are invalid")
+            raise TeamImportError("Maple detailed JSON fields are invalid")
         try:
             build = ChampionsTeamBuild.from_dict(payload)
         except (TypeError, ValueError, KeyError, RecursionError) as exc:
-            raise TeamImportError("Maple JSON v2 build is invalid") from exc
+            raise TeamImportError("Maple detailed build is invalid") from exc
         return ImportedTeam(
             pokemon=build.pokemon_names,
             name=build.name,

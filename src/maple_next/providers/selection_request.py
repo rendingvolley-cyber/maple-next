@@ -14,13 +14,17 @@ import json
 from dataclasses import dataclass
 from typing import Any, Final
 
-from maple_next.domain.team_build import ChampionsTeamBuild
+from maple_next.domain.team_build import ChampionsTeamBuild, TeamSelectionProfile
 
 CONTRACT_VERSION_V1: Final[str] = "maple-selection-advice.v1"
 CONTRACT_VERSION_V2: Final[str] = "maple-selection-advice.v2"
+CONTRACT_VERSION_V3: Final[str] = "maple-selection-advice.v3"
 SELECTION_ADVICE_CONTRACT_VERSION_V1: Final[str] = CONTRACT_VERSION_V1
 SELECTION_ADVICE_CONTRACT_VERSION_V2: Final[str] = CONTRACT_VERSION_V2
+SELECTION_ADVICE_CONTRACT_VERSION_V3: Final[str] = CONTRACT_VERSION_V3
+SELECTION_PROMPT_VERSION_V1: Final[str] = "maple-selection-prompt.v1"
 SELECTION_PROMPT_VERSION: Final[str] = "maple-selection-prompt.v2"
+SELECTION_PROMPT_VERSION_V2: Final[str] = SELECTION_PROMPT_VERSION
 
 #: Fixed and deterministic. Never derived from a live provider schema.
 REQUESTED_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
@@ -35,6 +39,30 @@ REQUESTED_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
         "lead": {"type": "string"},
     },
     "required": ["selected_three", "lead"],
+    "additionalProperties": False,
+}
+
+REQUESTED_OUTPUT_SCHEMA_V3: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "chosen_package": {"type": "string"},
+        "selected_three": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 3,
+            "maxItems": 3,
+        },
+        "lead": {"type": "string"},
+        "intended_mega": {"type": ["string", "null"]},
+        "selection_reason": {"type": "string", "minLength": 1, "maxLength": 500},
+    },
+    "required": [
+        "chosen_package",
+        "selected_three",
+        "lead",
+        "intended_mega",
+        "selection_reason",
+    ],
     "additionalProperties": False,
 }
 
@@ -98,6 +126,31 @@ Return strict JSON only. Do not add explanations, confidence, roles,
 alternative teams, markdown, or additional fields."""
 )
 
+_FIXED_PACKAGE_SELECTION_PROMPT: Final[str] = (
+    """You are assisting a human Pokémon Champions player during Team Selection
+for one SINGLE_3 official match.
+
+The request contains canonical facts confirmed by Maple, including the full
+self_team_build and its human-authored selection_profile.
+The human-authored Selection Profile is authoritative.
+Its mode is fixed_packages and mixing_allowed is false.
+
+You must choose exactly ONE defined package. Do not mix Pokémon between packages.
+Compare the defined packages against all six confirmed opponent Pokémon. You are
+choosing only (1) which package and (2) which member of that package should lead.
+The package members and intended Mega are fixed by the human-authored build.
+
+Use the confirmed self build information: moves, held items, abilities, natures,
+and stat points. You may use general Pokémon Champions knowledge for confirmed
+opponent names, but do not invent unconfirmed opponent moves, items, abilities,
+natures, stat allocations, or roles as facts.
+
+Copy chosen_package, selected_three, and intended_mega exactly from one package.
+lead must be one member of that package. selection_reason must be concise.
+Follow requested_output_schema exactly. Return strict JSON only, with no markdown
+or additional fields."""
+)
+
 
 @dataclass(frozen=True, slots=True)
 class SelectionAdviceRequest:
@@ -115,6 +168,7 @@ class SelectionAdviceRequest:
     contract_version: str = CONTRACT_VERSION_V1
     self_team_build: ChampionsTeamBuild | None = None
     self_team_build_sha256: str | None = None
+    selection_profile: TeamSelectionProfile | None = None
 
     def __post_init__(self) -> None:
         if self.job_type != "SELECTION_ADVICE":
@@ -128,13 +182,25 @@ class SelectionAdviceRequest:
                 raise ValueError("names-only selection request must not have a build hash")
             if self.contract_version != CONTRACT_VERSION_V1:
                 raise ValueError("names-only selection request must use v1")
+            if self.selection_profile is not None:
+                raise ValueError("names-only selection request must not have a profile")
         else:
-            if self.contract_version != CONTRACT_VERSION_V2:
-                raise ValueError("detailed selection request must use v2")
             if self.self_team_build.pokemon_names != tuple(self.self_team):
                 raise ValueError("selection build names must match self_team")
             if self.self_team_build_sha256 != self.self_team_build.sha256():
                 raise ValueError("selection build hash does not match build")
+            if self.self_team_build.selection_profile is None:
+                if self.contract_version != CONTRACT_VERSION_V2:
+                    raise ValueError("legacy detailed selection request must use v2")
+                if self.selection_profile is not None:
+                    raise ValueError("v2 selection request must not have a profile")
+            else:
+                if self.contract_version != CONTRACT_VERSION_V3:
+                    raise ValueError("profile selection request must use v3")
+                if self.selection_profile != self.self_team_build.selection_profile:
+                    raise ValueError("selection profile must match the bound build")
+                if self.requested_output_schema != REQUESTED_OUTPUT_SCHEMA_V3:
+                    raise ValueError("profile selection request must use v3 response schema")
 
     @property
     def request_version(self) -> str:
@@ -168,15 +234,26 @@ def build_selection_advice_request(
         reviewed_selection_id=reviewed_selection_id,
         self_team=tuple(self_team),
         opponent_team=tuple(opponent_team),
-        requested_output_schema=REQUESTED_OUTPUT_SCHEMA,
+        requested_output_schema=(
+            REQUESTED_OUTPUT_SCHEMA_V3
+            if self_team_build is not None
+            and self_team_build.selection_profile is not None
+            else REQUESTED_OUTPUT_SCHEMA
+        ),
         contract_version=(
-            CONTRACT_VERSION_V2
+            CONTRACT_VERSION_V3
+            if self_team_build is not None
+            and self_team_build.selection_profile is not None
+            else CONTRACT_VERSION_V2
             if self_team_build is not None
             else CONTRACT_VERSION_V1
         ),
         self_team_build=self_team_build,
         self_team_build_sha256=(
             self_team_build.sha256() if self_team_build is not None else None
+        ),
+        selection_profile=(
+            self_team_build.selection_profile if self_team_build is not None else None
         ),
     )
 
@@ -199,6 +276,8 @@ def canonical_request_dict(request: SelectionAdviceRequest) -> dict[str, Any]:
         payload["contract_version"] = request.contract_version
         payload["self_team_build"] = request.self_team_build.to_canonical_dict()
         payload["self_team_build_sha256"] = request.self_team_build_sha256
+    if request.selection_profile is not None:
+        payload["selection_profile"] = request.selection_profile.to_canonical_dict()
     return payload
 
 
@@ -226,7 +305,12 @@ def build_provider_prompt(request: SelectionAdviceRequest) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-    return f"{_SELECTION_INITIAL_PROMPT}\n\nCanonical request:\n{canonical}"
+    prompt = (
+        _FIXED_PACKAGE_SELECTION_PROMPT
+        if request.selection_profile is not None
+        else _SELECTION_INITIAL_PROMPT
+    )
+    return f"{prompt}\n\nCanonical request:\n{canonical}"
 
 
 def build_provider_request_body(request: SelectionAdviceRequest) -> dict[str, Any]:

@@ -27,12 +27,15 @@ from maple_next.domain.team_build import (
     CHAMPIONS_BATTLE_FORMAT,
     CHAMPIONS_GAME,
     CHAMPIONS_SCHEMA_VERSION,
+    CHAMPIONS_SCHEMA_VERSION_V2,
+    CHAMPIONS_SCHEMA_VERSION_V3,
     CHAMPIONS_STAT_NAMES,
     CHAMPIONS_STAT_POINT_PER_STAT_MAX,
     CHAMPIONS_STAT_POINT_TOTAL_MAX,
     ChampionsPokemonBuild,
     ChampionsStatPoints,
     ChampionsTeamBuild,
+    TeamSelectionProfile,
 )
 
 
@@ -135,6 +138,8 @@ class ChampionsTeamBuildEditor(QDialog):
         self.resize(1000, 800)
         self.persistence_reads_allowed = persistence_reads_allowed
         self._staged_build: ChampionsTeamBuild | None = None
+        self._draft_schema_version = CHAMPIONS_SCHEMA_VERSION
+        self._selection_profile: TeamSelectionProfile | None = None
         self._last_error: str | None = None
         self.member_panels: list[_MemberPanel] = []
         self.panels = self.member_panels
@@ -216,8 +221,13 @@ class ChampionsTeamBuildEditor(QDialog):
         self._update_save_enabled()
 
     def set_build(self, build: ChampionsTeamBuild) -> None:
-        if build.schema_version != CHAMPIONS_SCHEMA_VERSION:
+        if build.schema_version not in {
+            CHAMPIONS_SCHEMA_VERSION_V2,
+            CHAMPIONS_SCHEMA_VERSION_V3,
+        }:
             raise ValueError("unsupported team build schema")
+        self._draft_schema_version = build.schema_version
+        self._selection_profile = build.selection_profile
         for panel, member in zip(self.member_panels, build.members, strict=True):
             panel.set_build(member)
         self._update_save_enabled()
@@ -226,11 +236,12 @@ class ChampionsTeamBuildEditor(QDialog):
         members = tuple(panel.read_build() for panel in self.member_panels)
         name = self.team_name_input.text().strip() or "Pokemon Champions team"
         return ChampionsTeamBuild(
-            schema_version=CHAMPIONS_SCHEMA_VERSION,
+            schema_version=self._draft_schema_version,
             game=CHAMPIONS_GAME,
             name=name,
             battle_format=CHAMPIONS_BATTLE_FORMAT,
             members=members,
+            selection_profile=self._selection_profile,
         )
 
     def collect_build(self) -> ChampionsTeamBuild:

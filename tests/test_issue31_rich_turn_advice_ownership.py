@@ -65,6 +65,13 @@ class _ApplicationStub:
         self.dispatched = False
         self.applied = False
 
+    def projection(self) -> object:
+        return SimpleNamespace(
+            session_id=self.job.session_id,
+            match_id=self.job.match_id,
+            generation=self.job.generation,
+        )
+
     def request_rich_turn_advice(self, command_id: str) -> object:
         assert command_id.startswith("gemini-rich-turn-ui-")
         return self.job

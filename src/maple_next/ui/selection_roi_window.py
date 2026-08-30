@@ -734,8 +734,8 @@ class SelectionRoiMatchFlowWindow(MatchFlowWindow):
             bundle=bundle,
             bundle_identity=bundle_identity,
         )
-        # Reuse the accepted trusted-send/controller/provider path. No retry,
-        # fallback beyond its existing bounded policy, APPLY, or game action is
+        # Reuse the accepted trusted-send/controller/provider path. Its bounded
+        # cascade remains inside this one activation; no APPLY or game action is
         # introduced here.
         super()._on_trusted_send_to_gemini()
         self.render_view(self._controller.refresh())
